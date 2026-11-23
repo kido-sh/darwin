@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key><string>PDEcamPCI</string>
-  <key>CFBundleIdentifier</key><string>org.puredarwin.driver.PDEcamPCI</string>
+  <key>CFBundleIdentifier</key><string>sh.kido.driver.PDEcamPCI</string>
   <key>CFBundleName</key><string>PureDarwin ECAM PCI host bridge</string>
   <key>CFBundlePackageType</key><string>KEXT</string>
   <key>CFBundleVersion</key><string>1.0</string>
@@ -11,7 +11,7 @@
   <dict>
     <key>PDEcamPCI</key>
     <dict>
-      <key>CFBundleIdentifier</key><string>org.puredarwin.driver.PDEcamPCI</string>
+      <key>CFBundleIdentifier</key><string>sh.kido.driver.PDEcamPCI</string>
       <key>IOClass</key><string>PDEcamPCI</string>
       <key>IONameMatch</key><string>pci-host-ecam-generic</string>
       <key>IOProviderClass</key><string>IOPlatformDevice</string>
@@ -19,7 +19,7 @@
     </dict>
     <key>PDDesignWarePCI</key>
     <dict>
-      <key>CFBundleIdentifier</key><string>org.puredarwin.driver.PDEcamPCI</string>
+      <key>CFBundleIdentifier</key><string>sh.kido.driver.PDEcamPCI</string>
       <key>IOClass</key><string>PDDesignWarePCI</string>
       <key>IONameMatch</key><string>qcom,pcie-sc8280xp</string>
       <key>IOProviderClass</key><string>IOPlatformDevice</string>

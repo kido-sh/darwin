@@ -3,7 +3,7 @@
 # source exists for this device class). Polling-only, matching PDE1000's
 # shape: no MSI-X/interrupts, RX is timer-polled.
 add_kext_bundle(IOVirtIONet.kext INFO_PLIST Info.plist KERNEL_PRIVATE
-    BUNDLE_IDENTIFIER org.puredarwin.driver.IOVirtIONet BUNDLE_VERSION 1.0.0)
+    BUNDLE_IDENTIFIER sh.kido.driver.IOVirtIONet BUNDLE_VERSION 1.0.0)
 set_property(TARGET IOVirtIONet.kext PROPERTY OUTPUT_NAME IOVirtIONet)
 
 target_sources(IOVirtIONet.kext PRIVATE

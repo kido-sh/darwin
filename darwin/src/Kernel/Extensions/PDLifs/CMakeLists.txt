@@ -1,6 +1,6 @@
 # FSKit's kernel half (lifs) as fskitd and FSKit extensions open it, without the LiveFS VFS
 add_kext_bundle(PDLifs.kext INFO_PLIST Info.plist KERNEL_PRIVATE
-    BUNDLE_IDENTIFIER org.puredarwin.filesystems.PDLifs BUNDLE_VERSION 1.0.0)
+    BUNDLE_IDENTIFIER sh.kido.filesystems.PDLifs BUNDLE_VERSION 1.0.0)
 set_property(TARGET PDLifs.kext PROPERTY OUTPUT_NAME PDLifs)
 
 target_sources(PDLifs.kext PRIVATE

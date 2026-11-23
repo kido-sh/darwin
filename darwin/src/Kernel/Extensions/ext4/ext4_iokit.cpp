@@ -16,19 +16,19 @@ extern "C" {
     int ext4_vfs_unregister(void);
 }
 
-class org_puredarwin_filesystems_ext4 : public IOService
+class sh_kido_filesystems_ext4 : public IOService
 {
-    OSDeclareDefaultStructors(org_puredarwin_filesystems_ext4)
+    OSDeclareDefaultStructors(sh_kido_filesystems_ext4)
 public:
     virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
     virtual void stop(IOService *provider) APPLE_KEXT_OVERRIDE;
 };
 
 #define super IOService
-OSDefineMetaClassAndStructors(org_puredarwin_filesystems_ext4, IOService)
+OSDefineMetaClassAndStructors(sh_kido_filesystems_ext4, IOService)
 
 bool
-org_puredarwin_filesystems_ext4::start(IOService *provider)
+sh_kido_filesystems_ext4::start(IOService *provider)
 {
     if (!super::start(provider))
         return false;
@@ -39,7 +39,7 @@ org_puredarwin_filesystems_ext4::start(IOService *provider)
 }
 
 void
-org_puredarwin_filesystems_ext4::stop(IOService *provider)
+sh_kido_filesystems_ext4::stop(IOService *provider)
 {
     ext4_vfs_unregister();
     super::stop(provider);

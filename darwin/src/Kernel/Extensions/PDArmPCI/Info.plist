@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key><string>PDArmPCI</string>
-  <key>CFBundleIdentifier</key><string>org.puredarwin.driver.PDArmPCI</string>
+  <key>CFBundleIdentifier</key><string>sh.kido.driver.PDArmPCI</string>
   <key>CFBundleName</key><string>PureDarwin ARM PCI</string>
   <key>CFBundlePackageType</key><string>KEXT</string>
   <key>CFBundleVersion</key><string>1.0</string>
@@ -11,7 +11,7 @@
   <dict>
     <key>PDArmPCI</key>
     <dict>
-      <key>CFBundleIdentifier</key><string>org.puredarwin.driver.PDArmPCI</string>
+      <key>CFBundleIdentifier</key><string>sh.kido.driver.PDArmPCI</string>
       <key>IOClass</key><string>PDArmPCI</string>
       <key>IONameMatch</key><string>pci-host-ecam-generic</string>
       <key>IOProviderClass</key><string>IOPlatformDevice</string>

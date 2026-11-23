@@ -1,6 +1,6 @@
 # Stand-in for the AppleKeyStore service keychain daemons open
 add_kext_bundle(PDKeyStore.kext INFO_PLIST Info.plist KERNEL_PRIVATE
-    BUNDLE_IDENTIFIER org.puredarwin.driver.PDKeyStore BUNDLE_VERSION 1.0.0)
+    BUNDLE_IDENTIFIER sh.kido.driver.PDKeyStore BUNDLE_VERSION 1.0.0)
 set_property(TARGET PDKeyStore.kext PROPERTY OUTPUT_NAME PDKeyStore)
 
 target_sources(PDKeyStore.kext PRIVATE
