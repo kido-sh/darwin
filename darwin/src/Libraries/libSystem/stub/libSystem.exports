@@ -2607,3 +2607,5 @@ _getattrlistbulk
 _getitimer
 _preadv
 _pwritev
+# libsystem_trace: what Apple's git imports
+__os_log_send_and_compose_impl

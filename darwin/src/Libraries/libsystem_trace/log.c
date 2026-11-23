@@ -1030,6 +1030,49 @@ void __os_log_impl(void* dso,
 }
 
 /*
+ * What macOS's crash-message macros call (Apple's git, for one): send the message when flags has
+ * 0x1 and, with 0x2, compose it into buf, or into a malloc'd buffer the caller frees when it does
+ * not fit. *format_out gets the format, the part of the message a crash report keeps.
+ */
+char* _os_log_send_and_compose_impl(uint32_t flags,
+    const char** format_out,
+    char* buf,
+    size_t buf_size,
+    void* dso,
+    os_log_t log,
+    os_log_type_t type,
+    const char* format,
+    uint8_t* buffer,
+    uint32_t buffer_size)
+{
+    struct pd_os_log_args args;
+    char* composed = NULL;
+    int saved_errno = errno;
+    size_t len;
+
+    if (format_out != NULL)
+        *format_out = format;
+    if (flags & 0x1)
+        __os_log_impl(dso, log, type, format, buffer, buffer_size);
+    if ((flags & 0x2) && format != NULL) {
+        if (buf == NULL)
+            buf_size = 0;
+        pd_os_log_packed(&args, buffer, buffer_size, saved_errno);
+        len = pd_os_log_render(buf, buf_size, format, &args, PD_OS_LOG_REDACTED);
+        if (len < buf_size) {
+            composed = buf;
+        } else if ((composed = malloc(len + 1)) != NULL) {
+            pd_os_log_packed(&args, buffer, buffer_size, saved_errno);
+            pd_os_log_render(composed, len + 1, format, &args, PD_OS_LOG_REDACTED);
+        } else if (buf_size > 0) {
+            composed = buf;
+        }
+    }
+    errno = saved_errno;
+    return composed;
+}
+
+/*
  * The symbols <os/log.h>'s os_log_debug()/os_log_error() macros actually emit
  * carry a single leading underscore; the double-underscore variants below are
  * the ones this file already provided. Both spellings appear in the wild
