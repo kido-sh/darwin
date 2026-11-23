@@ -377,7 +377,7 @@ let
   userlandArm64Build = mkPureDarwinBuild {
     pname = "kido-userland";
     src = userlandSource;
-    buildTargets = [ "sw_vers" "doubleagentd" "ps" "killall" "pkill" "mkfile" "sync" "sysctl" "vm_stat" "hostinfo" "dmesg" "purge" "reboot" "halt" "poweroff" "shutdown" "netsetup" "ping" "mount" "umount" "ext4tool" "ext4_util" "mdnsd" "pd-dmesg-save" "sh" "gpt" ]
+    buildTargets = [ "sw_vers" "doubleagentd" "ps" "killall" "pkill" "mkfile" "sync" "sysctl" "vm_stat" "hostinfo" "dmesg" "purge" "reboot" "halt" "poweroff" "shutdown" "netsetup" "ping" "mount" "umount" "ext4tool" "ext4_util" "mdnsd" "kido-dmesg-save" "sh" "gpt" ]
       # shell_cmds (+ tsort/uuencode/uudecode)
       ++ [ "basename" "chown" "dirname" "echo" "false" "getopt" "hostname" "jot" "kill" "logname" "mktemp" "nice" "nohup" "passwd" "printenv" "pwd" "renice" "seq" "shlock" "sleep" "tee" "test_cmd" "true" "tsort" "uname" "yes" "uuencode" "uudecode" ]
       # text_cmds

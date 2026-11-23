@@ -56,7 +56,7 @@ let
   containerBaseSystemArm64 = pkgs.runCommand "kido-basesystem-arm64-virt-container-0.1" { } ''
     cp -a ${splitBaseSystemArm64VirtMinimalRelease} $out
     chmod -R u+w $out
-    rm $out/System/Library/LaunchDaemons/org.puredarwin.console-login.plist $out/usr/libexec/pd-console-login
+    rm $out/System/Library/LaunchDaemons/sh.kido.console-login.plist $out/usr/libexec/kido-console-login
     # libSystem's build-time staging for launchd and launchctl: XPC headers and static archives
     rm -r $out/pd-xpc-dev
   '';

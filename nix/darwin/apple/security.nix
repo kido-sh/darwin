@@ -26,7 +26,7 @@ in
 (mkPureDarwinBuild {
   inherit pname src;
   version = "59754.120.12";
-  buildTargets = [ "Security" "trustd" "pdtlscheck" ];
+  buildTargets = [ "Security" "trustd" "kido-tlscheck" ];
   ninjaFlags = [ "-k" "0" ];
   enableProjects = false;
   enableKernel = false;
@@ -51,9 +51,9 @@ in
     cp build-nix/src/Libraries/Security/libSecurity.dylib \
       "$fw/Versions/A/Security"
 
-    # trustd serves trust evaluation, pdtlscheck tests it
+    # trustd serves trust evaluation, kido-tlscheck tests it
     install -Dm755 build-nix/src/Libraries/Security/trustd "$out/usr/libexec/trustd"
-    install -Dm755 build-nix/src/Libraries/Security/pdtlscheck "$out/usr/bin/pdtlscheck"
+    install -Dm755 build-nix/src/Libraries/Security/kido-tlscheck "$out/usr/bin/kido-tlscheck"
     # Apple's own launchd job for the system trustd, the per-user agent waits for LaunchAgents
     install -Dm644 src/Libraries/Security/apple/trust/trustd/macOS/com.apple.trustd.plist \
       "$out/System/Library/LaunchDaemons/com.apple.trustd.plist"

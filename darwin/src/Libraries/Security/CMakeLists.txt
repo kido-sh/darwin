@@ -346,7 +346,7 @@ target_link_libraries(libtrustd PRIVATE
     libc_features pthread_common_headers)
 add_dependencies(libtrustd libc_features)
 
-# trustd, the daemon serving libtrustd to SecTrust over XPC, and pdtlscheck, which tests TLS trust
+# trustd, the daemon serving libtrustd to SecTrust over XPC, and kido-tlscheck, which tests TLS trust
 # against it, or in its own process with -i
 function(pd_trust_executable name)
     add_darwin_executable(${name} MACOSX_VERSION_MIN 26.5)
@@ -392,9 +392,9 @@ pd_trust_executable(trustd
     # the IPC server's helpers trustd shares with securityd: entitlements of the calling task, localization off
     ${_sec}/OSX/sec/ipc/server_entitlement_helpers.c
     ${_sec}/OSX/sec/ipc/util.m)
-pd_trust_executable(pdtlscheck tools/pdtlscheck.c)
+pd_trust_executable(kido-tlscheck tools/kido-tlscheck.c)
 # until libsandbox compiles com.apple.trustd.sb, trustd skips its own sandbox_init
 target_compile_definitions(trustd PRIVATE PUREDARWIN_TRUSTD_UNSANDBOXED=1)
 
 install(TARGETS trustd DESTINATION usr/libexec COMPONENT BaseSystem)
-install(TARGETS pdtlscheck DESTINATION usr/bin COMPONENT BaseSystem)
+install(TARGETS kido-tlscheck DESTINATION usr/bin COMPONENT BaseSystem)

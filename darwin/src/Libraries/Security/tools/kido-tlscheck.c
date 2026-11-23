@@ -1,4 +1,4 @@
-// pdtlscheck - connect to a TLS server and judge its certificate as SecTrust does
+// kido-tlscheck - connect to a TLS server and judge its certificate as SecTrust does
 // Copyright (c) 2026 The PureDarwin Project, SPDX-License-Identifier: MPL-2.0 OR BSD-2-Clause
 
 // the handshake breaks on server authentication as Qt does, then prints the verdict, protocol, cipher
@@ -153,7 +153,7 @@ static int connectTo(const char *host, const char *port)
     int fd = -1, error = getaddrinfo(host, port, &hints, &list);
 
     if (error) {
-        fprintf(stderr, "pdtlscheck: %s: %s\n", host, gai_strerror(error));
+        fprintf(stderr, "kido-tlscheck: %s: %s\n", host, gai_strerror(error));
         return -1;
     }
     for (ai = list; ai; ai = ai->ai_next) {
@@ -166,7 +166,7 @@ static int connectTo(const char *host, const char *port)
     }
     freeaddrinfo(list);
     if (fd < 0)
-        fprintf(stderr, "pdtlscheck: cannot connect to %s:%s\n", host, port);
+        fprintf(stderr, "kido-tlscheck: cannot connect to %s:%s\n", host, port);
     return fd;
 }
 
@@ -192,7 +192,7 @@ int main(int argc, char *argv[])
     int fd, trusted = 0;
 
     if (host == NULL) {
-        fprintf(stderr, "usage: pdtlscheck [-i] host [port]\n");
+        fprintf(stderr, "usage: kido-tlscheck [-i] host [port]\n");
         return 2;
     }
     if (inProcess)

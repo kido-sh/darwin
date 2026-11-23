@@ -127,7 +127,7 @@ extern char **environ;
 #define LAUNCH_SECDIR _PATH_TMP "launch-XXXXXX"
 #define LAUNCH_ENV_KEEPCONTEXT	"LaunchKeepContext"
 #define LAUNCH_ENV_BOOTSTRAPPINGSYSTEM "LaunchBootstrappingSystem"
-#define PUREDARWIN_LAUNCHD_DB_DIR LAUNCHD_DB_PREFIX "/org.puredarwin.launchd"
+#define PUREDARWIN_LAUNCHD_DB_DIR LAUNCHD_DB_PREFIX "/sh.kido.launchd"
 #define PUREDARWIN_LAUNCHD_OVERRIDES_DB PUREDARWIN_LAUNCHD_DB_DIR "/overrides.plist"
 
 #define CFTypeCheck(cf, type) (CFGetTypeID(cf) == type ## GetTypeID())

@@ -5,10 +5,10 @@
 	<key>ExitTimeOut</key>
 	<integer>2</integer>
 	<key>Label</key>
-	<string>org.puredarwin.console-login</string>
+	<string>sh.kido.console-login</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/libexec/pd-console-login</string>
+		<string>/usr/libexec/kido-console-login</string>
 	</array>
 	<key>KeepAlive</key>
 	<true/>

@@ -281,13 +281,13 @@ EOF
 EOF
     mkdir -p $staging/System/Library/LaunchDaemons $staging/usr/libexec
 
-    cat > $staging/usr/libexec/pd-set-hostname <<'EOF'
+    cat > $staging/usr/libexec/kido-set-hostname <<'EOF'
 #!/bin/sh
 if test -x /bin/hostname; then
     /bin/hostname kido
 fi
 EOF
-    cat > $staging/usr/libexec/pd-net-up <<'EOF'
+    cat > $staging/usr/libexec/kido-net-up <<'EOF'
 #!/bin/sh
 case " $(/bin/sysctl -n kern.bootargs) " in
 *" kido_ip="*)
@@ -298,17 +298,17 @@ case " $(/bin/sysctl -n kern.bootargs) " in
     ;;
 esac
 EOF
-    chmod +x $staging/usr/libexec/pd-net-up
-    cat > $staging/System/Library/LaunchDaemons/org.puredarwin.net-up.plist <<'EOF'
+    chmod +x $staging/usr/libexec/kido-net-up
+    cat > $staging/System/Library/LaunchDaemons/sh.kido.net-up.plist <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>org.puredarwin.net-up</string>
+	<string>sh.kido.net-up</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/libexec/pd-net-up</string>
+		<string>/usr/libexec/kido-net-up</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -319,16 +319,16 @@ EOF
 </dict>
 </plist>
 EOF
-    cat > $staging/System/Library/LaunchDaemons/org.puredarwin.hostname.plist <<'EOF'
+    cat > $staging/System/Library/LaunchDaemons/sh.kido.hostname.plist <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>org.puredarwin.hostname</string>
+	<string>sh.kido.hostname</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/libexec/pd-set-hostname</string>
+		<string>/usr/libexec/kido-set-hostname</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -341,16 +341,16 @@ EOF
 EOF
 
     # the kernel log saver comes from the userland build, /etc/no-dmesg-save or pdlogsave=0 turn it off
-    cat > $staging/System/Library/LaunchDaemons/org.puredarwin.dmesg-save.plist <<'EOF'
+    cat > $staging/System/Library/LaunchDaemons/sh.kido.dmesg-save.plist <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>org.puredarwin.dmesg-save</string>
+	<string>sh.kido.dmesg-save</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/libexec/pd-dmesg-save</string>
+		<string>/usr/libexec/kido-dmesg-save</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -358,7 +358,7 @@ EOF
 </plist>
 EOF
 
-    chmod 755 $staging/usr/libexec/pd-set-hostname
+    chmod 755 $staging/usr/libexec/kido-set-hostname
     cat > $staging/var/root/.profile <<'EOF'
 test -r /etc/profile && . /etc/profile
 EOF

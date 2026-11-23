@@ -60,7 +60,7 @@ stdenv.mkDerivation {
       ${lib.optionalString (!isArmv6) "-Wl,-fixup_chains"} \
       -lSystem \
       ${src}/src/Libraries/XPC/launchd/pd_console_login.c \
-      -o pd-console-login
+      -o kido-console-login
 
     runHook postBuild
   '';
@@ -70,9 +70,9 @@ stdenv.mkDerivation {
     mkdir -p $out/pd-sbin
     cp launchd $out/pd-sbin/
     mkdir -p $out/usr/libexec
-    cp pd-console-login $out/usr/libexec/
+    cp kido-console-login $out/usr/libexec/
     mkdir -p $out/System/Library/LaunchDaemons
-    cp ${src}/src/Libraries/XPC/launchd/org.puredarwin.console-login.plist \
+    cp ${src}/src/Libraries/XPC/launchd/sh.kido.console-login.plist \
       $out/System/Library/LaunchDaemons/
     runHook postInstall
   '';

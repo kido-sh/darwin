@@ -66,7 +66,7 @@ int main(void)
     if (log_save_disabled())
         return 0;
     if (sysctlbyname("kern.msgbuf", &size, &sizelen, NULL, 0) != 0 || size <= 0) {
-        fprintf(stderr, "pd-dmesg-save: no kernel log size\n");
+        fprintf(stderr, "kido-dmesg-save: no kernel log size\n");
         return 1;
     }
     buf = malloc((size_t)size);

@@ -38,21 +38,21 @@ main(void)
 	const char *tty = "/dev/console";
 
 	g_trace_fd = open(tty, O_WRONLY | O_NOCTTY | O_NONBLOCK);
-	ctrace("pd-console-login: start\n");
+	ctrace("kido-console-login: start\n");
 
 	if (setsid() < 0 && errno != EPERM) {
-		ctrace("pd-console-login: setsid failed\n");
+		ctrace("kido-console-login: setsid failed\n");
 		_exit(126);
 	}
-	ctrace("pd-console-login: setsid ok\n");
+	ctrace("kido-console-login: setsid ok\n");
 
 	/* Non-blocking open: never wait on carrier. */
 	int fd = open(tty, O_RDWR | O_NOCTTY | O_NONBLOCK);
 	if (fd < 0) {
-		ctrace("pd-console-login: open failed\n");
+		ctrace("kido-console-login: open failed\n");
 		_exit(126);
 	}
-	ctrace("pd-console-login: open ok\n");
+	ctrace("kido-console-login: open ok\n");
 
 	/* Ignore modem carrier so reads/writes and the controlling-tty grab don't
 	 * stall when DCD is deasserted on the serial line. */
@@ -60,9 +60,9 @@ main(void)
 	if (tcgetattr(fd, &t) == 0) {
 		t.c_cflag |= CLOCAL;
 		(void)tcsetattr(fd, TCSANOW, &t);
-		ctrace("pd-console-login: CLOCAL set\n");
+		ctrace("kido-console-login: CLOCAL set\n");
 	} else {
-		ctrace("pd-console-login: tcgetattr failed (continuing)\n");
+		ctrace("kido-console-login: tcgetattr failed (continuing)\n");
 	}
 
 	/* Back to blocking for normal shell I/O. */
@@ -72,9 +72,9 @@ main(void)
 	}
 
 	if (ioctl(fd, TIOCSCTTY, 0) < 0) {
-		ctrace("pd-console-login: TIOCSCTTY failed (continuing)\n");
+		ctrace("kido-console-login: TIOCSCTTY failed (continuing)\n");
 	} else {
-		ctrace("pd-console-login: TIOCSCTTY ok\n");
+		ctrace("kido-console-login: TIOCSCTTY ok\n");
 	}
 
 	(void)dup2(fd, STDIN_FILENO);
@@ -95,17 +95,17 @@ main(void)
 		if (snprintf(runtime_dir, sizeof(runtime_dir), "/tmp/runtime-%u",
 		             (unsigned)getuid()) < (int)sizeof(runtime_dir)) {
 			if (mkdir(runtime_dir, 0700) < 0 && errno != EEXIST)
-				ctrace("pd-console-login: XDG runtime mkdir failed\n");
+				ctrace("kido-console-login: XDG runtime mkdir failed\n");
 			else if (chmod(runtime_dir, 0700) < 0)
-				ctrace("pd-console-login: XDG runtime chmod failed\n");
+				ctrace("kido-console-login: XDG runtime chmod failed\n");
 			else
 				setenv("XDG_RUNTIME_DIR", runtime_dir, 1);
 		}
 	}
 
 	char *argv[] = { "/bin/zsh", "-l", NULL };
-	ctrace("pd-console-login: exec /bin/zsh\n");
+	ctrace("kido-console-login: exec /bin/zsh\n");
 	execv(argv[0], argv);
-	ctrace("pd-console-login: execv failed\n");
+	ctrace("kido-console-login: execv failed\n");
 	_exit(127);
 }
