@@ -84,15 +84,15 @@ if(PUREDARWIN_ARM64 OR PUREDARWIN_ARM32 OR PUREDARWIN_RISCV64)
     #   floorl, frexpl - openlibm builds these from its ld80/ tree, which is
     #                    80-bit x87 long double; on arm64 long double is double
     #   fe*except      - openlibm's fenv is the x86 SSE/x87 implementation
-    #   *context       - libplatform builds ucontext for x86_64 only so far
+    #   *context       - libplatform builds ucontext for x86_64, arm64 and riscv64
     list(FILTER _libsystem_export_lines EXCLUDE REGEX
         "^_(i386_set_ldt|i386_get_ldt|scalbnl|roundl|lroundl|llroundl|floorl|frexpl|getfsstat)$")
     # arm64 has nexttoward and nexttowardf over double, in pd_arm64.c
     if(NOT PUREDARWIN_ARM64)
         list(FILTER _libsystem_export_lines EXCLUDE REGEX "^_(nexttoward|nexttowardf)$")
     endif()
-    # riscv64 builds the ucontext family, arm does not yet
-    if(NOT PUREDARWIN_RISCV64)
+    # riscv64 and arm64 build the ucontext family, arm does not yet
+    if(NOT PUREDARWIN_RISCV64 AND NOT PUREDARWIN_ARM64)
         list(FILTER _libsystem_export_lines EXCLUDE REGEX
             "^_(getcontext|setcontext|makecontext|swapcontext)$")
     endif()

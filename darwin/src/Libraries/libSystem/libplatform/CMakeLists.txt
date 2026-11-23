@@ -28,7 +28,16 @@ if(PUREDARWIN_ARM64)
     # there is a no-op and nothing needs it. compiler-rt's __clear_cache calls
     # sys_icache_invalidate, which is what any JIT needs after writing code.
     set(_libplatform_cachecontrol src/cachecontrol/arm64/cache.s)
-    set(_libplatform_ucontext)
+    # getcontext/setcontext/makecontext/swapcontext (OpenSSL's async jobs in node, curl and python)
+    set(_libplatform_ucontext
+        src/ucontext/arm64/_ctx_start.s
+        src/ucontext/arm64/getcontext.s
+        src/ucontext/arm64/_setcontext.s
+        src/ucontext/arm64/mcontext.c
+        src/ucontext/generic/getmcontext.c
+        src/ucontext/generic/makecontext.c
+        src/ucontext/generic/setcontext.c
+        src/ucontext/generic/swapcontext.c)
 elseif(PUREDARWIN_RISCV64)
     # the OSAtomic C file is shared with arm, the fifo queue locks since there
     # is no commpage preemption free zone on riscv
@@ -187,6 +196,10 @@ set_source_files_properties(
 if(PUREDARWIN_ARM64)
     set_source_files_properties(src/cachecontrol/arm64/cache.s
         PROPERTIES LANGUAGE ASM COMPILE_FLAGS "-x assembler-with-cpp")
+    # Apple's arm64 makecontext stores the stack top and the context pointer in
+    # integer registers of the mcontext without casts, width-preserving on LP64
+    set_source_files_properties(src/ucontext/generic/makecontext.c
+        PROPERTIES COMPILE_FLAGS "-Wno-int-conversion")
 endif()
 if(PUREDARWIN_RISCV64)
     set_source_files_properties(src/cachecontrol/riscv/cache.s src/setjmp/riscv/setjmp.s
