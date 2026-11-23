@@ -44,6 +44,12 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <mach/mach_time.h>
+#include <pthread.h>
+#include <time.h>
+#include <sys/socket.h>
+#include <sys/syslog.h>
+#include <sys/un.h>
+#include <mach-o/loader.h>
 /* <objc/runtime.h> intentionally not included: nothing here uses the ObjC
  * runtime, and objc4 links against libSystem, so it cannot be a build
  * dependency of libSystem. */
@@ -106,14 +112,8 @@ os_log_create(const char* subsystem, const char* category)
     if (!log)
         return (os_log_t)NULL;
 
-    // FIXME: these probably leak
-    if (_CFStringCreateWithCString) {
-        log->subsystem = (void*)_CFStringCreateWithCString(NULL,
-            subsystem, kCFStringEncodingUTF8);
-        log->category = (void*)_CFStringCreateWithCString(NULL,
-            category, kCFStringEncodingUTF8);
-    }
-
+    log->subsystem = subsystem != NULL ? strdup(subsystem) : NULL;
+    log->category = category != NULL ? strdup(category) : NULL;
     log->sink_type = OS_LOG_SINK_TYPE_FD;
     log->sink_dest = STDOUT_FILENO;
     _os_log_make_immortal(log);
@@ -141,7 +141,8 @@ bool os_log_type_enabled(os_log_t log, os_log_type_t type)
     static _Atomic(int) resolved;
     static os_log_type_t lowest_enabled;
 
-    (void)log;
+    if (log == &_os_log_disabled)
+        return false;
 
     if (!atomic_load_explicit(&resolved, memory_order_acquire)) {
         const char *mode = getenv("OS_ACTIVITY_MODE");
@@ -184,40 +185,6 @@ os_log_debug_enabled(os_log_t log)
 {
     return os_log_shim_enabled(log, OS_LOG_TYPE_DEBUG)
         && os_log_type_enabled(log, OS_LOG_TYPE_DEBUG);
-}
-
-static const char* _typeToStr(os_log_type_t type)
-{
-    switch (type) {
-        case OS_LOG_TYPE_DEFAULT: return "Normal";
-        case OS_LOG_TYPE_INFO: return "Info";
-        case OS_LOG_TYPE_DEBUG: return "Debug";
-        case OS_LOG_TYPE_ERROR: return "ERROR";
-        case OS_LOG_TYPE_FAULT: return "FAULT";
-    }
-    return "unknown";
-}
-
-__OSX_AVAILABLE_STARTING(__MAC_10_12, __IPHONE_10_0)
-OS_EXPORT OS_NOTHROW
-void
-os_log_with_args(os_log_t oslog, os_log_type_t type, const char* format, va_list args, void* ret_addr)
-{
-}
-
-__WATCHOS_AVAILABLE(3.0) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0)
-OS_EXPORT OS_NOTHROW
-void
-_os_log_internal(void* dso, os_log_t log, os_log_type_t type, const char* message, ...)
-{
-}
-
-__WATCHOS_AVAILABLE(3.0) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0)
-OS_EXPORT OS_NOTHROW
-int
-_os_log_internal_driverKit(void* dso, os_log_t log, os_log_type_t type, const char* message, ...)
-{
-    return 0; // FIXME: should return EPERM, ENOBUFS, EINVAL on error
 }
 
 /**
@@ -269,13 +236,43 @@ size_t __os_log_encode(void* buffer,
     return size;
 }
 
+struct pd_out {
+    char* p;
+    size_t rem;
+    size_t len;
+};
+
+static void pd_out_advance(struct pd_out* o, size_t n)
+{
+    size_t copied = 0;
+
+    if (o->rem > 1)
+        copied = n < o->rem - 1 ? n : o->rem - 1;
+    o->p += copied;
+    o->rem -= copied;
+    o->len += n;
+}
+
+static void pd_out_append(struct pd_out* o, const char* s, size_t n)
+{
+    if (o->rem > 1)
+        memcpy(o->p, s, n < o->rem - 1 ? n : o->rem - 1);
+    pd_out_advance(o, n);
+}
+
+#define PD_OUT_PRINTF(o, ...) do { \
+        int pd_n_ = snprintf((o)->rem ? (o)->p : NULL, (o)->rem, __VA_ARGS__); \
+        if (pd_n_ > 0) \
+            pd_out_advance((o), (size_t)pd_n_); \
+    } while (0)
+
 /*
  * %@ is CoreFoundation's specifier, not printf's, so rendering it means asking
  * CF for the object's description. libsystem_trace sits below CoreFoundation
  * and cannot link it, so look the three entry points up at runtime instead:
  * processes without CF (and there are several here) simply get the pointer.
  */
-static void pd_append_cf_object(char** outp, size_t* remp, const void* cf)
+static void pd_append_cf_object(struct pd_out* o, const void* cf)
 {
     static void*    (*copy_description)(const void*);
     static int      (*get_cstring)(const void*, char*, long, uint32_t);
@@ -283,7 +280,6 @@ static void pd_append_cf_object(char** outp, size_t* remp, const void* cf)
     static int      looked_up;
     char            desc[512];
     void*           str;
-    int             n;
 
     if (!looked_up) {
         copy_description = dlsym(RTLD_DEFAULT, "CFCopyDescription");
@@ -293,8 +289,8 @@ static void pd_append_cf_object(char** outp, size_t* remp, const void* cf)
     }
 
     if (cf == NULL) {
-        n = snprintf(*outp, *remp, "(null)");
-        goto advance;
+        pd_out_append(o, "(null)", 6);
+        return;
     }
 
     // an Objective-C object, CFStrings included, says what -description says, as NSLog prints it
@@ -313,51 +309,51 @@ static void pd_append_cf_object(char** outp, size_t* remp, const void* cf)
             const char* utf8 = text != NULL ? send(text, sel("UTF8String")) : NULL;
 
             if (utf8 != NULL) {
-                n = snprintf(*outp, *remp, "%s", utf8);
-                goto advance;
+                pd_out_append(o, utf8, strlen(utf8));
+                return;
             }
         }
     }
 
     if (copy_description == NULL || get_cstring == NULL || cf_release == NULL) {
-        n = snprintf(*outp, *remp, "<%p>", cf);
-        goto advance;
+        PD_OUT_PRINTF(o, "<%p>", cf);
+        return;
     }
 
     str = copy_description(cf);
     if (str == NULL) {
-        n = snprintf(*outp, *remp, "<%p>", cf);
-        goto advance;
+        PD_OUT_PRINTF(o, "<%p>", cf);
+        return;
     }
 
     /* 0x08000100 is kCFStringEncodingUTF8. */
     if (get_cstring(str, desc, (long)sizeof(desc), 0x08000100)) {
-        n = snprintf(*outp, *remp, "%s", desc);
+        pd_out_append(o, desc, strlen(desc));
     } else {
-        n = snprintf(*outp, *remp, "<%p>", cf);
+        PD_OUT_PRINTF(o, "<%p>", cf);
     }
     cf_release(str);
-
-advance:
-    if (n < 0) {
-        return;
-    }
-    if ((size_t)n >= *remp) {
-        *outp += *remp - 1;
-        *remp = 1;
-        return;
-    }
-    *outp += n;
-    *remp -= (size_t)n;
 }
 
 /* where a render takes its arguments from: a va_list, or the buffer os_log's macros pack, two header bytes
- * (flags, count) and per argument a descriptor byte, a size byte and the value */
+ * (flags, count) and per argument a descriptor byte, a size byte and the value. shim marks syslog(3) and
+ * asl, whose arguments macOS records as they are */
 struct pd_os_log_args {
     va_list* ap;
     const uint8_t* at;
     const uint8_t* end;
+    bool shim;
+    int saved_errno;
 };
+
+static void pd_os_log_packed(struct pd_os_log_args* a, const uint8_t* buffer, uint32_t size, int saved_errno)
+{
+    a->ap = NULL;
+    a->at = buffer != NULL && size >= 2 ? buffer + 2 : NULL;
+    a->end = buffer != NULL && size >= 2 ? buffer + size : NULL;
+    a->shim = false;
+    a->saved_errno = saved_errno;
+}
 
 static const uint8_t* pd_os_log_item(struct pd_os_log_args* a, uint8_t* size)
 {
@@ -428,190 +424,497 @@ static const void* pd_os_log_packed_pointer(struct pd_os_log_args* a)
 #define ARG_p(a) pd_os_log_packed_pointer(a)
 #define ARG(type, kind) (a->ap != NULL ? va_arg(*a->ap, type) : (type)ARG_##kind(a))
 
+/* what the log keeps and what a caller composes hide private values, the stderr mirror shows them */
+enum pd_os_log_mode {
+    PD_OS_LOG_REDACTED,
+    PD_OS_LOG_PLAIN,
+};
+
+enum { PD_PRIVACY_DEFAULT, PD_PRIVACY_PUBLIC, PD_PRIVACY_PRIVATE };
+enum { PD_STYLE_NONE, PD_STYLE_BOOL, PD_STYLE_YESNO, PD_STYLE_ERRNO, PD_STYLE_UUID };
+
+static const char* pd_os_log_annotation(const char* p, int* privacy, int* style)
+{
+    const char* end = strchr(p, '}');
+
+    if (end == NULL)
+        return p + 1;
+    for (p++; p < end; p++) {
+        const char* word;
+        size_t len;
+
+        while (p < end && (*p == ' ' || *p == ','))
+            p++;
+        word = p;
+        while (p < end && *p != ',')
+            p++;
+        len = (size_t)(p - word);
+        while (len > 0 && word[len - 1] == ' ')
+            len--;
+#define PD_IS(w) (len == sizeof(w) - 1 && memcmp(word, w, len) == 0)
+        if (PD_IS("public"))
+            *privacy = PD_PRIVACY_PUBLIC;
+        else if (PD_IS("private") || PD_IS("sensitive"))
+            *privacy = PD_PRIVACY_PRIVATE;
+        else if (PD_IS("bool"))
+            *style = PD_STYLE_BOOL;
+        else if (PD_IS("BOOL"))
+            *style = PD_STYLE_YESNO;
+        else if (PD_IS("errno") || PD_IS("darwin.errno"))
+            *style = PD_STYLE_ERRNO;
+        else if (PD_IS("uuid_t"))
+            *style = PD_STYLE_UUID;
+#undef PD_IS
+    }
+    return end + 1;
+}
+
+// macOS's log store keeps a string or object only when it lies in an image's __TEXT, as a literal does
+static bool pd_os_log_static(const void* ptr)
+{
+    const struct mach_header_64* mh;
+    const struct load_command* lc;
+    Dl_info info;
+
+    if (!dladdr(ptr, &info) || info.dli_fbase == NULL)
+        return false;
+    mh = info.dli_fbase;
+    if (mh->magic != MH_MAGIC_64)
+        return false;
+    lc = (const struct load_command*)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64* seg = (const struct segment_command_64*)lc;
+
+            if (strcmp(seg->segname, SEG_TEXT) == 0)
+                return (uintptr_t)ptr - (uintptr_t)mh < seg->vmsize;
+        }
+        lc = (const struct load_command*)((const char*)lc + lc->cmdsize);
+    }
+    return false;
+}
+
+enum { PD_VALUE_SCALAR, PD_VALUE_STRING, PD_VALUE_DATA };
+
+static bool pd_os_log_hidden(const struct pd_os_log_args* a, enum pd_os_log_mode mode,
+    int privacy, int kind, const void* value)
+{
+    if (mode == PD_OS_LOG_PLAIN || privacy == PD_PRIVACY_PUBLIC)
+        return false;
+    if (privacy == PD_PRIVACY_PRIVATE)
+        return true;
+    if (a->shim || kind == PD_VALUE_SCALAR || value == NULL)
+        return false;
+    return kind == PD_VALUE_DATA || !pd_os_log_static(value);
+}
+
+static void pd_os_log_bytes(struct pd_out* o, const unsigned char* bytes, size_t n, int style)
+{
+    if (style == PD_STYLE_UUID && n >= 16) {
+        PD_OUT_PRINTF(o, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+        return;
+    }
+    pd_out_append(o, "'", 1);
+    for (size_t i = 0; i < n; i++)
+        PD_OUT_PRINTF(o, i == 0 ? "%02x" : " %02x", bytes[i]);
+    pd_out_append(o, "'", 1);
+}
+
 /*
- * Render a format string and its arguments to text.
+ * Render a format string and its arguments to text, the way mode asks for private values. Returns the
+ * length of the whole text, which may be more than out_size can hold.
  *
  * vsnprintf cannot be used on the whole string because os_log formats may carry
- * %@, and once one specifier has to be handled here the rest must be too - a
+ * %@ and annotations, and once one specifier has to be handled here the rest must be too - a
  * va_list cannot be re-entered partway through. So walk the format, hand each
  * ordinary specifier to snprintf on its own, and expand %@ via CoreFoundation.
  */
-static void pd_os_log_render(char* out, size_t out_size, const char* format,
-    struct pd_os_log_args* a)
+static size_t pd_os_log_render(char* out, size_t out_size, const char* format,
+    struct pd_os_log_args* a, enum pd_os_log_mode mode)
 {
-    const char* p = format;
-    char*       o = out;
-    size_t      rem = out_size;
+    struct pd_out o = { out, out_size, 0 };
+    const char* p = format != NULL ? format : "";
 
-    if (out == NULL || out_size == 0) {
-        return;
-    }
-    out[0] = '\0';
-    if (format == NULL) {
-        return;
-    }
-
-    while (*p != '\0' && rem > 1) {
-        char    spec[64];
-        size_t  slen = 0;
-        int     star_width = 0, star_prec = 0;
-        int     width = 0, prec = 0;
-        int     n = 0;
-        char    conv;
-        /* 0 = int, 1 = long, 2 = long long, 3 = size_t/ptrdiff, 4 = short/char */
-        int     lenmod = 0;
+    while (*p != '\0') {
+        char spec[128];
+        size_t slen = 1, n;
+        int privacy = PD_PRIVACY_DEFAULT, style = PD_STYLE_NONE;
+        /* 0 = int, 1 = long or wide, 2 = 64-bit */
+        int lenmod = 0;
+        int prec = -1;
+        bool prec_literal = false;
+        const char* lit;
+        char conv;
 
         if (*p != '%') {
-            *o++ = *p++;
-            rem--;
+            lit = p;
+            while (*p != '\0' && *p != '%')
+                p++;
+            pd_out_append(&o, lit, (size_t)(p - lit));
             continue;
         }
-
-        spec[slen++] = *p++;            /* '%' */
+        p++;
         if (*p == '%') {
-            *o++ = '%';
-            rem--;
+            pd_out_append(&o, "%", 1);
             p++;
             continue;
         }
+        if (*p == '{')
+            p = pd_os_log_annotation(p, &privacy, &style);
 
-        /*
-         * os_log annotations - %{public}@, %{private}s, %{bool}d and friends.
-         * They carry privacy and type hints for the logging system, not the
-         * formatting, so drop them rather than passing them to snprintf.
-         */
-        if (*p == '{') {
-            while (*p != '\0' && *p != '}') {
-                p++;
-            }
-            if (*p == '}') {
-                p++;
-            }
-        }
-
-        /* flags */
-        while (*p && strchr("-+ #0'", *p) && slen < sizeof(spec) - 8) {
-            spec[slen++] = *p++;
-        }
-        /* width */
+        spec[0] = '%';
+        for (n = 0; *p != '\0' && strchr("-+ #0'", *p) != NULL; p++)
+            if (n++ < 20)
+                spec[slen++] = *p;
         if (*p == '*') {
-            star_width = 1;
-            width = ARG(int, i);
+            slen += (size_t)snprintf(spec + slen, 16, "%d", (int)ARG(int, i));
             p++;
         } else {
-            while (*p >= '0' && *p <= '9' && slen < sizeof(spec) - 8) {
-                spec[slen++] = *p++;
-            }
+            for (n = 0; *p >= '0' && *p <= '9'; p++)
+                if (n++ < 20)
+                    spec[slen++] = *p;
         }
-        /* precision */
         if (*p == '.') {
             spec[slen++] = *p++;
             if (*p == '*') {
-                star_prec = 1;
-                prec = ARG(int, i);
+                prec = (int)ARG(int, i);
+                slen += (size_t)snprintf(spec + slen, 16, "%d", prec);
                 p++;
             } else {
-                while (*p >= '0' && *p <= '9' && slen < sizeof(spec) - 8) {
-                    spec[slen++] = *p++;
+                prec_literal = true;
+                for (prec = 0, n = 0; *p >= '0' && *p <= '9'; p++) {
+                    prec = prec * 10 + (*p - '0');
+                    if (n++ < 20)
+                        spec[slen++] = *p;
                 }
             }
         }
-        /* length modifier */
-        while (*p && strchr("hljztLq", *p) && slen < sizeof(spec) - 4) {
-            if (*p == 'l') {
-                lenmod = (lenmod == 1) ? 2 : 1;
-            } else if (*p == 'h') {
-                lenmod = 4;
-            } else if (*p == 'j' || *p == 'z' || *p == 't' || *p == 'q') {
-                lenmod = 3;
-            }
-            spec[slen++] = *p++;
+        for (n = 0; *p != '\0' && strchr("hljztLq", *p) != NULL; p++) {
+            if (*p == 'l')
+                lenmod = lenmod == 1 ? 2 : 1;
+            else if (*p == 'j' || *p == 'z' || *p == 't' || *p == 'q')
+                lenmod = 2;
+            if (n++ < 4)
+                spec[slen++] = *p;
         }
-
         conv = *p;
-        if (conv == '\0') {
+        if (conv == '\0')
             break;
-        }
-        spec[slen++] = *p++;
+        p++;
+        spec[slen++] = conv;
         spec[slen] = '\0';
 
-        /*
-         * Rebuild the width/precision that were consumed as arguments, so the
-         * single-specifier snprintf below sees a self-contained format.
-         */
-        if (star_width || star_prec) {
-            char rebuilt[80];
-
-            if (star_width && star_prec) {
-                snprintf(rebuilt, sizeof(rebuilt), "%%%d.%d%c", width, prec, conv);
-            } else if (star_width) {
-                snprintf(rebuilt, sizeof(rebuilt), "%%%d%c", width, conv);
-            } else {
-                snprintf(rebuilt, sizeof(rebuilt), "%%.%d%c", prec, conv);
-            }
-            strlcpy(spec, rebuilt, sizeof(spec));
-        }
-
         switch (conv) {
-        case '@':
-            pd_append_cf_object(&o, &rem, ARG(const void*, p));
-            continue;
-        case 'd': case 'i':
-            if (lenmod == 2 || lenmod == 3) {
-                n = snprintf(o, rem, spec, ARG(long long, i));
-            } else if (lenmod == 1) {
-                n = snprintf(o, rem, spec, ARG(long, i));
-            } else {
-                n = snprintf(o, rem, spec, ARG(int, i));
-            }
-            break;
-        case 'o': case 'u': case 'x': case 'X':
-            if (lenmod == 2 || lenmod == 3) {
-                n = snprintf(o, rem, spec, ARG(unsigned long long, i));
-            } else if (lenmod == 1) {
-                n = snprintf(o, rem, spec, ARG(unsigned long, i));
-            } else {
-                n = snprintf(o, rem, spec, ARG(unsigned int, i));
-            }
-            break;
-        case 'c':
-            n = snprintf(o, rem, spec, ARG(int, i));
-            break;
-        case 's': {
-            const char* sv = ARG(const char*, p);
-            n = snprintf(o, rem, spec, sv ? sv : "(null)");
+        case 'd': case 'i': case 'o': case 'u': case 'x': case 'X': {
+            bool is_signed = conv == 'd' || conv == 'i';
+            long long v;
+
+            if (lenmod == 2)
+                v = is_signed ? ARG(long long, i) : (long long)ARG(unsigned long long, i);
+            else if (lenmod == 1)
+                v = is_signed ? ARG(long, i) : (long long)ARG(unsigned long, i);
+            else
+                v = is_signed ? ARG(int, i) : (long long)ARG(unsigned int, i);
+            if (pd_os_log_hidden(a, mode, privacy, PD_VALUE_SCALAR, NULL))
+                pd_out_append(&o, "<private>", 9);
+            else if (style == PD_STYLE_BOOL)
+                PD_OUT_PRINTF(&o, "%s", v ? "true" : "false");
+            else if (style == PD_STYLE_YESNO)
+                PD_OUT_PRINTF(&o, "%s", v ? "YES" : "NO");
+            else if (style == PD_STYLE_ERRNO)
+                PD_OUT_PRINTF(&o, "[%lld: %s]", v, strerror((int)v));
+            else if (lenmod == 2)
+                PD_OUT_PRINTF(&o, spec, v);
+            else if (lenmod == 1)
+                PD_OUT_PRINTF(&o, spec, (long)v);
+            else
+                PD_OUT_PRINTF(&o, spec, (int)v);
             break;
         }
-        case 'p':
-            n = snprintf(o, rem, spec, ARG(void*, p));
+        case 'c': case 'C': {
+            int v = ARG(int, i);
+
+            if (pd_os_log_hidden(a, mode, privacy, PD_VALUE_SCALAR, NULL))
+                pd_out_append(&o, "<private>", 9);
+            else
+                PD_OUT_PRINTF(&o, spec, v);
             break;
+        }
+        case 's': case 'S': {
+            const void* v;
+
+            /* clang packs the literal precision of %.Ns and %.NP as an item of its own */
+            if (a->ap == NULL && prec_literal)
+                (void)pd_os_log_packed_int(a);
+            v = ARG(const void*, p);
+
+            if (pd_os_log_hidden(a, mode, privacy, PD_VALUE_STRING, v))
+                pd_out_append(&o, "<private>", 9);
+            else if (v == NULL)
+                pd_out_append(&o, "(null)", 6);
+            else if (conv == 'S' || lenmod == 1)
+                PD_OUT_PRINTF(&o, spec, (const wchar_t*)v);
+            else
+                PD_OUT_PRINTF(&o, spec, (const char*)v);
+            break;
+        }
+        case 'p': {
+            const void* v = ARG(const void*, p);
+
+            if (pd_os_log_hidden(a, mode, privacy, PD_VALUE_SCALAR, NULL))
+                pd_out_append(&o, "<private>", 9);
+            else
+                PD_OUT_PRINTF(&o, spec, v);
+            break;
+        }
+        case 'P': {
+            const unsigned char* v;
+
+            if (a->ap == NULL && prec_literal)
+                (void)pd_os_log_packed_int(a);
+            v = ARG(const void*, p);
+
+            if (pd_os_log_hidden(a, mode, privacy, PD_VALUE_DATA, v))
+                pd_out_append(&o, "<private>", 9);
+            else if (v == NULL)
+                pd_out_append(&o, "(null)", 6);
+            else
+                pd_os_log_bytes(&o, v, prec > 0 ? (size_t)prec : 0, style);
+            break;
+        }
+        case '@': {
+            const void* v = ARG(const void*, p);
+
+            if (pd_os_log_hidden(a, mode, privacy, PD_VALUE_STRING, v))
+                pd_out_append(&o, "<private>", 9);
+            else
+                pd_append_cf_object(&o, v);
+            break;
+        }
+        case 'm': {
+            uint8_t size;
+
+            if (a->ap == NULL)
+                (void)pd_os_log_item(a, &size);
+            if (pd_os_log_hidden(a, mode, privacy, PD_VALUE_SCALAR, NULL))
+                pd_out_append(&o, "<private>", 9);
+            else
+                PD_OUT_PRINTF(&o, "%s", strerror(a->saved_errno));
+            break;
+        }
         case 'f': case 'F': case 'e': case 'E':
-        case 'g': case 'G': case 'a': case 'A':
-            n = snprintf(o, rem, spec, ARG(double, d));
+        case 'g': case 'G': case 'a': case 'A': {
+            double v = ARG(double, d);
+
+            if (pd_os_log_hidden(a, mode, privacy, PD_VALUE_SCALAR, NULL))
+                pd_out_append(&o, "<private>", 9);
+            else
+                PD_OUT_PRINTF(&o, spec, v);
             break;
+        }
         case 'n':
             /* Never write through a caller pointer from a log format. */
             (void)ARG(void*, p);
-            n = 0;
             break;
         default:
-            n = snprintf(o, rem, "%s", spec);
+            pd_out_append(&o, spec, slen);
             break;
         }
-
-        if (n < 0) {
-            break;
-        }
-        if ((size_t)n >= rem) {
-            o += rem - 1;
-            rem = 1;
-            break;
-        }
-        o += n;
-        rem -= (size_t)n;
     }
 
-    *o = '\0';
+    if (o.rem > 0)
+        *o.p = '\0';
+    return o.len;
+}
+
+#define PD_OS_LOG_SOCKET "/var/run/syslog"
+#define PD_OS_LOG_LINE_MAX 2048
+
+// OS_ACTIVITY_DT_MODE in the environment, whatever its value, mirrors os_log to stderr on macOS
+static bool pd_os_log_dt_mode(void)
+{
+    static _Atomic(int) mode;
+    int m = atomic_load_explicit(&mode, memory_order_relaxed);
+
+    if (m == 0) {
+        m = getenv("OS_ACTIVITY_DT_MODE") != NULL ? 2 : 1;
+        atomic_store_explicit(&mode, m, memory_order_relaxed);
+    }
+    return m == 2;
+}
+
+static const char* pd_os_log_subsystem(os_log_t log)
+{
+    const struct os_log_s* s = (const struct os_log_s*)log;
+
+    return s != NULL && s->subsystem != NULL ? s->subsystem : "";
+}
+
+static const char* pd_os_log_category(os_log_t log)
+{
+    const struct os_log_s* s = (const struct os_log_s*)log;
+
+    return s != NULL && s->category != NULL ? s->category : "";
+}
+
+/* one line for logd on the syslog socket, in the shape of `log show --style compact` */
+static void pd_os_log_record(os_log_t log, os_log_type_t type, const char* message)
+{
+    struct sockaddr_un addr = { .sun_family = AF_UNIX };
+    char line[PD_OS_LOG_LINE_MAX];
+    const char* tag;
+    struct timespec now;
+    struct tm tm;
+    uint64_t tid = 0;
+    int severity, n, fd;
+
+    switch (type) {
+    case OS_LOG_TYPE_INFO: tag = "I "; severity = LOG_INFO; break;
+    case OS_LOG_TYPE_DEBUG: tag = "Db"; severity = LOG_DEBUG; break;
+    case OS_LOG_TYPE_ERROR: tag = "E "; severity = LOG_ERR; break;
+    case OS_LOG_TYPE_FAULT: tag = "F "; severity = LOG_CRIT; break;
+    default: tag = "Df"; severity = LOG_NOTICE; break;
+    }
+    clock_gettime(CLOCK_REALTIME, &now);
+    localtime_r(&now.tv_sec, &tm);
+    pthread_threadid_np(NULL, &tid);
+    n = snprintf(line, sizeof(line), "<%d>%04d-%02d-%02d %02d:%02d:%02d.%03ld %s %s[%d:%llx] ",
+        LOG_USER | severity, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
+        tm.tm_sec, now.tv_nsec / 1000000, tag, getprogname(), getpid(), (unsigned long long)tid);
+    if (n < 0 || (size_t)n >= sizeof(line))
+        return;
+    if (*pd_os_log_subsystem(log) != '\0') {
+        int m = snprintf(line + n, sizeof(line) - (size_t)n, *pd_os_log_category(log) != '\0' ? "[%s:%s] " : "[%s] ",
+            pd_os_log_subsystem(log), pd_os_log_category(log));
+
+        if (m < 0 || (size_t)m >= sizeof(line) - (size_t)n)
+            return;
+        n += m;
+    }
+    strlcpy(line + n, message, sizeof(line) - (size_t)n);
+
+    fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return;
+    strlcpy(addr.sun_path, PD_OS_LOG_SOCKET, sizeof(addr.sun_path));
+    (void)sendto(fd, line, strlen(line), MSG_DONTWAIT, (const struct sockaddr*)&addr, sizeof(addr));
+    (void)close(fd);
+}
+
+static void pd_os_log_stderr(os_log_t log, const char* message)
+{
+    char line[PD_OS_LOG_LINE_MAX];
+    struct timespec now;
+    struct tm tm;
+    uint64_t tid = 0;
+    long off;
+    int n;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+    localtime_r(&now.tv_sec, &tm);
+    pthread_threadid_np(NULL, &tid);
+    off = labs(tm.tm_gmtoff);
+    n = snprintf(line, sizeof(line), "%04d-%02d-%02d %02d:%02d:%02d.%06ld%c%02ld%02ld %s[%d:%llu] %s%s%s%s\n",
+        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
+        now.tv_nsec / 1000, tm.tm_gmtoff < 0 ? '-' : '+', off / 3600, off % 3600 / 60,
+        getprogname(), getpid(), (unsigned long long)tid,
+        *pd_os_log_category(log) != '\0' ? "[" : "", pd_os_log_category(log),
+        *pd_os_log_category(log) != '\0' ? "] " : "", message);
+    if (n < 0)
+        return;
+    if ((size_t)n >= sizeof(line)) {
+        n = sizeof(line) - 1;
+        line[n - 1] = '\n';
+    }
+    (void)write(STDERR_FILENO, line, (size_t)n);
+}
+
+static void pd_os_log_send_message(os_log_t log, os_log_type_t type, const char* message)
+{
+    int saved_errno = errno;
+
+    if (message != NULL && os_log_type_enabled(log, type)) {
+        pd_os_log_record(log, type, message);
+        if (pd_os_log_dt_mode())
+            pd_os_log_stderr(log, message);
+    }
+    errno = saved_errno;
+}
+
+static void pd_os_log_render_copy(char* out, size_t out_size, const char* format,
+    const struct pd_os_log_args* source, enum pd_os_log_mode mode)
+{
+    struct pd_os_log_args a = *source;
+    va_list ap;
+
+    if (source->ap != NULL) {
+        va_copy(ap, *source->ap);
+        a.ap = &ap;
+    }
+    pd_os_log_render(out, out_size, format, &a, mode);
+    if (source->ap != NULL)
+        va_end(ap);
+}
+
+static void pd_os_log_send(os_log_t log, os_log_type_t type, const char* format,
+    const struct pd_os_log_args* source)
+{
+    char message[PD_OS_LOG_LINE_MAX];
+    int saved_errno = errno;
+
+    if (format != NULL && os_log_type_enabled(log, type)) {
+        pd_os_log_render_copy(message, sizeof(message), format, source, PD_OS_LOG_REDACTED);
+        pd_os_log_record(log, type, message);
+        if (pd_os_log_dt_mode()) {
+            pd_os_log_render_copy(message, sizeof(message), format, source, PD_OS_LOG_PLAIN);
+            pd_os_log_stderr(log, message);
+        }
+    }
+    errno = saved_errno;
+}
+
+__OSX_AVAILABLE_STARTING(__MAC_10_12, __IPHONE_10_0)
+OS_EXPORT OS_NOTHROW
+void
+os_log_with_args(os_log_t oslog, os_log_type_t type, const char* format, va_list args, void* ret_addr)
+{
+    struct pd_os_log_args a = { &args, NULL, NULL, true, errno };
+
+    (void)ret_addr;
+    pd_os_log_send(oslog, type, format, &a);
+}
+
+__WATCHOS_AVAILABLE(3.0) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0)
+OS_EXPORT OS_NOTHROW
+void
+_os_log_internal(void* dso, os_log_t log, os_log_type_t type, const char* message, ...)
+{
+    struct pd_os_log_args a = { NULL, NULL, NULL, false, errno };
+    va_list ap;
+
+    (void)dso;
+    va_start(ap, message);
+    a.ap = &ap;
+    pd_os_log_send(log, type, message, &a);
+    va_end(ap);
+}
+
+__WATCHOS_AVAILABLE(3.0) __OSX_AVAILABLE(10.12) __IOS_AVAILABLE(10.0) __TVOS_AVAILABLE(10.0)
+OS_EXPORT OS_NOTHROW
+int
+_os_log_internal_driverKit(void* dso, os_log_t log, os_log_type_t type, const char* message, ...)
+{
+    struct pd_os_log_args a = { NULL, NULL, NULL, false, errno };
+    va_list ap;
+
+    (void)dso;
+    va_start(ap, message);
+    a.ap = &ap;
+    pd_os_log_send(log, type, message, &a);
+    va_end(ap);
+    return 0;
 }
 
 /*
@@ -643,8 +946,6 @@ uint8_t* os_log_pack_fill(void* pack,
     size_t avail;
     va_list ap;
 
-    (void)saved_errno;
-
     if (!pack || !format || pack_size <= sizeof(struct os_log_pack_s)) {
         return NULL;
     }
@@ -664,9 +965,9 @@ uint8_t* os_log_pack_fill(void* pack,
 
     va_start(ap, format);
     {
-        struct pd_os_log_args args = { &ap, NULL, NULL };
+        struct pd_os_log_args args = { &ap, NULL, NULL, false, saved_errno };
 
-        pd_os_log_render((char*)payload, avail, format, &args);
+        pd_os_log_render((char*)payload, avail, format, &args, PD_OS_LOG_REDACTED);
     }
     va_end(ap);
 
@@ -675,11 +976,7 @@ uint8_t* os_log_pack_fill(void* pack,
     return payload + strlen((const char*)payload) + 1;
 }
 
-/*
- * Render a pack to text. The argument payload cannot be expanded without the
- * binary tracepoint encoder (see os_log_encode() above), so the format string
- * is emitted as-is - which is what a caller printing the result wants to see.
- */
+/* The message os_log_pack_fill() rendered. */
 char* os_log_pack_compose(os_log_pack_t pack,
     os_log_t log,
     os_log_type_t type,
@@ -714,7 +1011,8 @@ void os_log_pack_send(os_log_pack_t pack,
     os_log_t log,
     os_log_type_t type)
 {
-    /* FIXME: Send completed pack to ring buffer for logging */
+    if (pack != NULL)
+        pd_os_log_send_message(log, type, pack->olp_format);
 }
 
 void __os_log_impl(void* dso,
@@ -724,27 +1022,11 @@ void __os_log_impl(void* dso,
     uint8_t* buffer,
     uint32_t buffer_size)
 {
-    if (!format)
-        return;
+    struct pd_os_log_args args;
 
-    /* Every emission path funnels through here, so this is where the level
-     * filter belongs; the os_log_debug()/os_log_info() macros do check
-     * os_log_*_enabled() first, but only when the caller was compiled against
-     * an SDK whose macros expand that way. */
-    if (!os_log_type_enabled(log, type))
-        return;
-
-    /* This _should_ be identical to the NSObject layout */
-    struct os_log_s* s = (struct os_log_s*)log;
-    // the message with its arguments filled in from the packed buffer
-    struct pd_os_log_args args = { NULL, buffer != NULL ? buffer + 2 : NULL, buffer != NULL ? buffer + buffer_size : NULL };
-    char message[2048];
-
-    if (buffer == NULL || buffer_size < 2)
-        args.at = args.end = NULL;
-    pd_os_log_render(message, sizeof(message), format, &args);
-    fprintf(stderr, "[%s] %s.%s(%p): %s\n", _typeToStr(type), s->subsystem, s->category, dso, message);
-
+    (void)dso;
+    pd_os_log_packed(&args, buffer, buffer_size, errno);
+    pd_os_log_send(log, type, format, &args);
 }
 
 /*
@@ -837,35 +1119,20 @@ void _os_trace_encode_and_send(void* dso,
     va_list args,
     uint32_t flags)
 {
-    size_t buffer_size = 4096;
-    char buffer[buffer_size];
-    os_log_pack_t pack;
+    struct pd_os_log_args a = { &args, NULL, NULL, false, errno };
 
-    size_t len = os_log_encode(buffer, buffer_size, format, args, flags);
-    if (!len)
-        return;
-
-    //os_log_pack_size()
+    (void)dso; (void)flags;
+    pd_os_log_send(log, type, format, &a);
 }
 
 void _os_trace_debug(const char* message)
 {
-    _os_trace_encode_and_send(__builtin_return_address(0),
-                              OS_LOG_DEFAULT,
-                              OS_LOG_TYPE_DEBUG,
-                              message,
-                              NULL,
-                              0);
+    pd_os_log_send_message(OS_LOG_DEFAULT, OS_LOG_TYPE_DEBUG, message);
 }
 
 void _os_trace_error(const char* message)
 {
-    _os_trace_encode_and_send(__builtin_return_address(0),
-                              OS_LOG_DEFAULT,
-                              OS_LOG_TYPE_ERROR,
-                              message,
-                              NULL,
-                              0);
+    pd_os_log_send_message(OS_LOG_DEFAULT, OS_LOG_TYPE_ERROR, message);
 }
 
 void _os_log_simple(void* dso,
@@ -873,6 +1140,8 @@ void _os_log_simple(void* dso,
     os_log_type_t type,
     const char* message)
 {
+    (void)dso;
+    pd_os_log_send_message(log, type, message);
 }
 
 void _os_log_simple_impl(void* dso,
@@ -880,54 +1149,56 @@ void _os_log_simple_impl(void* dso,
     os_log_type_t type,
     const char* message)
 {
+    (void)dso;
+    pd_os_log_send_message(log, type, message);
 }
 
 void _os_log_error(void* dso, os_log_t log, const char* format, ...)
 {
-    char buffer[4096] = {0};
-    size_t buffer_size = sizeof(buffer);
-    va_list args;
+    struct pd_os_log_args a = { NULL, NULL, NULL, false, errno };
+    va_list ap;
 
-    va_start(args, format);
-    size_t len = os_log_encode(buffer, buffer_size, format, args, 0);
-    va_end(args);
-    __os_log_impl(dso, log, OS_LOG_TYPE_ERROR, format, buffer, buffer_size);
+    (void)dso;
+    va_start(ap, format);
+    a.ap = &ap;
+    pd_os_log_send(log, OS_LOG_TYPE_ERROR, format, &a);
+    va_end(ap);
 }
 
 void _os_log_fault(void* dso, os_log_t log, const char* format, ...)
 {
-    char buffer[4096] = {0};
-    size_t buffer_size = sizeof(buffer);
-    va_list args;
+    struct pd_os_log_args a = { NULL, NULL, NULL, false, errno };
+    va_list ap;
 
-    va_start(args, format);
-    size_t len = os_log_encode(buffer, buffer_size, format, args, 0);
-    va_end(args);
-    __os_log_impl(dso, log, OS_LOG_TYPE_FAULT, format, buffer, buffer_size);
+    (void)dso;
+    va_start(ap, format);
+    a.ap = &ap;
+    pd_os_log_send(log, OS_LOG_TYPE_FAULT, format, &a);
+    va_end(ap);
 }
 
 void _os_log_info(void* dso, os_log_t log, const char* format, ...)
 {
-    char buffer[4096] = {0};
-    size_t buffer_size = sizeof(buffer);
-    va_list args;
+    struct pd_os_log_args a = { NULL, NULL, NULL, false, errno };
+    va_list ap;
 
-    va_start(args, format);
-    size_t len = os_log_encode(buffer, buffer_size, format, args, 0);
-    va_end(args);
-    __os_log_impl(dso, log, OS_LOG_TYPE_INFO, format, buffer, buffer_size);
+    (void)dso;
+    va_start(ap, format);
+    a.ap = &ap;
+    pd_os_log_send(log, OS_LOG_TYPE_INFO, format, &a);
+    va_end(ap);
 }
 
 void _os_log_debug(void* dso, os_log_t log, const char* format, ...)
 {
-    char buffer[4096] = {0};
-    size_t buffer_size = sizeof(buffer);
-    va_list args;
+    struct pd_os_log_args a = { NULL, NULL, NULL, false, errno };
+    va_list ap;
 
-    va_start(args, format);
-    size_t len = os_log_encode(buffer, buffer_size, format, args, 0);
-    va_end(args);
-    __os_log_impl(dso, log, OS_LOG_TYPE_DEBUG, format, buffer, buffer_size);
+    (void)dso;
+    va_start(ap, format);
+    a.ap = &ap;
+    pd_os_log_send(log, OS_LOG_TYPE_DEBUG, format, &a);
+    va_end(ap);
 }
 
 void _os_log_set_mode(uint32_t mode)
