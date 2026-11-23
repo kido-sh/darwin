@@ -37,7 +37,7 @@ the release a directory came from and the other licenses its files carry.
 
 | Path | License | Notes |
 |---|---|---|
-| `LICENSING.md`, `NOTICE`, `README.md`, `docs/**`, `scripts/**`, `flake.nix`, `flake.lock`, `.gitignore`, `.github/**` | `Apache-2.0` | kido |
+| `LICENSING.md`, `NOTICE`, `README.md`, `docs/**`, `scripts/**`, `test/**`, `flake.nix`, `flake.lock`, `.gitignore`, `.github/**` | `Apache-2.0` | kido |
 | `LICENSES/**` | | The license texts themselves |
 | `nix/**` | `BSD-2-Clause` | PureDarwin's Nix code as reorganized by kido. kido's new files carry an `Apache-2.0` SPDX line |
 | `patches/xnu-loader-no-logo.patch` | `BSD-3-Clause` | kido's change to xnu-loader |
