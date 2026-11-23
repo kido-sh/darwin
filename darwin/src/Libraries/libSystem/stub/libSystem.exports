@@ -2599,3 +2599,6 @@ _fts_set$INODE64
 _getsectbyname
 _getsectdata
 _getsectdatafromFramework
+# libc: what python imports
+_ctermid_r
+_forkpty
