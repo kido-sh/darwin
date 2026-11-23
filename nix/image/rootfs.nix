@@ -289,6 +289,8 @@ fi
 EOF
     cat > $staging/usr/libexec/kido-net-up <<'EOF'
 #!/bin/sh
+# Sequential source ports repeat after a restart, while peers may still hold the old connections.
+/bin/sysctl -w net.inet.tcp.randomize_ports=1 >/dev/null
 case " $(/bin/sysctl -n kern.bootargs) " in
 *" kido_ip="*)
     # launchd may have started mdnsd on the old resolv.conf; SIGHUP makes it take the new servers
