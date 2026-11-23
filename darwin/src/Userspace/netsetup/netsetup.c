@@ -381,8 +381,8 @@ usage(const char *prog)
     printf("  %s [--wait SECONDS] [IFNAME IFADDR NETMASK GATEWAY [DNS [BROADCAST]]]\n", prog);
     printf("  %s --from-bootargs   (kido_ip= [kido_mask=] [kido_gw=] [kido_dns=]; nothing without kido_ip)\n", prog);
     printf("environment overrides:\n");
-    printf("  PUREDARWIN_NET_IFACE PUREDARWIN_NET_ADDR PUREDARWIN_NET_MASK\n");
-    printf("  PUREDARWIN_NET_ROUTER PUREDARWIN_NET_DNS PUREDARWIN_NET_BROADCAST\n");
+    printf("  KIDO_NET_IFACE KIDO_NET_ADDR KIDO_NET_MASK\n");
+    printf("  KIDO_NET_ROUTER KIDO_NET_DNS KIDO_NET_BROADCAST\n");
 }
 
 int
@@ -391,12 +391,12 @@ main(int argc, char **argv)
     struct pd_network_config cfg;
     int argi = 1;
 
-    cfg.ifname = env_default("PUREDARWIN_NET_IFACE", PD_NETWORKD_DEFAULT_IFACE);
-    cfg.addr = env_default("PUREDARWIN_NET_ADDR", PD_NETWORKD_DEFAULT_ADDR);
-    cfg.mask = env_default("PUREDARWIN_NET_MASK", PD_NETWORKD_DEFAULT_MASK);
-    cfg.router = env_default("PUREDARWIN_NET_ROUTER", PD_NETWORKD_DEFAULT_ROUTER);
-    cfg.dns = env_default("PUREDARWIN_NET_DNS", PD_NETWORKD_DEFAULT_DNS);
-    cfg.broadcast = env_default("PUREDARWIN_NET_BROADCAST", PD_NETWORKD_DEFAULT_BROADCAST);
+    cfg.ifname = env_default("KIDO_NET_IFACE", PD_NETWORKD_DEFAULT_IFACE);
+    cfg.addr = env_default("KIDO_NET_ADDR", PD_NETWORKD_DEFAULT_ADDR);
+    cfg.mask = env_default("KIDO_NET_MASK", PD_NETWORKD_DEFAULT_MASK);
+    cfg.router = env_default("KIDO_NET_ROUTER", PD_NETWORKD_DEFAULT_ROUTER);
+    cfg.dns = env_default("KIDO_NET_DNS", PD_NETWORKD_DEFAULT_DNS);
+    cfg.broadcast = env_default("KIDO_NET_BROADCAST", PD_NETWORKD_DEFAULT_BROADCAST);
     cfg.wait_seconds = PD_NETWORKD_DEFAULT_WAIT_SECONDS;
     cfg.write_resolver = 1;
 

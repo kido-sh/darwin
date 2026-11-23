@@ -58,7 +58,7 @@ static const char *_logPath(void) {
     static dispatch_once_t once;
 
     dispatch_once(&once, ^{
-        const char *dir = getenv("PUREDARWIN_DISTNOTE_DIR");
+        const char *dir = getenv("KIDO_DISTNOTE_DIR");
 
         if (dir == NULL) {
             dir = "/var/run";
@@ -66,7 +66,7 @@ static const char *_logPath(void) {
                 dir = "/tmp";
             }
         }
-        snprintf(path, sizeof(path), "%s/puredarwin-distnote.log", dir);
+        snprintf(path, sizeof(path), "%s/kido-distnote.log", dir);
     });
     return path;
 }

@@ -2876,7 +2876,7 @@ out:
 bool
 launchctl_use_xpc_domain_bootstrap(void)
 {
-	const char *value = getenv("PUREDARWIN_XPC_DOMAIN_BOOTSTRAP");
+	const char *value = getenv("KIDO_XPC_DOMAIN_BOOTSTRAP");
 
 	return value && strcmp(value, "0") != 0;
 }
