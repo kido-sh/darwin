@@ -15,6 +15,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/reason.h>
+#include <sys/uio.h>
+#include <os/reason_private.h>
 #include <CrashReporterClient.h>
 /* os_log_pack_t, for _os_crash_fmt() below. By path: <os/log_private.h> finds
  * xnu's kernel-side copy on libc's include path, not this userspace shim. */
@@ -51,12 +56,41 @@ _os_assert_log_ctx(void *callout, void *ctx, uint64_t code)
     fprintf(stderr, "os_assert failure with context (code 0x%llx)\n", (unsigned long long)code);
 }
 
+extern void _pd_os_log_simple(void *dso, void *log, uint8_t type, const char *message)
+    __asm__("__os_log_simple");
+
+static void
+_os_crash_record(const char *message)
+{
+    struct iovec line[] = {
+        { (void *)"fatal: ", 7 },
+        { (void *)message, strlen(message) },
+        { (void *)"\n", 1 },
+    };
+
+    (void)writev(STDERR_FILENO, line, 3);
+    _pd_os_log_simple(NULL, NULL, 0x11, message);
+    CRSetCrashLogMessage(message);
+}
+
 void
 _os_crash(const char *message)
 {
-    fprintf(stderr, "fatal: %s\n", message);
-    CRSetCrashLogMessage(message);
+    _os_crash_record(message != NULL ? message : "(no message)");
     abort();
+}
+
+/*
+ * macOS's crash-message macros call this after _os_log_send_and_compose_impl(), with the format it
+ * handed back and the composed message, and it does not return.
+ */
+void
+_os_crash_msg(const char *format, const char *message)
+{
+    const char *crash = message != NULL ? message : format != NULL ? format : "(no message)";
+
+    _os_crash_record(crash);
+    abort_with_reason(OS_REASON_LIBSYSTEM, OS_REASON_LIBSYSTEM_CODE_FAULT, crash, 0);
 }
 
 /*
