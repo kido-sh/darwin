@@ -370,6 +370,10 @@ let
   libiconvArm64Build = mkArm64Build ./third-party/libiconv.nix { libiconvReal = pkgs.libiconvReal; };
   ncursesArm64Build = mkArm64Build ./third-party/ncurses.nix { ncurses = pkgs.ncurses; };
   ncursesDylibArm64Build = mkArm64Build ./third-party/ncurses-dylib { ncurses = pkgs.ncurses; };
+  libeditArm64Build = mkArm64Build ./third-party/libedit {
+    inherit (pkgs) libedit;
+    ncurses = ncursesDylibArm64Build;
+  };
   zshArm64Build = mkArm64Build ./third-party/zsh.nix {
     zsh = pkgs.zsh;
     ncurses = ncursesArm64Build;
@@ -488,6 +492,7 @@ in
     coreServicesArm64Build
     kernelArm64VirtBuild
     kextsArm64Build
+    libeditArm64Build
     libiconvArm64Build
     libzDylibArm64Build
     ncursesDylibArm64Build

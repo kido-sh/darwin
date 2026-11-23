@@ -100,6 +100,13 @@ the terminfo database in /usr/share/terminfo, and linked into zsh
   Copyright 1998-2017,2018 Free Software Foundation, Inc.
   https://invisible-island.net/ncurses/
 
+libedit 20251016-3.1, /usr/lib/libedit.3.dylib
+  Copyright (c) 1989, 1992, 1993 The Regents of the University of California.
+  Copyright (c) 1997-2017 The NetBSD Foundation, Inc. Copyright (c) 2015
+  Joerg Sonnenberger. Derived from software contributed to Berkeley by
+  Christos Zoulas of Cornell University. BSD 3-Clause and BSD 2-Clause
+  Licenses. https://thrysoee.dk/editline/
+
 GNU libiconv 1.19
   Copyright (C) 1999-2026 Free Software Foundation, Inc. GNU Lesser General
   Public License 2.1 or later. Source: https://ftp.gnu.org/gnu/libiconv/,
