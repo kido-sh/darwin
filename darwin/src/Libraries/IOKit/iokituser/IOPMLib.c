@@ -256,7 +256,7 @@ IOPMAssertionDeclareUserActivity(CFStringRef AssertionName, IOPMUserActiveType u
 	if (timebase.denom == 0) {
 		mach_timebase_info(&timebase);
 	}
-	if (token >= 0 || notify_register_check("org.puredarwin.hid.lastinput", &token) == 0) {
+	if (token >= 0 || notify_register_check("sh.kido.hid.lastinput", &token) == 0) {
 		notify_set_state(token, mach_absolute_time() * timebase.numer / timebase.denom);
 	}
 	if (*AssertionID != kIOPMNullAssertionID) {

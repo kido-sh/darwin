@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 1998-2014 Apple Computer, Inc. All rights reserved.
- * Modified by the PureDarwin project in 2026; see docs/upstream.md.
+ * Modified by the PureDarwin project and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -2418,7 +2418,7 @@ pd_copy_hid_idle_time(io_registry_entry_t entry)
     SInt64 idle;
 
     if (!IOObjectConformsTo(entry, "IOHIDSystem")) return NULL;
-    if (token < 0 && notify_register_check("org.puredarwin.hid.lastinput", &token) != 0) return NULL;
+    if (token < 0 && notify_register_check("sh.kido.hid.lastinput", &token) != 0) return NULL;
     if (notify_get_state(token, &last) != 0 || last == 0) return NULL;
     if (timebase.denom == 0) mach_timebase_info(&timebase);
     now = mach_absolute_time() * timebase.numer / timebase.denom;

@@ -18,7 +18,7 @@
 #define SYS_fsgetpath 427
 #endif
 
-#define kPDBookmarkMagic CFSTR("org.puredarwin.bookmark")
+#define kPDBookmarkMagic CFSTR("sh.kido.bookmark")
 
 static CFErrorRef posixError(int code)
 {

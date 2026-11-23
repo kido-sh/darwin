@@ -24,7 +24,7 @@ _pd_xpc_log(void)
 	static os_log_t log;
 
 	dispatch_once(&once, ^{
-		log = os_log_create("org.puredarwin.libxpc", "Debug");
+		log = os_log_create("sh.kido.libxpc", "Debug");
 	});
 	return log;
 }

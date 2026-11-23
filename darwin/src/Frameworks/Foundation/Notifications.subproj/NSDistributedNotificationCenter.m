@@ -41,7 +41,7 @@
 NSNotificationCenterType const NSLocalNotificationCenterType =
     @"NSLocalNotificationCenterType";
 
-static const char *kDistributedNotifyName = "org.puredarwin.distributed_notification";
+static const char *kDistributedNotifyName = "sh.kido.distributed_notification";
 static const uint32_t kRecordMagic = 0x504e4f54; /* 'PNOT' */
 
 /* Bounded so a long-running session cannot grow the log without limit; a
@@ -91,7 +91,7 @@ static const char *_logPath(void) {
     self = [super init];
     if (self != nil) {
         _notifyToken = -1;
-        _queue = (id)dispatch_queue_create("org.puredarwin.distnote", NULL);
+        _queue = (id)dispatch_queue_create("sh.kido.distnote", NULL);
 
         /* Start at the end: a new observer does not receive history. */
         struct stat info;

@@ -173,8 +173,8 @@ static void registerApplication(CFStringRef path)
     if (identifier != NULL && !CFDictionaryContainsKey(sIdentifierMap, identifier)) {
         CFDictionarySetValue(sIdentifierMap, identifier, appURL);
     }
-    // apps look the file viewer up by its macOS id, which resolves to PD's Finder.app
-    if (identifier != NULL && CFEqual(identifier, CFSTR("org.puredarwin.Finder")) &&
+    // apps look the file viewer up by its macOS id, which resolves to the system's own Finder.app
+    if (identifier != NULL && CFEqual(identifier, CFSTR("sh.kido.Finder")) &&
         !CFDictionaryContainsKey(sIdentifierMap, CFSTR("com.apple.finder"))) {
         CFDictionarySetValue(sIdentifierMap, CFSTR("com.apple.finder"), appURL);
     }

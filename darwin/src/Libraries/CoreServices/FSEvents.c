@@ -951,7 +951,7 @@ FSEventStreamCreate(CFAllocatorRef allocator, FSEventStreamCallback callback,
 	s->latency = latency < 0 ? 0 : latency;
 	s->flags = flags;
 	s->fd = -1;
-	s->q = dispatch_queue_create("org.puredarwin.FSEventStream", DISPATCH_QUEUE_SERIAL);
+	s->q = dispatch_queue_create("sh.kido.FSEventStream", DISPATCH_QUEUE_SERIAL);
 	return s;
 }
 

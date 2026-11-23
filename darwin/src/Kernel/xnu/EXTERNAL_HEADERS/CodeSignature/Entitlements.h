@@ -10,9 +10,9 @@
 #ifndef PD_CODESIGNATURE_ENTITLEMENTS_H
 #define PD_CODESIGNATURE_ENTITLEMENTS_H
 
-#define kCSWebBrowserNetworkEntitlement    "org.puredarwin.unmatchable-entitlement"
-#define kCSWebBrowserHostEntitlement       "org.puredarwin.unmatchable-entitlement"
-#define kCSWebBrowserGPUEntitlement        "org.puredarwin.unmatchable-entitlement"
-#define kCSWebBrowserWebContentEntitlement "org.puredarwin.unmatchable-entitlement"
+#define kCSWebBrowserNetworkEntitlement    "sh.kido.unmatchable-entitlement"
+#define kCSWebBrowserHostEntitlement       "sh.kido.unmatchable-entitlement"
+#define kCSWebBrowserGPUEntitlement        "sh.kido.unmatchable-entitlement"
+#define kCSWebBrowserWebContentEntitlement "sh.kido.unmatchable-entitlement"
 
 #endif /* PD_CODESIGNATURE_ENTITLEMENTS_H */

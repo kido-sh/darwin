@@ -73,7 +73,7 @@ static NSDictionary *_errorDictionary(DNSServiceErrorType error) {
         _name = [name copy];
         _port = port;
         _addresses = [[NSMutableArray alloc] init];
-        _queue = dispatch_queue_create("org.puredarwin.NSNetService", NULL);
+        _queue = dispatch_queue_create("sh.kido.NSNetService", NULL);
     }
     return self;
 }
@@ -305,7 +305,7 @@ static void _resolveReply(DNSServiceRef ref, DNSServiceFlags flags,
     self = [super init];
     if (self != nil) {
         _services = [[NSMutableArray alloc] init];
-        _queue = dispatch_queue_create("org.puredarwin.NSNetServiceBrowser", NULL);
+        _queue = dispatch_queue_create("sh.kido.NSNetServiceBrowser", NULL);
     }
     return self;
 }

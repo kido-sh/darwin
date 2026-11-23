@@ -657,7 +657,7 @@ static BOOL isThisHost(NSString *host) {
     /* Serviced on a dispatch queue rather than a CFRunLoopSource: NSRunLoop is
      * select()-driven and never turns a CFRunLoop, so a source here would only
      * be serviced by an app that drives CFRunLoopRun() itself. */
-    _queue = dispatch_queue_create("org.puredarwin.NSConnection", NULL);
+    _queue = dispatch_queue_create("sh.kido.NSConnection", NULL);
     CFMessagePortSetDispatchQueue(local, (dispatch_queue_t)_queue);
 
     /* Requests are serviced on the dispatch queue, but a vended object is

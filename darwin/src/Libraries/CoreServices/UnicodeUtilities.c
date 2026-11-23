@@ -389,7 +389,7 @@ OSErr UpdateSystemActivity(UInt8 activity)
 
     if (activity != UsrActivity) return noErr;
     if (timebase.denom == 0) mach_timebase_info(&timebase);
-    if (token < 0 && notify_register_check("org.puredarwin.hid.lastinput", &token) != 0) return noErr;
+    if (token < 0 && notify_register_check("sh.kido.hid.lastinput", &token) != 0) return noErr;
     notify_set_state(token, mach_absolute_time() * timebase.numer / timebase.denom);
     return noErr;
 }

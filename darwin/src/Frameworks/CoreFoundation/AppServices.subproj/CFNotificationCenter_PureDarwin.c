@@ -103,7 +103,7 @@ static char *copyCName(CFStringRef name, const char *prefix) {
 
 // cross-process names, Darwin ones verbatim, distributed ones in their own namespace
 static const char *notifyPrefix(CenterKind kind) {
-    return kind == CenterDistributed ? "org.puredarwin.distnote." : "";
+    return kind == CenterDistributed ? "sh.kido.distnote." : "";
 }
 
 void CFNotificationCenterAddObserver(CFNotificationCenterRef center, const void *observer, CFNotificationCallback callBack, CFStringRef name, const void *object, CFNotificationSuspensionBehavior suspensionBehavior) {
