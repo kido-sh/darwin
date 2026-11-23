@@ -83,6 +83,11 @@ In this repository:
   bundle identifiers and other identifiers, the kido-* helper programs, the KIDO_* environment
   variables, KidoDarwin in product, policy and driver names and in the EFI panic directory, and log
   messages without a PureDarwin prefix.
+- What macOS command-line tools import and the guest lacked: nexttoward, the arm64 fenv with
+  macOS's ABI, libplatform's arm64 ucontext functions, getsectdata, ctermid_r, forkpty,
+  getattrlistbulk, getitimer, preadv, pwritev, _os_log_send_and_compose_impl, _os_crash_msg, the
+  signpost calls, and Security's answers for a system without a default keychain; os_log and
+  syslog(3) messages recorded by PureDarwin's logd in /var/log/system.log; tests in test/libsystem.
 - An APSL header on Ext4FileSystemDriver.cpp, which is derived from Apple's AppleFileSystemDriver.
 - The Nix code reorganized under nix/ and the tree pruned to what the container builds.
 - The licensing files and the change notices.
