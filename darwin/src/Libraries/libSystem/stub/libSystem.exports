@@ -2595,3 +2595,7 @@ _fts_open$INODE64
 _fts_open_b$INODE64
 _fts_read$INODE64
 _fts_set$INODE64
+# libmacho: the section lookups in the main executable
+_getsectbyname
+_getsectdata
+_getsectdatafromFramework
