@@ -79,6 +79,10 @@ In this repository:
   OpenSSL; Darling's corecrypto removed.
 - Guest branding (KidoDarwin, hostname kido), no PureDarwin logo in the loader, and no GPL
   programs, headers, static libraries, configd or ipconfig in the image.
+- kido's names where PureDarwin used its own: the kido_* boot-args, the sh.kido.* launchd jobs,
+  bundle identifiers and other identifiers, the kido-* helper programs, the KIDO_* environment
+  variables, KidoDarwin in product, policy and driver names and in the EFI panic directory, and log
+  messages without a PureDarwin prefix.
 - An APSL header on Ext4FileSystemDriver.cpp, which is derived from Apple's AppleFileSystemDriver.
 - The Nix code reorganized under nix/ and the tree pruned to what the container builds.
 - The licensing files and the change notices.
