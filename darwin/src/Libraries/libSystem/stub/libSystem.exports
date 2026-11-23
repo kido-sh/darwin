@@ -2602,3 +2602,8 @@ _getsectdatafromFramework
 # libc: what python imports
 _ctermid_r
 _forkpty
+# xnu syscalls: what python and uv import
+_getattrlistbulk
+_getitimer
+_preadv
+_pwritev
