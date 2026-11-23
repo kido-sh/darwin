@@ -35,7 +35,7 @@ static VOID panic_make_dir(EFI_FILE_PROTOCOL *root, CONST CHAR16 *path) {
     uefi_call_wrapper(dir->Close, 1, dir);
 }
 
-// writes a waiting panic log to \EFI\PureDarwin\Panics\panic-N.txt and clears the variable
+// writes a waiting panic log to \EFI\KidoDarwin\Panics\panic-N.txt and clears the variable
 VOID boot_save_panic_log(AppContext *ctx) {
   EFI_RUNTIME_SERVICES *rt = ST ? ST->RuntimeServices : NULL;
   EFI_FILE_PROTOCOL *root, *file = NULL;
@@ -53,11 +53,11 @@ VOID boot_save_panic_log(AppContext *ctx) {
 
   root = panic_boot_root(ctx);
   if (root) {
-    panic_make_dir(root, L"\\EFI\\PureDarwin");
-    panic_make_dir(root, L"\\EFI\\PureDarwin\\Panics");
+    panic_make_dir(root, L"\\EFI\\KidoDarwin");
+    panic_make_dir(root, L"\\EFI\\KidoDarwin\\Panics");
     // the first name not already taken, so earlier logs are kept
     for (n = 1; n < 1000; n++) {
-      SPrint(path, sizeof(path), L"\\EFI\\PureDarwin\\Panics\\panic-%d.txt", n);
+      SPrint(path, sizeof(path), L"\\EFI\\KidoDarwin\\Panics\\panic-%d.txt", n);
       if (EFI_ERROR(file_open(root, path, EFI_FILE_MODE_READ, 0, &file)))
         break;
       uefi_call_wrapper(file->Close, 1, file);
