@@ -44,7 +44,7 @@ under nix/. corecrypto comes from the pinned fork commit.
 
 ## kido's changes
 
-All between 2026-11-18 and 2026-11-23, by the kido authors.
+All between 2026-11-18 and 2026-11-24, by the kido authors.
 
 On PureDarwin's tree, before the import (cocoa-xu/PureDarwin, branch darwin-container):
 
@@ -88,6 +88,12 @@ In this repository:
   getattrlistbulk, getitimer, preadv, pwritev, _os_log_send_and_compose_impl, _os_crash_msg, the
   signpost calls, and Security's answers for a system without a default keychain; os_log and
   syslog(3) messages recorded by PureDarwin's logd in /var/log/system.log; tests in test/libsystem.
+- macOS's libcurl, libedit and ncurses in /usr/lib: libcurl.4, libedit.3, libncurses.5.4,
+  libpanel.5.4, libmenu.5.4 and libform.5.4 with macOS's install names, versions and exports, built
+  from nixpkgs' curl 8.21.0 (over the image's OpenSSL and /etc/ssl/cert.pem), libedit 20251016-3.1
+  and ncurses 6.6; ncurses keeps both of macOS's cchar_t layouts (the plain names and the $NCURSES60
+  ones), exports the four ncurses 6.0 internals that later releases dropped or made static, and
+  installs its terminfo database; tests in test/syslibs.
 - An APSL header on Ext4FileSystemDriver.cpp, which is derived from Apple's AppleFileSystemDriver.
 - The Nix code reorganized under nix/ and the tree pruned to what the container builds.
 - The licensing files and the change notices.
