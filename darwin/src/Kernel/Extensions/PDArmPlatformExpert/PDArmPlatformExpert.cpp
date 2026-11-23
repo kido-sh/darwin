@@ -28,7 +28,7 @@ private:
 	IOMemoryMap *fRTCMap;
 	volatile uint32_t *fRTC;
 	thread_call_t fRTCPublish;
-	// pdtime=SECONDS on boards without an rtc driver: the calendar at boot, counted on from uptime
+	// kido_time=SECONDS on boards without an rtc driver: the calendar at boot, counted on from uptime
 	long fBootSecs;
 
 public:
@@ -243,11 +243,11 @@ PDArmPlatformExpert::startQemuRTC(void)
 
 	if (type == NULL || strncmp((const char *)type->getBytesNoCopy(), "qemuvirt-io", type->getLength()) != 0) {
 		OSSafeReleaseNULL(armio);
-		bool have_time = PE_parse_boot_argn("pdtime", &fBootSecs, sizeof(fBootSecs)) && fBootSecs > 0;
+		bool have_time = PE_parse_boot_argn("kido_time", &fBootSecs, sizeof(fBootSecs)) && fBootSecs > 0;
 		if (have_time)
-			IOLog("PDArmPlatformExpert: calendar from pdtime %ld\n", fBootSecs);
+			IOLog("PDArmPlatformExpert: calendar from kido_time %ld\n", fBootSecs);
 		// Apple SoCs have no RTC driver here, so IORTC is published at once and IOKitInitializeTime does
-		// not wait 30 s for it. The calendar comes from pdtime or starts at 1970
+		// not wait 30 s for it. The calendar comes from kido_time or starts at 1970
 		if (strcmp(platformModelName(), "Apple ARM") == 0) {
 			publishResource("IORTC", this);
 			return;
@@ -268,13 +268,13 @@ PDArmPlatformExpert::startQemuRTC(void)
 		fRTC = (volatile uint32_t *)fRTCMap->getVirtualAddress();
 	}
 	// Root mount relied on the 30 s IOKitInitializeTime spent waiting for this: APFS still holds the
-	// container a few seconds after IOKit goes quiet, so IORTC is published 10 s later (pd_rtc_delay=<s>).
-	// A boot that skips the IOKit waits must not initialize the calendar before this: give it pd_rtc_delay=0
+	// container a few seconds after IOKit goes quiet, so IORTC is published 10 s later (kido_rtc_delay=<s>).
+	// A boot that skips the IOKit waits must not initialize the calendar before this: give it kido_rtc_delay=0
 	{
 		uint64_t deadline;
 		uint32_t delay = 10;
 
-		PE_parse_boot_argn("pd_rtc_delay", &delay, sizeof(delay));
+		PE_parse_boot_argn("kido_rtc_delay", &delay, sizeof(delay));
 		fRTCPublish = delay ? thread_call_allocate(&PDArmPlatformExpert::publishRTC, this) : NULL;
 		if (fRTCPublish == NULL) {
 			publishResource("IORTC", this);

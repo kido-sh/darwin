@@ -81,8 +81,8 @@ IOKitInitializeTime( void )
 	t.tv_sec = 30;
 	t.tv_nsec = 0;
 
-	PE_parse_boot_argn("pd_rtc_wait", &rtc_wait, sizeof(rtc_wait));
-	PE_parse_boot_argn("pd_quiet_wait", &quiet_wait, sizeof(quiet_wait));
+	PE_parse_boot_argn("kido_rtc_wait", &rtc_wait, sizeof(rtc_wait));
+	PE_parse_boot_argn("kido_quiet_wait", &quiet_wait, sizeof(quiet_wait));
 
 	if (rtc_wait != 0) {
 		mach_timespec_t r = { rtc_wait, 0 };

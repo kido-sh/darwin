@@ -357,14 +357,14 @@ config_from_boot_args(struct pd_network_config *cfg)
     if (sysctlbyname("kern.bootargs", args, &len, NULL, 0) != 0)
         return 0;
     args[len] = '\0';
-    if (!boot_arg(args, "pd_ip", addr, sizeof(addr)))
+    if (!boot_arg(args, "kido_ip", addr, sizeof(addr)))
         return 0;
     cfg->addr = addr;
-    if (boot_arg(args, "pd_mask", mask, sizeof(mask)))
+    if (boot_arg(args, "kido_mask", mask, sizeof(mask)))
         cfg->mask = mask;
-    if (boot_arg(args, "pd_gw", router, sizeof(router)))
+    if (boot_arg(args, "kido_gw", router, sizeof(router)))
         cfg->router = router;
-    if (boot_arg(args, "pd_dns", dns, sizeof(dns)))
+    if (boot_arg(args, "kido_dns", dns, sizeof(dns)))
         cfg->dns = dns;
     if (inet_aton(cfg->addr, &a) && inet_aton(cfg->mask, &m)) {
         a.s_addr |= ~m.s_addr;
@@ -379,7 +379,7 @@ usage(const char *prog)
 {
     printf("usage:\n");
     printf("  %s [--wait SECONDS] [IFNAME IFADDR NETMASK GATEWAY [DNS [BROADCAST]]]\n", prog);
-    printf("  %s --from-bootargs   (pd_ip= [pd_mask=] [pd_gw=] [pd_dns=]; nothing without pd_ip)\n", prog);
+    printf("  %s --from-bootargs   (kido_ip= [kido_mask=] [kido_gw=] [kido_dns=]; nothing without kido_ip)\n", prog);
     printf("environment overrides:\n");
     printf("  PUREDARWIN_NET_IFACE PUREDARWIN_NET_ADDR PUREDARWIN_NET_MASK\n");
     printf("  PUREDARWIN_NET_ROUTER PUREDARWIN_NET_DNS PUREDARWIN_NET_BROADCAST\n");
@@ -406,7 +406,7 @@ main(int argc, char **argv)
             argi++;
         } else if (strcmp(argv[argi], "--from-bootargs") == 0) {
             if (!config_from_boot_args(&cfg)) {
-                pd_log("no pd_ip boot-arg, leaving the network alone");
+                pd_log("no kido_ip boot-arg, leaving the network alone");
                 return 0;
             }
             argi++;

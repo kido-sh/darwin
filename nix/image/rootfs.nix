@@ -290,7 +290,7 @@ EOF
     cat > $staging/usr/libexec/pd-net-up <<'EOF'
 #!/bin/sh
 case " $(/bin/sysctl -n kern.bootargs) " in
-*" pd_ip="*)
+*" kido_ip="*)
     # launchd may have started mdnsd on the old resolv.conf; SIGHUP makes it take the new servers
     resolv=$(/bin/cat /etc/resolv.conf 2>/dev/null)
     /bin/netsetup --from-bootargs &&

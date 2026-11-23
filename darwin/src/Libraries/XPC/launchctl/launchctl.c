@@ -187,8 +187,8 @@ iokit_quiet_wait_disabled(void)
 	if (sysctlbyname("kern.bootargs", buf, &len, NULL, 0) != 0) {
 		return false;
 	}
-	ptr = strnstr(buf, "pd_quiet_wait=", len);
-	return ptr != NULL && strtoul(ptr + strlen("pd_quiet_wait="), NULL, 10) == 0;
+	ptr = strnstr(buf, "kido_quiet_wait=", len);
+	return ptr != NULL && strtoul(ptr + strlen("kido_quiet_wait="), NULL, 10) == 0;
 }
 
 static CFPropertyListRef CreateMyPropertyListFromFile(const char *);

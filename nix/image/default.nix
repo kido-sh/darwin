@@ -80,7 +80,7 @@ let
     espMB = 64;
     # an 8 GiB disk: the GPT's 1 MiB at each end, the ESP and the root
     rootMB = 8126;
-    bootArgs = "serial=3 pd_rtc_wait=5 pd_rtc_delay=0 pd_quiet_wait=0";
+    bootArgs = "serial=3 kido_rtc_wait=5 kido_rtc_delay=0 kido_quiet_wait=0";
     inherit rootUUID;
     # uuid5 of https://github.com/kido-sh/darwin#disk, #esp, #esp-volume and #hash-seed
     diskGUID = "da60a1e3-7a76-5799-a44a-22428bf733df";

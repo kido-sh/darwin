@@ -3,11 +3,11 @@
     "kido": {
       "flake": false,
       "locked": {
-        "lastModified": 1795411282,
-        "narHash": "sha256-pXEKwuVtZYmdhsEqCKgsKpLf0R4z7yTTHoi3017MOjY=",
+        "lastModified": 1795440008,
+        "narHash": "sha256-ezPPhqJGO3EwKTrCsrK0G5nwmiGrT94TRqymuBlIcLU=",
         "owner": "kido-sh",
         "repo": "kido",
-        "rev": "d9cfcc55effc3b68deb386493502eabeed091699",
+        "rev": "1d9e60863e18652592de69f3233c0e4098159299",
         "type": "github"
       },
       "original": {
