@@ -8,7 +8,7 @@
  */
 #define SYSTEM_VERSION_PLIST "/System/Library/CoreServices/SystemVersion.plist"
 
-#define PRODUCT_NAME "PureDarwin"
+#define PRODUCT_NAME "KidoDarwin"
 #define PRODUCT_VERSION "26.5"
 #define BUILD_VERSION "25F74"
 

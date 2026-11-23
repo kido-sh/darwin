@@ -2766,7 +2766,7 @@ load_and_unload_cmd(int argc, char *const argv[])
 
 		bool should_glob = true;
 		if (_launchctl_verbose_boot) {
-			launchctl_log(LOG_NOTICE, "PureDarwin bootstrap scanning: %s", nspath);
+			launchctl_log(LOG_NOTICE, "bootstrap scanning: %s", nspath);
 		}
 
 #if TARGET_OS_EMBEDDED
@@ -2821,7 +2821,7 @@ load_and_unload_cmd(int argc, char *const argv[])
 	if (lus.load) {
 		distill_jobs(lus.pass1);
 		if (_launchctl_verbose_boot) {
-			launchctl_log(LOG_NOTICE, "PureDarwin bootstrap found %zu jobs",
+			launchctl_log(LOG_NOTICE, "bootstrap found %zu jobs",
 					launch_data_array_get_count(lus.pass1));
 		}
 		if ((_launchctl_system_bootstrap || _launchctl_peruser_bootstrap) && launchctl_use_xpc_domain_bootstrap()) {
@@ -2994,12 +2994,12 @@ submit_job_pass(launch_data_t jobs)
 	if (launch_data_array_get_count(jobs) == 0)
 		return;
 
-	launchctl_log(LOG_NOTICE, "PureDarwin launchctl: submit_job_pass count=%zu",
+	launchctl_log(LOG_NOTICE, "launchctl: submit_job_pass count=%zu",
 			launch_data_array_get_count(jobs));
 	for (i = 0; i < launch_data_array_get_count(jobs); i++) {
 		launch_data_t job = launch_data_array_get_index(jobs, i);
 		launch_data_t label = job ? launch_data_dict_lookup(job, LAUNCH_JOBKEY_LABEL) : NULL;
-		launchctl_log(LOG_NOTICE, "PureDarwin launchctl: submit job[%zu]=%s type=%d",
+		launchctl_log(LOG_NOTICE, "launchctl: submit job[%zu]=%s type=%d",
 				i, label ? launch_data_get_string(label) : "(no label)",
 				job ? launch_data_get_type(job) : -1);
 	}

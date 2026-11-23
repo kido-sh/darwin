@@ -915,7 +915,7 @@ static struct mac_policy_ops sb_ops = {
 
 static struct mac_policy_conf sb_policy = {
 	.mpc_name = SB_POLICY_NAME,
-	.mpc_fullname = "PureDarwin Sandbox",
+	.mpc_fullname = "KidoDarwin Sandbox",
 	.mpc_labelnames = NULL,
 	.mpc_labelname_count = 0,
 	.mpc_ops = &sb_ops,

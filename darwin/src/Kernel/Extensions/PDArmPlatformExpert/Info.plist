@@ -20,7 +20,7 @@
 	<string>1</string>
 	<key>IOKitPersonalities</key>
 	<dict>
-		<key>PureDarwin Apple ARM platform</key>
+		<key>KidoDarwin Apple ARM platform</key>
 		<dict>
 			<key>CFBundleIdentifier</key>
 			<string>sh.kido.kext.PDArmPlatformExpert</string>
@@ -33,7 +33,7 @@
 			<key>IOProviderClass</key>
 			<string>IOPlatformExpertDevice</string>
 		</dict>
-		<key>PureDarwin ARM platform</key>
+		<key>KidoDarwin ARM platform</key>
 		<dict>
 			<key>CFBundleIdentifier</key>
 			<string>sh.kido.kext.PDArmPlatformExpert</string>
@@ -46,7 +46,7 @@
 			<key>IOProviderClass</key>
 			<string>IOPlatformExpertDevice</string>
 		</dict>
-		<key>PureDarwin Raspberry Pi 3 platform</key>
+		<key>KidoDarwin Raspberry Pi 3 platform</key>
 		<dict>
 			<key>CFBundleIdentifier</key>
 			<string>sh.kido.kext.PDArmPlatformExpert</string>
@@ -59,7 +59,7 @@
 			<key>IOProviderClass</key>
 			<string>IOPlatformExpertDevice</string>
 		</dict>
-		<key>PureDarwin Raspberry Pi Zero platform</key>
+		<key>KidoDarwin Raspberry Pi Zero platform</key>
 		<dict>
 			<key>CFBundleIdentifier</key>
 			<string>sh.kido.kext.PDArmPlatformExpert</string>

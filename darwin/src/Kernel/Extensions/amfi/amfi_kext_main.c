@@ -562,7 +562,7 @@ static struct mac_policy_ops pd_qtn_ops = {
 
 static struct mac_policy_conf pd_qtn_policy = {
 	.mpc_name = "Quarantine",
-	.mpc_fullname = "PureDarwin Quarantine (nothing quarantined)",
+	.mpc_fullname = "KidoDarwin Quarantine (nothing quarantined)",
 	.mpc_labelnames = NULL,
 	.mpc_labelname_count = 0,
 	.mpc_ops = &pd_qtn_ops,
@@ -575,7 +575,7 @@ static mac_policy_handle_t pd_qtn_handle;
 
 static struct mac_policy_conf pd_amfi_policy = {
 	.mpc_name = "AMFI",
-	.mpc_fullname = "PureDarwin Apple Mobile File Integrity",
+	.mpc_fullname = "KidoDarwin Apple Mobile File Integrity",
 	.mpc_labelnames = NULL,
 	.mpc_labelname_count = 0,
 	.mpc_ops = &pd_amfi_ops,

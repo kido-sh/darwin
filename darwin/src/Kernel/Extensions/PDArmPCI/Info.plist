@@ -4,7 +4,7 @@
 <dict>
   <key>CFBundleExecutable</key><string>PDArmPCI</string>
   <key>CFBundleIdentifier</key><string>sh.kido.driver.PDArmPCI</string>
-  <key>CFBundleName</key><string>PureDarwin ARM PCI</string>
+  <key>CFBundleName</key><string>KidoDarwin ARM PCI</string>
   <key>CFBundlePackageType</key><string>KEXT</string>
   <key>CFBundleVersion</key><string>1.0</string>
   <key>IOKitPersonalities</key>

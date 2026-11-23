@@ -1070,7 +1070,7 @@ pd_runtime_phase(const char *fmt, ...)
 		return;
 	}
 
-	fprintf(launchd_console, "PureDarwin launchd: ");
+	fprintf(launchd_console, "launchd: ");
 	va_list ap;
 	va_start(ap, fmt);
 	vfprintf(launchd_console, fmt, ap);

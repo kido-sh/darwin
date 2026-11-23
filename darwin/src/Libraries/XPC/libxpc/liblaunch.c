@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2005-2012 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2026; see docs/upstream.md.
+ * Modified by the PureDarwin project and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_APACHE_LICENSE_HEADER_START@
  * 
@@ -97,7 +97,7 @@ pd_liblaunch_phase(const char *fmt, ...)
 	if (fd < 0) {
 		return;
 	}
-	dprintf(fd, "PureDarwin liblaunch: ");
+	dprintf(fd, "liblaunch: ");
 	va_start(ap, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);

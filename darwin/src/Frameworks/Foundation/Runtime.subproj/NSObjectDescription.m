@@ -10,7 +10,7 @@
 #import <Foundation/NSString.h>
 #import <Foundation/NSObjCRuntime.h>
 
-@implementation NSObject (PureDarwinDescription)
+@implementation NSObject (KidoDarwinDescription)
 
 + (NSString *)description {
     return NSStringFromClass(self);

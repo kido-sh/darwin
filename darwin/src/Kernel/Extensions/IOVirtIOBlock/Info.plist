@@ -7,7 +7,7 @@
     <key>CFBundleExecutable</key>
     <string>IOVirtIOBlock</string>
     <key>CFBundleGetInfoString</key>
-    <string>1.0.0, PureDarwin virtio-blk storage driver.</string>
+    <string>1.0.0, KidoDarwin virtio-blk storage driver.</string>
     <key>CFBundleIdentifier</key>
     <string>sh.kido.driver.IOVirtIOBlock</string>
     <key>CFBundleInfoDictionaryVersion</key>

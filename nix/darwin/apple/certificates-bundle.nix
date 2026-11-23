@@ -18,7 +18,7 @@ runCommand "kido-certificates-bundle-${cacert.version}" {
   nativeBuildInputs = [ python3 openssl ];
 } ''
   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /dev/null \
-    -subj "/O=PureDarwin/CN=PureDarwin escrow placeholder" -days 36500 -outform DER -out escrow.der
+    -subj "/O=KidoDarwin/CN=KidoDarwin escrow placeholder" -days 36500 -outform DER -out escrow.der
   python3 ${src}/gen-certificates-bundle.py ${cacert}/etc/ssl/certs/ca-bundle.crt \
     $out/System/Library/Security/Certificates.bundle ${toString version} escrow.der
 ''

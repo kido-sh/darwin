@@ -4,7 +4,7 @@
 <dict>
   <key>CFBundleExecutable</key><string>PDEcamPCI</string>
   <key>CFBundleIdentifier</key><string>sh.kido.driver.PDEcamPCI</string>
-  <key>CFBundleName</key><string>PureDarwin ECAM PCI host bridge</string>
+  <key>CFBundleName</key><string>KidoDarwin ECAM PCI host bridge</string>
   <key>CFBundlePackageType</key><string>KEXT</string>
   <key>CFBundleVersion</key><string>1.0</string>
   <key>IOKitPersonalities</key>
