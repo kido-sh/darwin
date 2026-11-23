@@ -51,28 +51,17 @@ target_compile_options(logd PRIVATE
     -ferror-limit=0)
 target_include_directories(logd PRIVATE ${PD_LOGD_INCLUDES})
 target_link_options(logd PRIVATE
-    ${PUREDARWIN_LIBXPC_OBJC_UNDEFINED}
     -nostdlib
     -isysroot ${PUREDARWIN_MACOSX_SDK}
     -Wl,-L,$<TARGET_FILE_DIR:libSystem_B_stub>
     -Wl,-dylinker_install_name,/usr/lib/dyld
     -Wl,-platform_version,macos,26.5,26.5
-    -Wl,-force_load,$<TARGET_FILE:XPC_libxpc_static>
-    -Wl,-force_load,$<TARGET_FILE:XPC_libinfo_static>
-    -Wl,-force_load,$<TARGET_FILE:XPC_libnv_static>
-    -Wl,-force_load,$<TARGET_FILE:CrashReporterClient>
     -lSystem
-    $<TARGET_FILE:XPC_launchd_mig_static>
 )
 add_dependencies(logd
-    XPC_launchd_mig_static
     libSystem_B_stub
     dyld
-    CrashReporterClient
-    XPC_libxpc_static
-    XPC_libinfo_static
-    XPC_libnv_static
 )
 
 install(TARGETS logd DESTINATION usr/libexec COMPONENT BaseSystem OPTIONAL)
-install(FILES com.apple.logd.plist DESTINATION System/Library/LaunchDaemons COMPONENT BaseSystem OPTIONAL)
+install(FILES sh.kido.logd.plist DESTINATION System/Library/LaunchDaemons COMPONENT BaseSystem OPTIONAL)

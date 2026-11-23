@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>com.apple.logd</string>
+	<string>sh.kido.logd</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/libexec/logd</string>
@@ -12,10 +12,5 @@
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
-	<key>MachServices</key>
-	<dict>
-		<key>com.apple.logd</key>
-		<true/>
-	</dict>
 </dict>
 </plist>
