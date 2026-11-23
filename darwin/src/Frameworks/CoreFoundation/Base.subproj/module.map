@@ -1,0 +1,4 @@
+// Modified by the PureDarwin project in 2026; see docs/upstream.md.
+module CoreFoundation [extern_c] [system] {
+    umbrella header "CoreFoundation.h"
+}

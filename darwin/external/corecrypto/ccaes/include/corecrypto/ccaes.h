@@ -1,0 +1,129 @@
+/*
+ * Copyright (C) 2026, Samuel Zormeister.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#ifndef __CORECRYPTO_CCAES_H__
+#define __CORECRYPTO_CCAES_H__
+
+#include <corecrypto/ccmode.h>
+
+CC_BEGIN_DECLS
+
+/*!
+ * @group   ccaes
+ * 
+ * Modes of operation and implementations of the FIPS 197 Advanced Encryption Standard (AES)
+ *
+ * FIPS 197:
+ * https://nvlpubs.nist.gov/nistpubs/fips/nist.fips.197.pdf
+ */
+
+#define CCAES_BLOCK_SIZE    16
+
+#define CCAES_KEY_SIZE_128  16
+#define CCAES_KEY_SIZE_192  24
+#define CCAES_KEY_SIZE_256  32
+
+/*
+ * Available implementations
+ */
+CC_EXPORT const struct ccmode_ecb ccaes_ltc_ecb_decrypt_mode;
+CC_EXPORT const struct ccmode_ecb ccaes_ltc_ecb_encrypt_mode;
+
+CC_EXPORT const struct ccmode_cbc ccaes_gladman_cbc_decrypt_mode;
+CC_EXPORT const struct ccmode_cbc ccaes_gladman_cbc_encrypt_mode;
+
+/*!
+ * @function ccaes_ecb_decrypt_mode
+ * Queries corecrypto for it's preferred implementation of the AES decryption algorithm
+ * in the ECB mode of operation according to the system's capabilities.
+ *
+ * @abstract    Gets the preferred AES decryption implementation.
+ *
+ * @result      Returns the preferred or more optimised implementation for the system.
+ */
+CC_EXPORT const struct ccmode_ecb *ccaes_ecb_decrypt_mode(void) CORECRYPTO_API_AVAILABLE_2012;
+
+/*!
+ * @function ccaes_ecb_encrypt_mode
+ * Queries corecrypto for it's preferred implementation of the AES encryption algorithm
+ * in the ECB mode of operation according to the system's capabilities.
+ *
+ * @abstract    Gets the preferred AES encryption implementation.
+ *
+ * @result      Returns the preferred or more optimised implementation for the system.
+ */
+CC_EXPORT const struct ccmode_ecb *ccaes_ecb_encrypt_mode(void) CORECRYPTO_API_AVAILABLE_2012;
+
+/*!
+ * @function ccaes_cbc_decrypt_mode
+ * Queries corecrypto for it's preferred implementation of the AES decryption algorithm
+ * in the CBC mode of operation according to the system's capabilities.
+ *
+ * @abstract    Gets the preferred AES decryption implementation.
+ *
+ * @result      Returns the preferred or more optimised implementation for the system.
+ */
+CC_EXPORT const struct ccmode_cbc *ccaes_cbc_decrypt_mode(void) CORECRYPTO_API_AVAILABLE_2012;
+
+/*!
+ * @function ccaes_cbc_encrypt_mode
+ * Queries corecrypto for it's preferred implementation of the AES encryption algorithm
+ * in the CBC mode of operation according to the system's capabilities.
+ *
+ * @abstract    Gets the preferred AES encryption implementation.
+ *
+ * @result      Returns the preferred or more optimised implementation for the system.
+ */
+CC_EXPORT const struct ccmode_cbc *ccaes_cbc_encrypt_mode(void) CORECRYPTO_API_AVAILABLE_2012;
+
+/*!
+ * @function ccaes_ctr_crypt_mode
+ * Queries corecrypto for it's preferred implementation of the AES algorithm
+ * in the CTR mode of operation according to the system's capabilities.
+ *
+ * @abstract    Gets the preferred AES-CTR implementation.
+ *
+ * @result      Returns the preferred or more optimised implementation for the system.
+ */
+CC_EXPORT const struct ccmode_ctr *ccaes_ctr_crypt_mode(void) CORECRYPTO_API_AVAILABLE_2012;
+
+/*!
+ * @function ccaes_xts_decrypt_mode
+ * Queries corecrypto for it's preferred implementation of the AES decryption algorithm
+ * in the XTS mode of operation according to the system's capabilities.
+ *
+ * @abstract    Gets the preferred AES-XTS implementation.
+ *
+ * @result      Returns the preferred or more optimised implementation for the system.
+ */
+CC_EXPORT const struct ccmode_xts *ccaes_xts_decrypt_mode(void) CORECRYPTO_API_AVAILABLE_2012;
+
+/*!
+ * @function ccaes_xts_encrypt_mode
+ * Queries corecrypto for it's preferred implementation of the AES encryption algorithm
+ * in the XTS mode of operation according to the system's capabilities.
+ *
+ * @abstract    Gets the preferred AES-XTS implementation.
+ *
+ * @result      Returns the preferred or more optimised implementation for the system.
+ */
+CC_EXPORT const struct ccmode_xts *ccaes_xts_encrypt_mode(void) CORECRYPTO_API_AVAILABLE_2012;
+
+CC_EXPORT const struct ccmode_cfb *ccaes_cfb_encrypt_mode(void);
+CC_EXPORT const struct ccmode_cfb *ccaes_cfb_decrypt_mode(void);
+CC_EXPORT const struct ccmode_cfb8 *ccaes_cfb8_encrypt_mode(void);
+CC_EXPORT const struct ccmode_cfb8 *ccaes_cfb8_decrypt_mode(void);
+CC_EXPORT const struct ccmode_ofb *ccaes_ofb_crypt_mode(void);
+CC_EXPORT const struct ccmode_gcm *ccaes_gcm_encrypt_mode(void);
+CC_EXPORT const struct ccmode_gcm *ccaes_gcm_decrypt_mode(void);
+CC_EXPORT const struct ccmode_ccm *ccaes_ccm_encrypt_mode(void);
+CC_EXPORT const struct ccmode_ccm *ccaes_ccm_decrypt_mode(void);
+
+CC_END_DECLS
+
+#endif /* __CORECRYPTO_CCAES_H__  */

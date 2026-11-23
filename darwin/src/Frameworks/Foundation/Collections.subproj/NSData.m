@@ -1,0 +1,780 @@
+/*
+ * Copyright (C) 2026, Samuel Zormeister.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+/*
+ * NSData / NSMutableData over CFData.
+ *
+ * CFData and CFMutableData share one CFTypeID, so the bridge can register only
+ * one class for both. That class therefore has to answer the mutable selectors
+ * as well, which is why the work lives in NSCFData - a subclass of
+ * NSMutableData - rather than being split across NSData and NSMutableData the
+ * way the headers are. This mirrors real Foundation, where __NSCFData is
+ * likewise a subclass of NSMutableData.
+ *
+ * Mutability is enforced by CFData itself: CFDataAppendBytes on an immutable
+ * CFData traps, exactly as -appendBytes:length: on an immutable NSData does on
+ * macOS. Nothing here needs to re-check it.
+ *
+ * NSData and NSMutableData are class clusters: +alloc produces a plain
+ * instance of the abstract class, and each -init... releases it and returns the
+ * CF-backed object instead.
+ */
+
+#import <Foundation/NSData.h>
+#include <stdio.h>
+#include <CoreFoundation/CFBase.h>
+#import <Foundation/NSString.h>
+#import <Foundation/NSURL.h>
+#import <Foundation/NSException.h>
+#include <objc/runtime.h>
+#include <CoreFoundation/CFData.h>
+#include <CoreFoundation/ForFoundationOnly.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+@interface NSCFData : NSMutableData
+@end
+
+/* Convenience constructors are autoreleased; CFAutorelease is the CF-side entry
+ * point for exactly this and keeps the ownership rules right without assuming a
+ * particular Foundation pool implementation. */
+static inline id
+__NSDataAutorelease(CFTypeRef cf)
+{
+	if (cf == NULL) {
+		return nil;
+	}
+	return (id)CFAutorelease(cf);
+}
+
+static CFDataRef
+__NSDataCreateWithContentsOfFile(NSString *path)
+{
+	struct stat status;
+	UInt8 *bytes = NULL;
+	ssize_t offset = 0;
+	int fd;
+
+	if (path == nil || (fd = open([path cString], O_RDONLY)) < 0) {
+		return NULL;
+	}
+	if (fstat(fd, &status) != 0 || status.st_size < 0) {
+		close(fd);
+		return NULL;
+	}
+	if (status.st_size != 0) {
+		bytes = malloc((size_t)status.st_size);
+		if (bytes == NULL) {
+			close(fd);
+			return NULL;
+		}
+		while (offset < status.st_size) {
+			ssize_t amount = read(fd, bytes + offset,
+				(size_t)(status.st_size - offset));
+
+			if (amount <= 0) {
+				free(bytes);
+				close(fd);
+				return NULL;
+			}
+			offset += amount;
+		}
+	}
+	close(fd);
+
+	CFDataRef result = CFDataCreate(kCFAllocatorDefault, bytes,
+		(CFIndex)status.st_size);
+	free(bytes);
+	return result;
+}
+
+extern Boolean _CFIsObjC(CFTypeID typeID, void *obj);
+
+// a subclass that is not a CFData (Swift's bridged Data): the abstract methods work through its primitives
+// the cluster's own classes are not: an +alloc'd NSMutableData is a placeholder whose -init returns a CFData
+static inline BOOL __NSDataIsForeign(id data) {
+	Class cls = object_getClass(data);
+
+	if (cls == [NSData class] || cls == [NSMutableData class])
+		return NO;
+	return _CFIsObjC(CFDataGetTypeID(), (void *)data) ? YES : NO;
+}
+
+@implementation NSData
+
++ (instancetype)data
+{
+	return __NSDataAutorelease(CFDataCreate(kCFAllocatorDefault, NULL, 0));
+}
+
++ (instancetype)dataWithBytes:(const void *)bytes length:(NSUInteger)length
+{
+	return __NSDataAutorelease(CFDataCreate(kCFAllocatorDefault,
+						(const UInt8 *)bytes,
+						(CFIndex)length));
+}
+
++ (instancetype)dataWithBytesNoCopy:(void *)bytes length:(NSUInteger)length
+{
+	return [self dataWithBytesNoCopy:bytes length:length freeWhenDone:YES];
+}
+
++ (instancetype)dataWithBytesNoCopy:(void *)bytes
+			     length:(NSUInteger)length
+		       freeWhenDone:(BOOL)freeWhenDone
+{
+	/* kCFAllocatorNull as the byte deallocator means CF adopts the buffer
+	 * without ever freeing it - the "no copy, not mine to free" case. */
+	return __NSDataAutorelease(
+		CFDataCreateWithBytesNoCopy(kCFAllocatorDefault,
+					    (const UInt8 *)bytes,
+					    (CFIndex)length,
+					    freeWhenDone ? kCFAllocatorDefault
+							 : kCFAllocatorNull));
+}
+
++ (instancetype)dataWithData:(NSData *)data
+{
+	if (data == nil) {
+		return nil;
+	}
+	return __NSDataAutorelease(CFDataCreateCopy(kCFAllocatorDefault,
+						    (CFDataRef)data));
+}
+
++ (instancetype)dataWithContentsOfFile:(NSString *)path
+{
+	return __NSDataAutorelease(__NSDataCreateWithContentsOfFile(path));
+}
+
+/* The reading options only hint at mapping and caching; the bytes are the same
+ * either way, so they are accepted and ignored. */
++ (instancetype)dataWithContentsOfFile:(NSString *)path
+                               options:(NSDataReadingOptions)options
+                                 error:(NSError **)error
+{
+	NSData *data = [self dataWithContentsOfFile:path];
+
+	if (data == nil && error != NULL) {
+		*error = nil;
+	}
+	return data;
+}
+
+- (instancetype)init
+{
+	[self release];
+	return (id)CFDataCreate(kCFAllocatorDefault, NULL, 0);
+}
+
+- (instancetype)initWithBytes:(const void *)bytes length:(NSUInteger)length
+{
+	[self release];
+	return (id)CFDataCreate(kCFAllocatorDefault, (const UInt8 *)bytes,
+				(CFIndex)length);
+}
+
+/* The two-argument form takes ownership, i.e. it is the three-argument form
+ * with freeWhenDone:YES. Only the latter existed. */
+- (instancetype)initWithBytesNoCopy:(void *)bytes length:(NSUInteger)length
+{
+	return [self initWithBytesNoCopy:bytes length:length freeWhenDone:YES];
+}
+
+- (instancetype)initWithBytesNoCopy:(void *)bytes
+			     length:(NSUInteger)length
+		       freeWhenDone:(BOOL)freeWhenDone
+{
+	[self release];
+	return (id)CFDataCreateWithBytesNoCopy(kCFAllocatorDefault,
+					       (const UInt8 *)bytes,
+					       (CFIndex)length,
+					       freeWhenDone ? kCFAllocatorDefault
+							    : kCFAllocatorNull);
+}
+
+- (instancetype)initWithData:(NSData *)data
+{
+	[self release];
+	if (data == nil) {
+		return nil;
+	}
+	return (id)CFDataCreateCopy(kCFAllocatorDefault, (CFDataRef)data);
+}
+
+- (instancetype)initWithContentsOfFile:(NSString *)path
+{
+	[self release];
+	return (id)__NSDataCreateWithContentsOfFile(path);
+}
+
+- (id)copyWithZone:(NSZone *)zone
+{
+	return (id)CFDataCreate(kCFAllocatorDefault, [self bytes],
+	                        (CFIndex)[self length]);
+}
+
+- (id)mutableCopyWithZone:(NSZone *)zone
+{
+	CFMutableDataRef result =
+	    CFDataCreateMutable(kCFAllocatorDefault, 0);
+
+	if (result != NULL) {
+		CFDataAppendBytes(result, [self bytes], (CFIndex)[self length]);
+	}
+	return (id)result;
+}
+
+/*
+ * The accessors below are only reached on a real CFData, since every creation
+ * path returns one. NSCFData overrides them all; these exist so a direct
+ * [NSData alloc] that never got -init'd fails predictably instead of by
+ * message-to-garbage.
+ */
+- (const void *)bytes
+{
+	return NULL;
+}
+
+- (NSUInteger)length
+{
+	return 0;
+}
+
+- (void)getBytes:(void *)buffer length:(NSUInteger)length
+{
+	[self getBytes:buffer range:NSMakeRange(0, length)];
+}
+
+- (void)getBytes:(void *)buffer range:(NSRange)range
+{
+	// CFDataGetBytes sends this to a data object that is not a CFData
+	if (__NSDataIsForeign(self)) {
+		memcpy(buffer, (const uint8_t *)[self bytes] + range.location, range.length);
+		return;
+	}
+	CFDataGetBytes((CFDataRef)self,
+		       CFRangeMake((CFIndex)range.location,
+				   (CFIndex)range.length),
+		       (UInt8 *)buffer);
+}
+
+- (NSData *)subdataWithRange:(NSRange)range
+{
+	const uint8_t	*base = (const uint8_t *)[self bytes];
+
+	if (base == NULL) {
+		return nil;
+	}
+	return [NSData dataWithBytes:base + range.location
+			      length:range.length];
+}
+
+- (BOOL)isEqualToData:(NSData *)other
+{
+	if (other == nil) {
+		return NO;
+	}
+	if (self == other) {
+		return YES;
+	}
+	if (__NSDataIsForeign(self) || __NSDataIsForeign(other)) {
+		NSUInteger length = [self length];
+
+		return [other length] == length && (length == 0 || memcmp([self bytes], [other bytes], length) == 0);
+	}
+	return CFEqual((CFTypeRef)self, (CFTypeRef)other) ? YES : NO;
+}
+
+- (CFTypeID)_cfTypeID {
+	return CFDataGetTypeID();
+}
+
+/* Bridged to CFDataRef, so identity comes from the CF layer. Without these the
+ * NSObject versions apply and compare pointers, which makes any dictionary or
+ * set keyed by value fail to find an equal-but-distinct object. */
+- (NSUInteger)hash {
+    // hashed as the CFData with the same bytes, so equal data hash alike
+    if (__NSDataIsForeign(self)) {
+        CFDataRef copy = CFDataCreate(kCFAllocatorDefault, [self bytes], (CFIndex)[self length]);
+        NSUInteger hash = (NSUInteger)CFHash(copy);
+
+        CFRelease(copy);
+        return hash;
+    }
+    return (NSUInteger)CFHash((CFTypeRef)self);
+}
+
+- (BOOL)isEqual:(id)other {
+    if (self == other) {
+        return YES;
+    }
+    if (other == nil || ![other isKindOfClass:[NSData class]]) {
+        return NO;
+    }
+    return [self isEqualToData:other];
+}
+
+
+/* Atomic writes go to a temporary in the same directory and are renamed, so a
+ * reader never observes a partial file. */
+/* File URLs only: a path is what the file-backed implementations below take,
+ * and nothing in this Foundation fetches a remote URL. */
++ (instancetype)dataWithContentsOfURL:(NSURL *)url
+{
+	return [self dataWithContentsOfURL:url options:0 error:NULL];
+}
+
++ (instancetype)dataWithContentsOfURL:(NSURL *)url
+                              options:(NSDataReadingOptions)options
+                                error:(NSError **)error
+{
+	if (error != NULL) {
+		*error = nil;
+	}
+	if (![url isFileURL]) {
+		return nil;
+	}
+	return [self dataWithContentsOfFile:[url path] options:options error:error];
+}
+
+- (instancetype)initWithContentsOfURL:(NSURL *)url
+{
+	return [self initWithContentsOfURL:url options:0 error:NULL];
+}
+
+- (instancetype)initWithContentsOfURL:(NSURL *)url
+                              options:(NSDataReadingOptions)options
+                                error:(NSError **)error
+{
+	(void)options;
+
+	if (error != NULL) {
+		*error = nil;
+	}
+	if (![url isFileURL]) {
+		[self release];
+		return nil;
+	}
+	return [self initWithContentsOfFile:[url path]];
+}
+
+- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically
+{
+	if (![url isFileURL]) {
+		return NO;
+	}
+	return [self writeToFile:[url path] atomically:atomically];
+}
+
+- (BOOL)writeToURL:(NSURL *)url
+           options:(NSDataWritingOptions)options
+             error:(NSError **)error
+{
+	if (![url isFileURL]) {
+		if (error != NULL) {
+			*error = nil;
+		}
+		return NO;
+	}
+	return [self writeToFile:[url path] options:options error:error];
+}
+
+- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically
+{
+	const char *target = [path fileSystemRepresentation];
+	char temporary[1024];
+	const char *writePath = target;
+
+	if (atomically) {
+		snprintf(temporary, sizeof(temporary), "%s.XXXXXX", target);
+		writePath = temporary;
+	}
+
+	int fd = atomically ? mkstemp(temporary)
+	                    : open(target, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+	if (fd < 0) {
+		return NO;
+	}
+
+	const void *bytes = [self bytes];
+	size_t remaining = (size_t)[self length];
+	BOOL ok = YES;
+
+	while (remaining > 0) {
+		ssize_t written = write(fd, bytes, remaining);
+
+		if (written <= 0) {
+			ok = NO;
+			break;
+		}
+		bytes = (const char *)bytes + written;
+		remaining -= (size_t)written;
+	}
+	close(fd);
+
+	if (ok && atomically) {
+		ok = (rename(writePath, target) == 0);
+		if (!ok) {
+			unlink(writePath);
+		}
+	}
+	return ok;
+}
+
+
+- (BOOL)writeToFile:(NSString *)path options:(NSDataWritingOptions)options
+              error:(NSError **)error
+{
+	BOOL ok = [self writeToFile:path
+	                 atomically:(options & NSDataWritingAtomic) != 0];
+
+	if (!ok && error != NULL) {
+		*error = nil;
+	}
+	return ok;
+}
+
+static const char base64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+// RFC 4648 with padding, lines broken at 64 or 76 characters when asked
+static NSData *base64Encode(NSData *data, NSDataBase64EncodingOptions options) {
+    const uint8_t *in = [data bytes];
+    NSUInteger length = [data length];
+    NSUInteger lineLength = (options & NSDataBase64Encoding64CharacterLineLength) ? 64 :
+                            (options & NSDataBase64Encoding76CharacterLineLength) ? 76 : 0;
+    BOOL cr = (options & NSDataBase64EncodingEndLineWithCarriageReturn) != 0;
+    BOOL lf = (options & NSDataBase64EncodingEndLineWithLineFeed) != 0;
+    NSMutableData *out = [NSMutableData dataWithCapacity:0];
+    NSUInteger column = 0;
+
+    if (lineLength != 0 && !cr && !lf)
+        cr = lf = YES;
+    for (NSUInteger i = 0; i < length; i += 3) {
+        uint32_t group = (uint32_t)in[i] << 16;
+        NSUInteger have = length - i < 3 ? length - i : 3;
+        char quad[4];
+
+        if (have > 1)
+            group |= (uint32_t)in[i + 1] << 8;
+        if (have > 2)
+            group |= in[i + 2];
+        quad[0] = base64Alphabet[(group >> 18) & 63];
+        quad[1] = base64Alphabet[(group >> 12) & 63];
+        quad[2] = have > 1 ? base64Alphabet[(group >> 6) & 63] : '=';
+        quad[3] = have > 2 ? base64Alphabet[group & 63] : '=';
+        if (lineLength != 0 && column == lineLength) {
+            if (cr)
+                [out appendBytes:"\r" length:1];
+            if (lf)
+                [out appendBytes:"\n" length:1];
+            column = 0;
+        }
+        [out appendBytes:quad length:4];
+        column += 4;
+    }
+    return out;
+}
+
+static NSData *base64Decode(const uint8_t *in, NSUInteger length, NSDataBase64DecodingOptions options) {
+    NSMutableData *out = [NSMutableData dataWithCapacity:0];
+    uint32_t group = 0;
+    int count = 0, padding = 0;
+
+    for (NSUInteger i = 0; i < length; i++) {
+        uint8_t c = in[i];
+        int value;
+
+        if (c >= 'A' && c <= 'Z') value = c - 'A';
+        else if (c >= 'a' && c <= 'z') value = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') value = c - '0' + 52;
+        else if (c == '+') value = 62;
+        else if (c == '/') value = 63;
+        else if (c == '=') { padding++; value = 0; }
+        else if (options & NSDataBase64DecodingIgnoreUnknownCharacters) continue;
+        else if (c == '\r' || c == '\n') continue;
+        else return nil;
+        if (c != '=' && padding != 0)
+            return nil;
+        group = (group << 6) | (uint32_t)value;
+        if (++count == 4) {
+            uint8_t bytes[3] = { group >> 16, (group >> 8) & 0xff, group & 0xff };
+
+            [out appendBytes:bytes length:3 - (padding > 2 ? 2 : padding)];
+            group = 0;
+            count = 0;
+        }
+    }
+    return count == 0 ? out : nil;
+}
+
+- (NSString *)base64EncodedStringWithOptions:(NSDataBase64EncodingOptions)options {
+    NSData *encoded = base64Encode(self, options);
+
+    return [[[NSString alloc] initWithData:encoded encoding:NSASCIIStringEncoding] autorelease];
+}
+
+- (NSData *)base64EncodedDataWithOptions:(NSDataBase64EncodingOptions)options {
+    return base64Encode(self, options);
+}
+
+- (instancetype)initWithBase64EncodedString:(NSString *)string options:(NSDataBase64DecodingOptions)options {
+    NSData *ascii = [string dataUsingEncoding:NSASCIIStringEncoding allowLossyConversion:NO];
+    NSData *decoded = ascii == nil ? nil : base64Decode([ascii bytes], [ascii length], options);
+
+    if (decoded == nil) {
+        [self release];
+        return nil;
+    }
+    return [self initWithData:decoded];
+}
+
+- (instancetype)initWithBase64EncodedData:(NSData *)data options:(NSDataBase64DecodingOptions)options {
+    NSData *decoded = base64Decode([data bytes], [data length], options);
+
+    if (decoded == nil) {
+        [self release];
+        return nil;
+    }
+    return [self initWithData:decoded];
+}
+
+
+@end
+
+@implementation NSMutableData
+
++ (instancetype)data
+{
+	return [self dataWithCapacity:0];
+}
+
++ (instancetype)dataWithCapacity:(NSUInteger)capacity
+{
+	return __NSDataAutorelease(CFDataCreateMutable(kCFAllocatorDefault, 0));
+}
+
++ (instancetype)dataWithLength:(NSUInteger)length
+{
+	CFMutableDataRef	data;
+
+	data = CFDataCreateMutable(kCFAllocatorDefault, 0);
+	if (data == NULL) {
+		return nil;
+	}
+	/* CFDataSetLength zero-fills any growth, which is what
+	 * +dataWithLength: promises. */
+	CFDataSetLength(data, (CFIndex)length);
+	return __NSDataAutorelease(data);
+}
+
++ (instancetype)dataWithBytes:(const void *)bytes length:(NSUInteger)length
+{
+	CFMutableDataRef	data;
+
+	data = CFDataCreateMutable(kCFAllocatorDefault, 0);
+	if (data == NULL) {
+		return nil;
+	}
+	CFDataAppendBytes(data, (const UInt8 *)bytes, (CFIndex)length);
+	return __NSDataAutorelease(data);
+}
+
++ (instancetype)dataWithData:(NSData *)data
+{
+	NSMutableData	*copy;
+
+	if (data == nil) {
+		return nil;
+	}
+	copy = [self dataWithCapacity:0];
+	[copy appendData:data];
+	return copy;
+}
+
+- (instancetype)init
+{
+	[self release];
+	return (id)CFDataCreateMutable(kCFAllocatorDefault, 0);
+}
+
+- (instancetype)initWithCapacity:(NSUInteger)capacity
+{
+	[self release];
+	/* See +dataWithCapacity: - a non-zero CF capacity is a hard ceiling. */
+	return (id)CFDataCreateMutable(kCFAllocatorDefault, 0);
+}
+
+- (instancetype)initWithLength:(NSUInteger)length
+{
+	CFMutableDataRef	data;
+
+	[self release];
+	data = CFDataCreateMutable(kCFAllocatorDefault, 0);
+	if (data == NULL) {
+		return nil;
+	}
+	CFDataSetLength(data, (CFIndex)length);
+	return (id)data;
+}
+
+- (instancetype)initWithBytes:(const void *)bytes length:(NSUInteger)length
+{
+	CFMutableDataRef	data;
+
+	[self release];
+	data = CFDataCreateMutable(kCFAllocatorDefault, 0);
+	if (data == NULL) {
+		return nil;
+	}
+	CFDataAppendBytes(data, (const UInt8 *)bytes, (CFIndex)length);
+	return (id)data;
+}
+
+- (void *)mutableBytes
+{
+	return NULL;
+}
+
+- (void)setLength:(NSUInteger)length
+{
+	if (__NSDataIsForeign(self)) {
+		[NSException raise:NSInvalidArgumentException
+			    format:@"*** -[%s setLength:]: method only defined for abstract class", object_getClassName(self)];
+		return;
+	}
+	CFDataSetLength((CFMutableDataRef)self, (CFIndex)length);
+}
+
+- (void)appendBytes:(const void *)bytes length:(NSUInteger)length
+{
+	// a mutable data object that is not a CFData grows through its -setLength: and -mutableBytes
+	if (__NSDataIsForeign(self)) {
+		NSUInteger old = [self length];
+
+		[self setLength:old + length];
+		memcpy((uint8_t *)[self mutableBytes] + old, bytes, length);
+		return;
+	}
+	CFDataAppendBytes((CFMutableDataRef)self, (const UInt8 *)bytes,
+			  (CFIndex)length);
+}
+
+- (void)appendData:(NSData *)other
+{
+	if (other == nil) {
+		return;
+	}
+	CFDataAppendBytes((CFMutableDataRef)self,
+			  (const UInt8 *)[other bytes],
+			  (CFIndex)[other length]);
+}
+
+- (void)replaceBytesInRange:(NSRange)range withBytes:(const void *)bytes
+{
+	[self replaceBytesInRange:range withBytes:bytes length:range.length];
+}
+
+- (void)replaceBytesInRange:(NSRange)range
+                  withBytes:(const void *)bytes
+                     length:(NSUInteger)length
+{
+	if (__NSDataIsForeign(self)) {
+		NSUInteger old = [self length];
+		NSUInteger tail = old - NSMaxRange(range);
+		uint8_t *base;
+
+		if (length > range.length)
+			[self setLength:old + length - range.length];
+		base = (uint8_t *)[self mutableBytes];
+		memmove(base + range.location + length, base + NSMaxRange(range), tail);
+		if (bytes != NULL)
+			memcpy(base + range.location, bytes, length);
+		if (length < range.length)
+			[self setLength:old + length - range.length];
+		return;
+	}
+	CFDataReplaceBytes((CFMutableDataRef)self,
+			   CFRangeMake((CFIndex)range.location,
+				       (CFIndex)range.length),
+			   (const UInt8 *)bytes, (CFIndex)length);
+}
+
+- (void)increaseLengthBy:(NSUInteger)extra
+{
+	[self setLength:[self length] + extra];
+}
+
+- (void)resetBytesInRange:(NSRange)range
+{
+	uint8_t	*base = (uint8_t *)[self mutableBytes];
+
+	if (base == NULL) {
+		return;
+	}
+	memset(base + range.location, 0, range.length);
+}
+
+- (void)setData:(NSData *)data
+{
+	CFDataSetLength((CFMutableDataRef)self, 0);
+	[self appendData:data];
+}
+
+@end
+
+/*
+ * The bridged class. Every CFData - mutable or not - carries this isa, so it
+ * has to answer both halves of the interface.
+ */
+@implementation NSCFData
+
+- (const void *)bytes
+{
+	return (const void *)CFDataGetBytePtr((CFDataRef)self);
+}
+
+- (NSUInteger)length
+{
+	return (NSUInteger)CFDataGetLength((CFDataRef)self);
+}
+
+- (void *)mutableBytes
+{
+	return (void *)CFDataGetMutableBytePtr((CFMutableDataRef)self);
+}
+
+// CF owns the count, NSObject's would let CFRelease free data that ObjC code still retains
+- (id)retain
+{
+	CFRetain((CFTypeRef)self);
+	return self;
+}
+
+- (oneway void)release
+{
+	CFRelease((CFTypeRef)self);
+}
+
+- (NSUInteger)retainCount
+{
+	return (NSUInteger)CFGetRetainCount((CFTypeRef)self);
+}
+
+@end
+
+#if DEPLOYMENT_RUNTIME_OBJC
+__attribute__((constructor))
+static void __NSCFDataBridgeInit(void) {
+	_CFRuntimeBridgeClasses(CFDataGetTypeID(), "NSCFData");
+}
+#endif

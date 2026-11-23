@@ -1,0 +1,11 @@
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Extensions/CMakeLists.txt")
+    add_subdirectory(Extensions)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libkmod/CMakeLists.txt")
+    add_subdirectory(libkmod)
+endif()
+# only the kernel links it
+if(NOT PUREDARWIN_KEXTS_ONLY)
+    add_subdirectory(libfirehose_kernel)
+endif()
+add_subdirectory(xnu)

@@ -1,0 +1,129 @@
+{ stdenv
+, lib
+, gnumake
+, darwinCrossToolchain
+, nativeLd
+, targetTriple ? "arm64-apple-darwin20.4"
+, libSystem
+, libiconv
+, zsh
+, ncurses
+, appleSdk
+}:
+
+let
+in
+stdenv.mkDerivation {
+  pname = "kido-zsh";
+  inherit (zsh) version;
+  src = zsh.src;
+
+  nativeBuildInputs = [
+    gnumake
+  ];
+
+  configurePhase = ''
+    runHook preConfigure
+
+    mkdir -p sdk
+    export DARWIN_SDK_ROOT="${appleSdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+    export PATH="${darwinCrossToolchain}/bin:$PATH"
+    export CC="${darwinCrossToolchain}/bin/${targetTriple}-clang"
+    export AR="${darwinCrossToolchain}/bin/${targetTriple}-ar"
+    export RANLIB="${darwinCrossToolchain}/bin/${targetTriple}-ranlib"
+    export STRIP="${darwinCrossToolchain}/bin/${targetTriple}-strip"
+    export CPPFLAGS="-I${libSystem}/usr/include -I${libiconv}/usr/include -I${ncurses}/include/ncursesw -I${ncurses}/include"
+    export CFLAGS="-isysroot $DARWIN_SDK_ROOT -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0"
+    export LDFLAGS="-isysroot $DARWIN_SDK_ROOT -fuse-ld=${nativeLd}/bin/ld -nostdlib -L${libSystem}/usr/lib -L${ncurses}/lib -Wl,-dylib_file,/usr/lib/system/libdyld.dylib:${libSystem}/usr/lib/system/libdyld.dylib -Wl,-dylinker_install_name,/usr/lib/dyld -Wl,-platform_version,macos,26.5,26.5 -Wl,-undefined,dynamic_lookup"
+    export LIBS="-Wl,-force_load,${ncurses}/lib/libncursesw.a -L${libiconv}/usr/lib -liconv -lSystem"
+
+    export ac_cv_func_getpwnam=yes
+    export ac_cv_func_getpwuid=yes
+    export ac_cv_func_getgrgid=yes
+    export ac_cv_func_getgrnam=yes
+    export ac_cv_func_faccessx=no
+    export ac_cv_func_srand_deterministic=no
+    export ac_cv_func_prctl=no
+    export ac_cv_func_setproctitle=no
+    export ac_cv_func_sigqueue=no
+    export ac_cv_func_setresgid=no
+    export ac_cv_func_setresuid=no
+    export ac_cv_header_sys_prctl_h=no
+    export zsh_cv_path_utmp_file=/var/run/utmp
+    export zsh_cv_path_wtmp_file=/var/log/wtmp
+    export zsh_cv_sys_dynamic_clash_ok=no
+
+    ./configure \
+      --host=${targetTriple} \
+      --build=$(cc -dumpmachine) \
+      --prefix=$out \
+      --bindir=$out/bin \
+      --enable-etcdir=/etc \
+      --enable-fndir=/usr/share/zsh/${zsh.version}/functions \
+      --enable-site-fndir=/usr/share/zsh/site-functions \
+      --enable-scriptdir=/usr/share/zsh/${zsh.version}/scripts \
+      --disable-site-scriptdir \
+      --disable-dynamic \
+      --disable-gdbm \
+      --disable-pcre \
+      --disable-multibyte \
+      --with-term-lib=ncursesw
+
+    sed -i \
+      -e 's/^#define HAVE_SETPROCTITLE .*/#undef HAVE_SETPROCTITLE/' \
+      -e 's/^#define HAVE_PRCTL .*/#undef HAVE_PRCTL/' \
+      -e 's/^#define HAVE_SIGQUEUE .*/#undef HAVE_SIGQUEUE/' \
+      -e 's/^#define HAVE_SETRESGID .*/#undef HAVE_SETRESGID/' \
+      -e 's/^#define HAVE_SETRESUID .*/#undef HAVE_SETRESUID/' \
+      -e 's/^#define HAVE_SYS_PRCTL_H .*/#undef HAVE_SYS_PRCTL_H/' \
+      -e 's/^#define HAVE__MKTEMP .*/#undef HAVE__MKTEMP/' \
+      config.h
+
+    substituteInPlace Src/signals.c \
+      --replace-fail '/* Array describing the state of each signal: an element contains *' \
+                     '/**/
+void wait_for_processes(void);
+
+/* Array describing the state of each signal: an element contains *' \
+      --replace-fail '    ret = sigsuspend(&set);' \
+                     '    if (sig == SIGCHLD) {
+	zsleep(10000);
+	wait_for_processes();
+	return -1;
+    }
+
+    ret = sigsuspend(&set);'
+
+    runHook postConfigure
+  '';
+
+  buildPhase = ''
+    runHook preBuild
+    make -j$NIX_BUILD_CORES
+    runHook postBuild
+  '';
+
+  installPhase = ''
+    runHook preInstall
+    make install.bin install.modules
+    # compinit and the completers, flat in one fpath directory under /usr/share/zsh
+    make install.fns DESTDIR=$out
+    # the GPL-licensed completers
+    rm -f $out/usr/share/zsh/${zsh.version}/functions/{_composer,_darcs,_osc,_qdbus,_zypper}
+    # run-help reads help files from the build's store path, and the image carries neither those nor man
+    rm -f $out/usr/share/zsh/${zsh.version}/functions/{run-help,run-help-*,_run-help}
+    # the completion dump compinit would otherwise spend half a minute writing on first start, the
+    # build machine's zsh is the same version, and compinit rebuilds a copy whose file count is stale
+    share=$out/usr/share/zsh
+    ${zsh}/bin/zsh -f -c "zmodload zsh/zle; fpath=($share/${zsh.version}/functions $share/site-functions); \
+      autoload -Uz compinit; compinit -u -d $share/${zsh.version}/zcompdump"
+    test -s $share/${zsh.version}/zcompdump
+    runHook postInstall
+  '';
+
+  dontFixup = true;
+
+  meta = with lib; {
+    platforms = platforms.unix;
+  };
+}

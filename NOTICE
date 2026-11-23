@@ -1,0 +1,187 @@
+kido-sh/darwin
+Copyright (c) 2026 The kido authors
+
+This repository and the guest images built from it contain the work of many
+others. This file gives the attributions their licenses ask for. LICENSING.md
+in the repository says which license covers which files; LICENSES/ there, and
+/usr/share/doc/kido/licenses/SPDX in an image, hold the full texts.
+
+
+Source code
+-----------
+
+The complete source of the images, including every change made to code under
+the APSL, the MPL, the CDDL and the LGPL, is at https://github.com/kido-sh/darwin.
+The third-party sources that flake.lock pins come from the upstream locations
+listed below.
+
+
+Upstream bases
+--------------
+
+PureDarwin
+  https://github.com/PureDarwin/PureDarwin, branch upstream-xnu-12377 at
+  c713d8fb9b048a38e2242d67e29b9957ced8c495, with commit
+  a08eb9b6b42f4222b7383c14e9d4ac671fbd5128.
+  Copyright (c) 2007-Present The PureDarwin Project. All rights reserved.
+  PureDarwin's files without a license header of their own are under the
+  BSD 2-Clause License (LICENSES/BSD-2-Clause.txt).
+
+Apple's open-source releases
+  https://github.com/apple-oss-distributions; docs/upstream.md names the
+  release of each component.
+  Copyright Apple Inc. and the other holders named in each file, under the
+  Apple Public Source License 2.0 or the Apache License 2.0 as each file or
+  release says. This repository holds the source of these components as they
+  are built here, with every change PureDarwin and kido made to them.
+
+xnu-loader
+  https://github.com/PureDarwin/xnu-loader at
+  2e0ccce2bd88eec1194e78eaeb46a91601478555.
+  Copyright (c) 2026, Vali0004. BSD 3-Clause License.
+
+kc-tools and iig-tools (build tools)
+  https://github.com/PureDarwin/kc-tools and
+  https://github.com/PureDarwin/iig-tools.
+  Copyright (c) 2026, Vali0004. BSD 3-Clause License.
+
+corecrypto
+  NeoDarwin's corecrypto, https://github.com/NeoDarwinOS/corecrypto, through
+  PureDarwin's interim fork https://github.com/Vali0004/corecrypto at
+  f577aafe4b9a89727968666237d20cc51d2f770d. Mozilla Public License 2.0.
+  It includes code adapted from LibTomCrypt by Tom St Denis (public domain),
+  AES code Copyright (c) 2003, Dr Brian Gladman, Worcester, UK, and code
+  Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com).
+
+NSS
+  The ASN.1 code in Security.framework (OSX/libsecurity_asn1) is the
+  Netscape security libraries. Portions created by Netscape are Copyright (C)
+  1994-2000 Netscape Communications Corporation. All Rights Reserved. Used
+  under the Mozilla Public License 1.1.
+
+Other code in the tree, each under the license its files state:
+  - LLVM 21.1.8 (libc++, libc++abi, libunwind, LLVM libc headers, clang
+    headers), https://github.com/llvm/llvm-project: the LLVM Project
+    contributors, Apache License 2.0 with LLVM Exceptions.
+  - swift-corelibs-foundation 5.0.3 (CoreFoundation),
+    https://github.com/apple/swift-corelibs-foundation: Apple Inc. and the
+    Swift project authors, Apache License 2.0 with Runtime Library Exception.
+  - NextBSD's libxpc: Copyright 2014-2015 iXsystems, Inc.
+  - FreeBSD, NetBSD, OpenBSD and 4.4BSD code: The Regents of the University of
+    California and the other authors named in each file.
+  - Mach: Carnegie Mellon University.
+  - DTrace and the CTF tools: Sun Microsystems, Inc. (CDDL 1.0).
+  - libdwarf, in the build-only CTF tools: Silicon Graphics, Inc. (LGPL 2.1).
+  - cctools-port, in the build-only darwin/tools/cctools: Thomas Poechtrager's
+    port of Apple's cctools and ld64.
+  - openlibm: The Julia Project and the FreeBSD and OpenBSD authors.
+  - gdtoa: David M. Gay and Lucent Technologies.
+  - libsystem_trace: Copyright (C) 2026 Zoe Knox.
+
+
+Third-party components built into the image
+-------------------------------------------
+
+OpenSSL 3.6.3, linked into Security.framework
+  Copyright (c) 1998-2025 The OpenSSL Project Authors. Apache License 2.0.
+  https://www.openssl.org
+
+SQLite 3.51.2, linked into Security.framework
+  Public domain. https://sqlite.org
+
+zsh 5.9.1
+  Copyright (c) 1992-2017 Paul Falstad, Richard Coleman, Zoltan Hidvegi,
+  Andrew Main, Peter Stephenson, Sven Wischnowsky, and others.
+  License: LICENSES/LicenseRef-zsh.txt. https://www.zsh.org
+
+ncurses 6.6, linked into zsh
+  Copyright 2018-2024,2025 Thomas E. Dickey.
+  Copyright 1998-2017,2018 Free Software Foundation, Inc.
+  https://invisible-island.net/ncurses/
+
+GNU libiconv 1.19
+  Copyright (C) 1999-2026 Free Software Foundation, Inc. GNU Lesser General
+  Public License 2.1 or later. Source: https://ftp.gnu.org/gnu/libiconv/,
+  with the change in nix/darwin/third-party/libiconv.nix.
+
+ICU 76.1
+  Copyright (c) 2016-2024 Unicode, Inc. Copyright (c) 1995-2016 International
+  Business Machines Corporation and others. License and third-party notices:
+  LICENSES/LicenseRef-ICU.txt. https://icu.unicode.org
+
+zlib 1.3.2, also linked into toybox
+  (C) 1995-2026 Jean-loup Gailly and Mark Adler. zlib License.
+  https://zlib.net
+
+toybox 0.8.13
+  Copyright (C) 2006, 2019 by Rob Landley. Zero-Clause BSD.
+  https://landley.net/toybox/
+
+libffi 3.5.2, linked into Foundation
+  Copyright (c) 1996-2025 Anthony Green, Red Hat, Inc and others. MIT License.
+  https://sourceware.org/libffi/
+
+libxml2 2.15.3, linked into Foundation
+  Copyright (C) 1998-2012 Daniel Veillard. Copyright (C) The Libxml2
+  Contributors. MIT License. https://gitlab.gnome.org/GNOME/libxml2
+
+Mozilla's CA certificate list (NSS 3.125, via nixpkgs cacert)
+  Mozilla Public License 2.0. https://wiki.mozilla.org/CA
+
+iana-etc 20251215
+  MIT License; data from the IANA service and protocol registries.
+  https://github.com/Mic92/iana-etc
+
+LLVM compiler-rt builtins 21.1.8
+  The LLVM Project contributors. Apache License 2.0 with LLVM Exceptions.
+
+kido-agent, https://github.com/kido-sh/kido
+  The kido authors. Apache License 2.0. Built with the Go standard library,
+  Copyright 2009 The Go Authors, BSD 3-Clause License.
+
+gnu-efi 4.0.2, linked into the EFI loader on the image's EFI system partition
+  Copyright (c) 1998-2000 Intel Corporation, Copyright (c) 2025 GNU-EFI
+  Contributors, and the authors named in its files. gnu-efi's EFI library
+  license (LICENSES/LicenseRef-gnu-efi-efilib.txt), BSD 3-Clause License, and
+  BSD-2-Clause Plus Patent License for the code from EDK II. Its inc/subst/elf.h
+  is LGPL 2.1 or later, used under section 3 of the LGPL 3.0.
+  https://github.com/ncroxon/gnu-efi
+
+
+Acknowledgements
+----------------
+
+The advertising clauses of the BSD-style, OpenSSL and SSLeay licenses ask for
+these statements:
+
+This product includes software developed by the University of California,
+Berkeley and its contributors. (The University withdrew this requirement in
+1999.)
+This product includes software developed by the NetBSD Foundation, Inc. and
+its contributors.
+This product includes software developed by John Birrell.
+This product includes cryptographic software written by Eric Young
+(eay@cryptsoft.com).
+This product includes software developed by the OpenSSL Project for use in
+the OpenSSL Toolkit (http://www.openssl.org/).
+This product includes software developed by the Network Research Group at
+Lawrence Berkeley Laboratory.
+This product includes software developed by the SMCC Technology Development
+Group at Sun Microsystems, Inc.
+This product includes software developed by Winning Strategies, Inc.
+This product includes software developed by Christos Zoulas.
+This product includes software developed by Christopher G. Demetriou for the
+NetBSD Project.
+This product includes software developed by Jason L. Wright.
+This product includes software developed by Niels Provos.
+This product includes software developed by Adam Glass and Charles M. Hannum.
+This product includes software developed by Herb Peyerl.
+This product includes software developed by Jonathan Stone and Jason R.
+Thorpe for the NetBSD Project.
+This product includes software developed by Bruce M. Simpson.
+This product includes software developed by Phase One, Inc.
+This product includes software developed by Bill Paul.
+This product includes software developed by Softweyr LLC, the University of
+California, Berkeley, and its contributors.
+This product includes software developed by the Alice Group.
+This product includes software developed by Rolf Grossmann.

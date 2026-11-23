@@ -1,0 +1,626 @@
+{ stdenvNoCC, lib, perl, bash, ed, unifdef, zlib, libxml2, clang, migcom ? null }:
+
+let
+  workspaceRoot = ../../darwin;
+  # <corecrypto/*.h>: the public headers of the MPL-2.0 tree in external/corecrypto
+  corecryptoComponents = [
+    "cc" "ccaes" "ccansikdf" "ccasn1" "ccblowfish" "cccast" "ccchacha20poly1305" "cccmac"
+    "ccdes" "ccdigest" "ccdrbg" "cchkdf" "cchmac" "cckprng" "ccmd2" "ccmd4" "ccmd5" "ccmode"
+    "ccn" "ccnistkdf" "ccpad" "ccpbkdf2" "ccpost" "ccrc2" "ccrc4" "ccripemd" "ccrng" "ccrsa"
+    "ccsha1" "ccsha2" "ccwrap" "cczp"
+  ];
+  corecryptoHeaderDirs = map (c: "external/corecrypto/${c}/include") corecryptoComponents;
+  # the SDK takes no implementation file: without this, a .c edit in CoreFoundation or libc rebuilt the toolchain
+  implementation = lib.fileset.fileFilter
+    (file: lib.any file.hasExt [ "c" "cc" "cpp" "cxx" "m" "mm" "s" "S" ]) workspaceRoot;
+  root = lib.fileset.toSource {
+    root = workspaceRoot;
+    fileset = lib.fileset.difference (lib.fileset.unions (map (path: workspaceRoot + path) [
+      /src/Kernel/xnu/EXTERNAL_HEADERS
+      /src/Kernel/xnu/bsd/arm
+      /src/Kernel/xnu/bsd/bsm
+      /src/Kernel/xnu/bsd/i386
+      /src/Kernel/xnu/bsd/kern/makesyscalls.sh
+      /src/Kernel/xnu/bsd/kern/syscalls.master
+      /src/Kernel/xnu/bsd/machine
+      /src/Kernel/xnu/bsd/net
+      /src/Kernel/xnu/bsd/netinet
+      /src/Kernel/xnu/bsd/netinet6
+      /src/Kernel/xnu/bsd/sys
+      /src/Kernel/xnu/bsd/uuid/uuid.h
+      /src/Kernel/xnu/iokit/IOKit
+      /src/Kernel/xnu/libkern/libkern
+      /src/Kernel/xnu/libkern/os/base.h
+      /src/Kernel/xnu/libkern/os/base_private.h
+      /src/Kernel/xnu/libkern/os/log.h
+      /src/Kernel/xnu/libkern/os/log_private.h
+      /src/Kernel/xnu/libkern/os/overflow.h
+      /src/Kernel/xnu/libkern/os/reason_private.h
+      /src/Kernel/xnu/osfmk/device/device_types.h
+      /src/Kernel/xnu/osfmk/i386/eflags.h
+      /src/Kernel/xnu/osfmk/i386/proc_reg.h
+      /src/Kernel/xnu/osfmk/i386/user_ldt.h
+      /src/Kernel/xnu/osfmk/arm/arch.h
+      /src/Kernel/xnu/osfmk/kern/cs_blobs.h
+      /src/Kernel/xnu/osfmk/kern/kcdata.h
+      /src/Kernel/xnu/osfmk/mach
+      /src/Kernel/xnu/osfmk/mach_debug
+      /src/Libraries/AvailabilityVersions/include
+      /src/Frameworks/CoreFoundation
+      /src/Libraries/Security
+      /src/Libraries/IOKit/IOKit.exports
+      /src/Libraries/CoreServices
+      /src/Libraries/SystemConfiguration/SystemConfiguration.exports
+      /src/Libraries/libDER/include
+      /src/Kernel/Extensions/IOStorageFamily/include/IOKit/storage
+      /src/Kernel/Extensions/IOCDStorageFamily/include/IOKit/storage
+      /src/Kernel/Extensions/IODVDStorageFamily/include/IOKit/storage
+      /src/Kernel/Extensions/IOSCSIArchitectureModelFamily/include/IOKit/scsi
+      /src/Kernel/Extensions/IOHIDFamily/IOHIDFamily
+      /src/Kernel/Extensions/IOHIDFamily/IOHIDSystem/IOKit
+      /src/Kernel/Extensions/IOGraphicsFamily/IOKit/graphics/IOGraphicsTypes.h
+      /src/Libraries/IOKit/iokituser/include/IOKit
+      /src/Libraries/XPC/libinfo/aliasdb.h
+      /src/Libraries/XPC/libinfo/printerdb.h
+      /src/Libraries/XPC/libxpc/include
+      /src/Libraries/XPC/notify/notify_keys.h
+      /src/Libraries/libsandbox/include/sandbox.h
+      /src/Libraries/dyld/upstream/include
+      /src/Libraries/libSystem/libc
+      /src/Libraries/libSystem/libdispatch/dispatch
+      /src/Libraries/libSystem/libdispatch/os
+      /src/Libraries/libSystem/libdispatch/src/BlocksRuntime/Block.h
+      /src/Libraries/libSystem/libdispatch/src/BlocksRuntime/Block_private.h
+      /src/Libraries/libSystem/libmalloc/include
+      /src/Libraries/libSystem/libplatform/include
+      /src/Libraries/libSystem/libsystem_kernel/Platforms/MacOSX/x86_64/syscall.map
+      /src/Libraries/libSystem/libsystem_kernel/Platforms/MacOSX/arm64/syscall.map
+      /src/Libraries/libSystem/libsystem_kernel/include
+      /src/Libraries/libSystem/libsystem_kernel/mach
+      /src/Libraries/libSystem/libsystem_kernel/os
+      /src/Libraries/libSystem/libsystem_kernel/wrappers
+      /src/Libraries/libSystem/pthread/include
+      /src/Libraries/libSystem/stub/libSystem.exports
+      /src/Libraries/libcxx/include
+      /src/Libraries/libcxx/vendor/llvm/default_assertion_handler.in
+      /src/Libraries/CommonCrypto/include/CommonCrypto
+      /src/Libraries/libcxxabi/config/__config_site
+      /src/Libraries/libcxxabi/include/cxxabi.h
+      /src/Libraries/libcxxabi/include/__cxxabi_config.h
+      /src/Libraries/libdarwin/pd-compat-include/bsm/libbsm.h
+      /src/Libraries/libdarwin/pd-compat-include/mach-o/getsect.h
+      /src/Libraries/libdarwin/pd-compat-include/mach-o/ldsyms.h
+      /src/Libraries/libresolv
+      /src/Libraries/objc4/runtime
+      /src/Libraries/syslog/libsystem_asl.tproj/include
+      /tools/cctools/include/mach-o
+      /tools/mig/mig.sh
+    ] ++ map (dir: workspaceRoot + "/${dir}") corecryptoHeaderDirs)) implementation;
+  };
+  # Security.framework: headers from the same list the framework package uses,
+  # and a tbd generated from its checked-in exports so -framework Security
+  # resolves too. Headers alone would be worse than nothing - a port's
+  # configure would find <Security/Security.h>, take its __APPLE__ branch and
+  # then fail at "ld: framework not found Security".
+  # Frameworks the SDK publishes a tbd for, so -framework <X> resolves from
+  # -isysroot. Each list is checked in, so the SDK depends on no built
+  # framework and stays out of its own build closure.
+  frameworkTbds = [
+    { name = "Security"; version = "59754.120.12";
+      exports = "${root}/src/Libraries/Security/Security.exports"; }
+    { name = "CoreFoundation"; version = "1338";
+      exports = "${root}/src/Frameworks/CoreFoundation/CoreFoundation.exports"; }
+    { name = "IOKit"; version = "275";
+      exports = "${root}/src/Libraries/IOKit/IOKit.exports"; }
+    { name = "CoreServices"; version = "1069.24";
+      exports = "${root}/src/Libraries/CoreServices/CoreServices.exports"; }
+    { name = "SystemConfiguration"; version = "1109.101.1";
+      exports = "${root}/src/Libraries/SystemConfiguration/SystemConfiguration.exports"; }
+  ];
+  secHeaders = import ../lib/security-headers.nix;
+  secHeaderArgs = lib.concatStringsSep " " (
+    map (d: "${root}/src/Libraries/Security/${d}/*.h") secHeaders.dirs
+    ++ map (f: "${root}/src/Libraries/Security/${f}") (secHeaders.apiFiles ++ secHeaders.closureFiles));
+  sources = [
+    [ "${root}/src/Kernel/xnu/EXTERNAL_HEADERS" "usr/include" ]
+    [ "${root}/src/Kernel/xnu/bsd/arm" "usr/include/arm" ]
+    [ "${root}/src/Kernel/xnu/bsd/bsm" "usr/include/bsm" ]
+    [ "${root}/src/Kernel/xnu/bsd/i386" "usr/include/i386" ]
+    [ "${root}/src/Kernel/xnu/bsd/machine" "usr/include/machine" ]
+    [ "${root}/src/Kernel/xnu/bsd/net" "usr/include/net" ]
+    [ "${root}/src/Kernel/xnu/bsd/netinet" "usr/include/netinet" ]
+    [ "${root}/src/Kernel/xnu/bsd/netinet6" "usr/include/netinet6" ]
+    [ "${root}/src/Kernel/xnu/bsd/sys" "usr/include/sys" ]
+    [ "${root}/src/Kernel/xnu/iokit/IOKit" "System/Library/Frameworks/IOKit.framework/Headers" ]
+    # IOKitUser's CF-shaped client headers are separate from XNU's kernel-side
+    # IOKit headers, but the SDK framework must expose both surfaces.
+    [ "${root}/src/Libraries/IOKit/iokituser/include/IOKit" "System/Library/Frameworks/IOKit.framework/Headers" ]
+    # IOStorageFamily's headers gate everything but the registry key names
+    # behind KERNEL, which is the surface disk tools include them for.
+    [ "${root}/src/Kernel/Extensions/IOStorageFamily/include/IOKit/storage" "System/Library/Frameworks/IOKit.framework/Headers/storage" ]
+    [ "${root}/src/Kernel/Extensions/IOCDStorageFamily/include/IOKit/storage" "System/Library/Frameworks/IOKit.framework/Headers/storage" ]
+    [ "${root}/src/Kernel/Extensions/IODVDStorageFamily/include/IOKit/storage" "System/Library/Frameworks/IOKit.framework/Headers/storage" ]
+    [ "${root}/src/Kernel/Extensions/IOSCSIArchitectureModelFamily/include/IOKit/scsi" "System/Library/Frameworks/IOKit.framework/Headers/scsi" ]
+    [ "${root}/src/Kernel/xnu/libkern/libkern" "usr/include/libkern" ]
+    [ "${root}/src/Kernel/xnu/osfmk/mach" "usr/include/mach" ]
+    [ "${root}/src/Libraries/AvailabilityVersions/include" "usr/include" ]
+    [ "${root}/src/Libraries/dyld/upstream/include" "usr/include" ]
+    [ "${root}/src/Libraries/libSystem/libc/include/mach" "usr/include/mach" ]
+    [ "${root}/src/Libraries/syslog/libsystem_asl.tproj/include" "usr/include" ]
+    # servers/bootstrap.h, xpc/, launch.h, vproc.h; libsystem_kernel's servers/
+    # has only the netname/ls/nm/key defs.
+    [ "${root}/src/Libraries/XPC/libxpc/include" "usr/include" ]
+    [ "${root}/src/Libraries/libSystem/libc/libdarwin/os-include" "usr/include" ]
+    [ "${root}/src/Libraries/libSystem/libc/libdarwin/sys-include" "usr/include" ]
+    [ "${root}/src/Libraries/libSystem/libdispatch/os" "usr/include/os" ]
+    [ "${root}/src/Libraries/libSystem/libdispatch/dispatch" "usr/include/dispatch" ]
+    [ "${root}/src/Libraries/libSystem/libsystem_kernel/include" "usr/include" ]
+    [ "${root}/src/Libraries/libSystem/libmalloc/include" "usr/include" ]
+    [ "${root}/src/Libraries/libSystem/libplatform/include" "usr/include" ]
+    [ "${root}/src/Libraries/libSystem/pthread/include" "usr/include" ]
+    [ "${root}/src/Libraries/libcxx/include" "usr/include/c++/v1" ]
+    # Apple ships CommonCrypto in /usr/include; python's mimalloc wants it.
+    [ "${root}/src/Libraries/CommonCrypto/include/CommonCrypto" "usr/include/CommonCrypto" ]
+    [ "${zlib.dev}/include" "usr/include" ]
+    [ "${libxml2.dev}/include/libxml2" "usr/include/libxml2" ]
+  ] ++ map (dir: [ "${root}/${dir}" "usr/include" ]) corecryptoHeaderDirs;
+  files = [
+    # The public IOKit/hid surface: the transitive closure of IOHIDLib.h, and
+    # nothing else. Named files, never a directory copy - IOHIDFamily has kernel
+    # C++ IOHIDDevice.h/IOHIDElement.h/IOHIDUserDevice.h under the same names as
+    # IOKitUser's user-space ones.
+    [ "${root}/src/Libraries/IOKit/iokituser/include/IOKit/hid/IOHIDBase.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDBase.h" ]
+    [ "${root}/src/Libraries/IOKit/iokituser/include/IOKit/hid/IOHIDDevice.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDDevice.h" ]
+    [ "${root}/src/Libraries/IOKit/iokituser/include/IOKit/hid/IOHIDElement.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDElement.h" ]
+    [ "${root}/src/Libraries/IOKit/iokituser/include/IOKit/hid/IOHIDLib.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDLib.h" ]
+    [ "${root}/src/Libraries/IOKit/iokituser/include/IOKit/hid/IOHIDLibObsolete.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDLibObsolete.h" ]
+    [ "${root}/src/Libraries/IOKit/iokituser/include/IOKit/hid/IOHIDManager.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDManager.h" ]
+    [ "${root}/src/Libraries/IOKit/iokituser/include/IOKit/hid/IOHIDQueue.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDQueue.h" ]
+    [ "${root}/src/Libraries/IOKit/iokituser/include/IOKit/hid/IOHIDTransaction.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDTransaction.h" ]
+    [ "${root}/src/Libraries/IOKit/iokituser/include/IOKit/hid/IOHIDValue.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDValue.h" ]
+    [ "${root}/src/Kernel/Extensions/IOHIDFamily/IOHIDFamily/IOHIDDeviceKeys.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDDeviceKeys.h" ]
+    [ "${root}/src/Kernel/Extensions/IOHIDFamily/IOHIDFamily/IOHIDDeviceTypes.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDDeviceTypes.h" ]
+    [ "${root}/src/Kernel/Extensions/IOHIDFamily/IOHIDFamily/IOHIDEventServiceKeys.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDEventServiceKeys.h" ]
+    [ "${root}/src/Kernel/Extensions/IOHIDFamily/IOHIDFamily/IOHIDKeys.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDKeys.h" ]
+    [ "${root}/src/Kernel/Extensions/IOHIDFamily/IOHIDFamily/IOHIDProperties.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDProperties.h" ]
+    [ "${root}/src/Kernel/Extensions/IOHIDFamily/IOHIDFamily/IOHIDUsageTables.h" "System/Library/Frameworks/IOKit.framework/Headers/hid/IOHIDUsageTables.h" ]
+    [ "${root}/src/Kernel/Extensions/IOHIDFamily/IOHIDSystem/IOKit/hidsystem/IOHIDParameter.h" "System/Library/Frameworks/IOKit.framework/Headers/hidsystem/IOHIDParameter.h" ]
+    [ "${root}/src/Kernel/Extensions/IOHIDFamily/IOHIDSystem/IOKit/hidsystem/IOHIDTypes.h" "System/Library/Frameworks/IOKit.framework/Headers/hidsystem/IOHIDTypes.h" ]
+    [ "${root}/src/Kernel/Extensions/IOHIDFamily/IOHIDSystem/IOKit/hidsystem/IOLLEvent.h" "System/Library/Frameworks/IOKit.framework/Headers/hidsystem/IOLLEvent.h" ]
+    [ "${root}/src/Kernel/Extensions/IOGraphicsFamily/IOKit/graphics/IOGraphicsTypes.h" "System/Library/Frameworks/IOKit.framework/Headers/graphics/IOGraphicsTypes.h" ]
+    [ "${root}/src/Kernel/xnu/EXTERNAL_HEADERS/stdatomic.h" "usr/include/puredarwin/stdatomic.h" ]
+    [ "${root}/src/Kernel/xnu/libkern/os/base.h" "usr/include/os/base.h" ]
+    [ "${root}/src/Kernel/xnu/libkern/os/base_private.h" "usr/include/os/base_private.h" ]
+    [ "${root}/src/Kernel/xnu/bsd/uuid/uuid.h" "usr/include/uuid/uuid.h" ]
+    [ "${root}/src/Kernel/xnu/osfmk/i386/eflags.h" "usr/include/i386/eflags.h" ]
+    [ "${root}/src/Kernel/xnu/osfmk/i386/proc_reg.h" "usr/include/i386/proc_reg.h" ]
+    [ "${root}/src/Kernel/xnu/osfmk/i386/user_ldt.h" "usr/include/i386/user_ldt.h" ]
+    # libkern/arm/OSByteOrder.h includes <arm/arch.h>, which lives in osfmk,
+    # not bsd/arm (the only arm dir copied wholesale above).
+    [ "${root}/src/Kernel/xnu/osfmk/arm/arch.h" "usr/include/arm/arch.h" ]
+    [ "${root}/src/Kernel/xnu/libkern/os/log.h" "usr/include/os/log.h" ]
+    [ "${root}/src/Kernel/xnu/libkern/os/log_private.h" "usr/include/os/log_private.h" ]
+    [ "${root}/src/Kernel/xnu/libkern/os/overflow.h" "usr/include/os/overflow.h" ]
+    [ "${root}/src/Kernel/xnu/libkern/os/reason_private.h" "usr/include/os/reason_private.h" ]
+    [ "${root}/src/Libraries/libSystem/libdispatch/os/object.h" "usr/include/os/object.h" ]
+    [ "${root}/src/Libraries/libSystem/pthread/include/pthread/pthread.h" "usr/include/pthread.h" ]
+    [ "${root}/src/Libraries/libSystem/pthread/include/pthread/sched.h" "usr/include/sched.h" ]
+    [ "${root}/src/Libraries/libSystem/libc/include/grp.h" "usr/include/grp.h" ]
+    [ "${root}/src/Libraries/libSystem/libc/include/math.h" "usr/include/math.h" ]
+    # Apple's Libm complex.h, alongside its math.h; clang's tgmath.h needs it.
+    [ "${root}/src/Libraries/libSystem/libc/include/complex.h" "usr/include/complex.h" ]
+    [ "${root}/src/Libraries/libSystem/libc/include/netdb.h" "usr/include/netdb.h" ]
+    [ "${root}/src/Libraries/libSystem/libc/include/pwd.h" "usr/include/pwd.h" ]
+    [ "${root}/src/Libraries/libSystem/libc/include/MacTypes.h" "usr/include/MacTypes.h" ]
+    # The userspace mach.h, not xnu's osfmk one: only this declares slot_name and
+    # pulls mach_traps.h. Installed here so it lands after headers.sh's copy.
+    [ "${root}/src/Libraries/libSystem/libc/include/mach/mach.h" "usr/include/mach/mach.h" ]
+    [ "${root}/src/Libraries/libSystem/libc/include/copyfile.h" "usr/include/copyfile.h" ]
+    # Individually: pd-compat-include's mach-o/loader.h is worse than dyld's.
+    [ "${root}/src/Libraries/libdarwin/pd-compat-include/bsm/libbsm.h" "usr/include/bsm/libbsm.h" ]
+    [ "${root}/src/Libraries/libdarwin/pd-compat-include/mach-o/ldsyms.h" "usr/include/mach-o/ldsyms.h" ]
+    [ "${root}/src/Libraries/libdarwin/pd-compat-include/mach-o/getsect.h" "usr/include/mach-o/getsect.h" ]
+    # FreeBSD's fenv.h renamed; reaches these by angle bracket. Only these - e.g.
+    # openlibm_complex.h defines a bare "I".
+    [ "${root}/src/Libraries/libSystem/libc/libm/openlibm/include/openlibm_fenv.h" "usr/include/fenv.h" ]
+    [ "${root}/src/Libraries/libSystem/libc/libm/openlibm/include/openlibm_fenv_arm.h" "usr/include/openlibm_fenv_arm.h" ]
+    # From cctools, not xnu: xnu's copy has no FAT_MAGIC_64/fat_arch_64, and
+    # still does not as of xnu-12377. Same for arch.h.
+    [ "${root}/tools/cctools/include/mach-o/fat.h" "usr/include/mach-o/fat.h" ]
+    [ "${root}/tools/cctools/include/mach-o/arch.h" "usr/include/mach-o/arch.h" ]
+    [ "${root}/tools/cctools/include/mach-o/swap.h" "usr/include/mach-o/swap.h" ]
+    [ "${root}/tools/cctools/include/mach-o/ranlib.h" "usr/include/mach-o/ranlib.h" ]
+    [ "${root}/tools/cctools/include/mach-o/utils.h" "usr/include/mach-o/utils.h" ]
+    [ "${root}/src/Libraries/libresolv/include/ifaddrs.h" "usr/include/ifaddrs.h" ]
+    [ "${root}/src/Kernel/xnu/osfmk/kern/kcdata.h" "usr/include/kern/kcdata.h" ]
+    [ "${root}/src/Kernel/xnu/osfmk/mach/mach_eventlink_types.h" "usr/include/mach/mach_eventlink_types.h" ]
+    [ "${root}/src/Kernel/xnu/osfmk/kern/cs_blobs.h" "usr/include/kern/cs_blobs.h" ]
+    [ "${root}/src/Kernel/xnu/bsd/sys/fileport.h" "usr/include/sys/fileport.h" ]
+    [ "${root}/src/Kernel/xnu/bsd/sys/codesign.h" "usr/include/sys/codesign.h" ]
+    # MIG-generated device_user.h includes this.
+    [ "${root}/src/Kernel/xnu/osfmk/device/device_types.h" "usr/include/device/device_types.h" ]
+    [ "${root}/src/Libraries/libSystem/libc/include/sysdir.h" "usr/include/sysdir.h" ]
+    [ "${root}/src/Libraries/XPC/notify/notify_keys.h" "usr/include/notify_keys.h" ]
+    [ "${root}/src/Libraries/libsandbox/include/sandbox.h" "usr/include/sandbox.h" ]
+    # Reconstructed; see the headers for where the layouts came from.
+    [ "${root}/src/Libraries/XPC/libinfo/aliasdb.h" "usr/include/aliasdb.h" ]
+    [ "${root}/src/Libraries/XPC/libinfo/printerdb.h" "usr/include/printerdb.h" ]
+    # libdispatch's userspace BlocksRuntime, not xnu's libkern copy.
+    [ "${root}/src/Libraries/libSystem/libdispatch/src/BlocksRuntime/Block.h" "usr/include/Block.h" ]
+    [ "${root}/src/Libraries/libSystem/libdispatch/src/BlocksRuntime/Block_private.h" "usr/include/Block_private.h" ]
+    [ "${root}/src/Libraries/libresolv/resolv.h" "usr/include/resolv.h" ]
+    # Both spellings: resolv.h includes <nameser.h>, everyone else uses the
+    # <arpa/nameser.h> Darwin ships (its nameser_compat.h sibling is already there).
+    [ "${root}/src/Libraries/libresolv/nameser.h" "usr/include/nameser.h" ]
+    [ "${root}/src/Libraries/libresolv/nameser.h" "usr/include/arpa/nameser.h" ]
+    [ "${root}/src/Libraries/libresolv/dns.h" "usr/include/dns.h" ]
+    [ "${root}/src/Libraries/libresolv/dns_util.h" "usr/include/dns_util.h" ]
+    [ "${root}/src/Libraries/libSystem/libplatform/include/setjmp.h" "usr/include/setjmp.h" ]
+    [ "${root}/src/Libraries/libcxxabi/config/__config_site" "usr/include/c++/v1/__config_site" ]
+    [ "${root}/src/Libraries/libcxx/vendor/llvm/default_assertion_handler.in" "usr/include/c++/v1/__assertion_handler" ]
+    # Apple ships these next to the libc++ headers, and ld64 includes <cxxabi.h>.
+    [ "${root}/src/Libraries/libcxxabi/include/cxxabi.h" "usr/include/c++/v1/cxxabi.h" ]
+    [ "${root}/src/Libraries/libcxxabi/include/__cxxabi_config.h" "usr/include/c++/v1/__cxxabi_config.h" ]
+  ];
+  libSystemSymbolSources = [
+    "${root}/src/Libraries/libSystem/stub/libSystem.exports"
+    "${root}/src/Libraries/libSystem/libc/scripts/legacy_alias.list"
+    # x86_64, not i386: the tbd targets 64-bit, and only the i386 map carries the
+    # 60 $UNIX2003 aliases that 64-bit does not have.
+    "${root}/src/Libraries/libSystem/libsystem_kernel/Platforms/MacOSX/x86_64/syscall.map"
+    # ...plus arm64, which spells these without the $INODE64 suffix. One SDK
+    # serves both arches, so the tbd needs the union; x86 never references the
+    # plain names (cdefs.h renames them), so the extra entries are inert there.
+    "${root}/src/Libraries/libSystem/libsystem_kernel/Platforms/MacOSX/arm64/syscall.map"
+    "${./libSystem-compat.exports}"
+  ];
+  installSource = source: ''
+    mkdir -p "$sdk/${source.target}"
+    chmod -R u+w "$sdk/${source.target}"
+    cp -RL ${source.path}/. "$sdk/${source.target}/"
+  '';
+  # A directory an earlier cp -RL created carries the store's read-only mode, so
+  # install -D cannot write into it; make it writable first.
+  installFile = source: ''
+    _d="$(dirname "$sdk/${source.target}")"
+    mkdir -p "$_d"
+    chmod u+w "$_d"
+    install -m644 ${source.path} "$sdk/${source.target}"
+  '';
+  armHost = !stdenvNoCC.buildPlatform.isx86;
+in
+stdenvNoCC.mkDerivation {
+  pname = "kido-oss-sdk";
+  version = "26.5";
+
+  dontUnpack = true;
+  dontConfigure = true;
+  dontBuild = true;
+  dontFixup = true;
+  nativeBuildInputs = [ perl bash ed unifdef ] ++ lib.optional (migcom != null) clang;
+
+  installPhase = ''
+    runHook preInstall
+    sdk="$out/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+    ${lib.concatMapStrings installSource (map (entry: { path = builtins.elemAt entry 0; target = builtins.elemAt entry 1; }) sources)}
+    # iokituser/include/IOKit carries the whole private HID surface (event
+    # system, service/session filters, objc ivar headers) for APIs we do not
+    # implement. Keep only the public IOHIDLib closure, installed by name below.
+    chmod -R u+w "$sdk/System/Library/Frameworks/IOKit.framework/Headers/hid"
+    rm -rf "$sdk/System/Library/Frameworks/IOKit.framework/Headers/hid"
+    headers_script="$TMPDIR/headers.sh"
+    cp ${root}/src/Libraries/libSystem/libc/scripts/headers.sh "$headers_script"
+    features_script="$TMPDIR/generate_features.pl"
+    cp ${root}/src/Libraries/libSystem/libc/scripts/generate_features.pl "$features_script"
+    sed -i '1c#!${perl}/bin/perl' "$features_script"
+    # The source script has a stale /usr/bin/perl shebang. Patch the private
+    # copy instead of rewriting its command line; the latter is fragile because
+    # SRCROOT is expanded by both Nix and the shell.
+    sed -i '1c#!${perl}/bin/perl' "$headers_script"
+    sed -i "s|''${SRCROOT}/scripts/generate_features.pl|$features_script|g" "$headers_script"
+    sed -i "s|''${SRCROOT}/build/generate_features.pl|$features_script|g" "$headers_script"
+    ARCHS=arm64 SRCROOT=${root}/src/Libraries/libSystem/libc \
+      GENERATE_FEATURES="$features_script" \
+      DERIVED_FILES_DIR="$TMPDIR/libc-derived" VARIANT_PLATFORM_NAME=macosx \
+      PLATFORM_NAME=macosx \
+      DEPLOYMENT_LOCATION=NO BUILT_PRODUCTS_DIR="$TMPDIR/libc-headers" \
+      SDK_INSTALL_HEADERS_ROOT="" bash "$headers_script"
+    chmod -R u+w "$sdk/usr/include"
+    cp -RL "$TMPDIR/libc-headers/usr/include/." "$sdk/usr/include/"
+    mkdir -p "$TMPDIR/xnu-syscalls"
+    (
+      cd "$TMPDIR/xnu-syscalls"
+      bash ${root}/src/Kernel/xnu/bsd/kern/makesyscalls.sh \
+        ${root}/src/Kernel/xnu/bsd/kern/syscalls.master header
+    )
+    install -Dm644 "$TMPDIR/xnu-syscalls/syscall.h" \
+      "$sdk/usr/include/sys/syscall.h"
+    # Hand-written and reconstructed SDK content, laid out as it lands. After
+    # the generated headers above so it wins where both supply a file.
+    cp -RL ${./oss-sdk}/. "$sdk/"
+    chmod -R u+w "$sdk/usr"
+    # Apple resolves the PLATFORM_* blocks when it builds an SDK; the xnu copy
+    # has none defined, so this reads 0 and 64-bit calls asm-rename to $UNIX2003.
+    sed -i '1i #define __DARWIN_ONLY_UNIX_CONFORMANCE 1' "$sdk/usr/include/sys/cdefs.h"
+    # Quote-included by the openlibm_fenv_*.h above, and openlibm keeps them in
+    # src/ rather than include/.
+    for h in cdefs-compat types-compat; do
+      install -Dm644 ${root}/src/Libraries/libSystem/libc/libm/openlibm/src/$h.h \
+        "$sdk/usr/include/$h.h"
+    done
+    # launchd resolves <CoreFoundation/*.h> through -F, so CF needs framework
+    # shape. Flattened from the subprojects rather than tracking CF's own
+    # PUBLIC_HEADERS list; over-inclusive, but that list drifts.
+    mkdir -p "$sdk/System/Library/Frameworks/CoreFoundation.framework/Headers"
+    # One cp per file: a couple of basenames repeat across subprojects and a
+    # single cp refuses to overwrite what it just created.
+    for h in ${root}/src/Frameworks/CoreFoundation/*.subproj/*.h; do
+      cp -Lf "$h" "$sdk/System/Library/Frameworks/CoreFoundation.framework/Headers/"
+    done
+    # Not a sources entry: runtime/ mixes headers with .mm/.cpp. Same *.h set
+    # libobjc.nix flattens into its own <objc/*.h> dir.
+    mkdir -p "$sdk/usr/include/objc"
+    cp -RL ${root}/src/Libraries/objc4/runtime/*.h "$sdk/usr/include/objc/"
+    mkdir -p "$sdk/usr/include/puredarwin"
+    csfw="$sdk/System/Library/Frameworks/CoreServices.framework"
+    mkdir -p "$csfw/Headers"
+    cp ${root}/src/Libraries/CoreServices/include/CoreServices/*.h "$csfw/Headers/"
+    secfw="$sdk/System/Library/Frameworks/Security.framework"
+    mkdir -p "$secfw/Headers"
+    cp ${secHeaderArgs} "$secfw/Headers/"
+    # SecCertificatePriv.h includes <security_libDER/libDER/libDER.h>; libDER's
+    # own headers include each other plainly, so publish both spellings.
+    mkdir -p "$sdk/usr/include/security_libDER/libDER" "$sdk/usr/include/libDER"
+    cp ${root}/src/Libraries/libDER/include/libDER/*.h "$sdk/usr/include/security_libDER/libDER/"
+    cp ${root}/src/Libraries/libDER/include/libDER/*.h "$sdk/usr/include/libDER/"
+    emit_framework_tbd() {
+      _name="$1"; _ver="$2"; _exports="$3"
+      _fw="$sdk/System/Library/Frameworks/$_name.framework"
+      mkdir -p "$_fw"
+      {
+        printf '%s\n' '--- !tapi-tbd' 'tbd-version: 4' \
+          'targets: [ arm64-macos ]' \
+          "install-name: '/System/Library/Frameworks/$_name.framework/Versions/A/$_name'" \
+          "current-version: $_ver" 'compatibility-version: 1' \
+          'exports:' '  - targets: [ arm64-macos ]'
+        printf '    symbols: [ '
+        _sep=
+        while read -r symbol remainder; do
+          case "$symbol" in
+            ""|'#'*) continue ;;
+          esac
+          printf '%s%s' "$_sep" "$symbol"
+          _sep=', '
+        done < "$_exports"
+        printf '%s\n' ' ]' '...'
+      } > "$_fw/$_name.tbd"
+    }
+    emit_framework_tbd Security 59754.120.12 ${root}/src/Libraries/Security/Security.exports
+    emit_framework_tbd CoreFoundation 1338 ${root}/src/Frameworks/CoreFoundation/CoreFoundation.exports
+    emit_framework_tbd IOKit 275 ${root}/src/Libraries/IOKit/IOKit.exports
+    emit_framework_tbd CoreServices 1069.24 ${root}/src/Libraries/CoreServices/CoreServices.exports
+    emit_framework_tbd SystemConfiguration 1109.101.1 ${root}/src/Libraries/SystemConfiguration/SystemConfiguration.exports
+    ${lib.concatMapStringsSep "\n" installFile (map (entry: { path = builtins.elemAt entry 0; target = builtins.elemAt entry 1; }) files)}
+    {
+      printf '%s\n' '--- !tapi-tbd' 'tbd-version: 4' \
+        'targets: [ arm64-macos ]' \
+        "install-name: '/usr/lib/libSystem.B.dylib'" \
+        'current-version: 1292.100.5' 'compatibility-version: 1' \
+        'exports:' '  - targets: [ arm64-macos ]'
+      printf '    symbols: [ '
+      separator=
+      for source in ${lib.escapeShellArgs libSystemSymbolSources}; do
+        while read -r symbol remainder; do
+          case "$symbol" in
+            ""|'#'*) continue ;;
+          esac
+          printf '%s%s' "$separator" "$symbol"
+          separator=', '
+          # The tbd covers both arches. arm64 builds define XNU_PLATFORM_MacOSX,
+          # so cdefs.h emits these entry points unsuffixed; publish the base
+          # name too or arm64 links fail on plain _readdir/_opendir/etc.
+          case "$symbol" in
+            *'$INODE64'|*'$UNIX2003'|*'$1050')
+              printf '%s%s' "$separator" "''${symbol%%\$*}"
+              ;;
+          esac
+        done < "$source"
+      done
+      printf '%s\n' ' ]' '...'
+    } > "$sdk/usr/lib/libSystem.tbd"
+    # libc++ and the libc++abi it reexports, from exports lists taken off the built dylibs
+    # so clang++'s implicit -lc++ binds the c++ runtime to them and never to libSystem
+    emit_symbols() {
+      printf '    symbols: [ '
+      _sep=
+      for _f in "$@"; do
+        while read -r symbol remainder; do
+          case "$symbol" in
+            ""|'#'*) continue ;;
+          esac
+          printf '%s%s' "$_sep" "$symbol"
+          _sep=', '
+        done < "$_f"
+      done
+      printf ' ]\n'
+    }
+    _cxxexp=${./libcxx-exports}
+    _alltargets='[ arm64-macos ]'
+    emit_libcxxabi_doc() {
+      printf '%s\n' '--- !tapi-tbd' 'tbd-version: 4' "targets: $_alltargets" \
+        "install-name: '/usr/lib/libc++abi.dylib'" \
+        'current-version: 1' 'compatibility-version: 1' \
+        'exports:' "  - targets: $_alltargets"
+      emit_symbols "$_cxxexp/libc++abi.exports"
+      printf '%s\n' '...'
+    }
+    {
+      printf '%s\n' '--- !tapi-tbd' 'tbd-version: 4' "targets: $_alltargets" \
+        "install-name: '/usr/lib/libc++.1.dylib'" \
+        'current-version: 1' 'compatibility-version: 1' \
+        'reexported-libraries:' "  - targets: $_alltargets" \
+        "    libraries: [ '/usr/lib/libc++abi.dylib' ]" \
+        'exports:' "  - targets: $_alltargets"
+      emit_symbols "$_cxxexp/libc++.exports"
+      emit_libcxxabi_doc
+    } > "$sdk/usr/lib/libc++.tbd"
+    emit_libcxxabi_doc > "$sdk/usr/lib/libc++abi.tbd"
+    for arch in arm64; do
+      mkdir -p "$sdk/usr/include/$arch"
+      ARCHS="$arch" SRCROOT=${root}/src/Libraries/libSystem/libc \
+        DERIVED_FILES_DIR="$TMPDIR/libc-features" VARIANT_PLATFORM_NAME=macosx \
+        perl ${root}/src/Libraries/libSystem/libc/scripts/generate_features.pl
+      cp "$TMPDIR/libc-features/$arch/libc-features.h" "$sdk/usr/include/$arch/"
+    done
+    ln -s MacOSX.sdk "$out/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk"
+    # <mach/*.h> RPC interfaces, generated from xnu's .defs rather than carried
+    # pre-generated. Skipped for the base SDK that builds migcom itself.
+    ${lib.optionalString (migcom != null) ''
+      export MIGCOM=${migcom}/bin/migcom
+      # mig.sh always passes -arch, which only a Darwin-targeting clang accepts. Off x86 it is unwrapped, as the
+      # wrapper adds the build host's hardening flags (aarch64's -fzero-call-used-regs) that a Darwin target refuses
+      cat > "$TMPDIR/migcc" <<EOF
+#!/bin/sh
+exec ${if armHost then clang.cc else clang}/bin/clang -target arm64-apple-darwin25.5 "\$@"
+EOF
+      chmod +x "$TMPDIR/migcc"
+      export MIGCC="$TMPDIR/migcc"
+      for d in clock clock_priv clock_reply exc host_priv host_security \
+               mach_host mach_port mach_vm mach_voucher memory_entry processor \
+               processor_set task thread_act vm_map mach_eventlink; do
+        defs="${root}/src/Kernel/xnu/osfmk/mach/$d.defs"
+        [ -e "$defs" ] || continue
+        # mach_port.defs and task.defs only use the public names for libsyscall's interface, which is how
+        # Apple generates the installed header, otherwise every routine gets the _kernelrpc_ prefix
+        extra=""
+        case "$d" in mach_port|task) extra="-DLIBSYSCALL_INTERFACE" ;; esac
+        # mig.sh takes uname -m otherwise
+        bash ${root}/tools/mig/mig.sh -novouchers -arch arm64 $extra \
+          -I"$sdk/usr/include" -isysroot "$sdk" \
+          -user /dev/null -server /dev/null \
+          -header "$sdk/usr/include/mach/$d.h" "$defs" || exit 1
+      done
+    ''}
+    # Generated Mach interfaces use a few newer XNU types that are not in the
+    # 11.3 SDK's public mach_types.h. Apply this after MIG generation.
+    compat="$sdk/usr/include/mach/pd_mach_compat.h"
+    mkdir -p "$(dirname "$compat")"
+    printf '%s\n' \
+      '#ifndef _PD_MACH_COMPAT_H_' '#define _PD_MACH_COMPAT_H_' \
+      '#ifndef __ASSEMBLER__' \
+      '#include <stdint.h>' \
+      '#include <mach/vm_types.h>' \
+      '#ifndef PD_TASK_CORPSE_FORKING_BEHAVIOR_T_DEFINED' \
+      '#define PD_TASK_CORPSE_FORKING_BEHAVIOR_T_DEFINED' \
+      'typedef uint32_t task_corpse_forking_behavior_t;' '#endif' \
+      '#ifndef PD_KCDATA_OBJECT_T_DEFINED' '#define PD_KCDATA_OBJECT_T_DEFINED' \
+      'typedef uint32_t kcdata_object_t;' '#endif' \
+      '#ifndef PD_IO_MAIN_T_DEFINED' '#define PD_IO_MAIN_T_DEFINED' \
+      'typedef uint32_t io_main_t;' '#endif' \
+      '#ifndef PD_MACH_SERVICE_PORT_INFO_DATA_T_DEFINED' \
+      '#define PD_MACH_SERVICE_PORT_INFO_DATA_T_DEFINED' \
+      '#define MACH_SERVICE_PORT_INFO_STRING_NAME_MAX_BUF_LEN 255' \
+      'typedef struct mach_service_port_info {' \
+      '  char mspi_string_name[MACH_SERVICE_PORT_INFO_STRING_NAME_MAX_BUF_LEN];' \
+      '  uint8_t mspi_domain_type;' \
+      '} mach_service_port_info_data_t;' '#endif' '#endif' '#endif' > "$compat"
+    find "$sdk" \( -path '*/usr/include/mach/mach_interface.h' -o \
+      -path '*/usr/include/mach/task.h' -o \
+      -path '*/usr/include/mach/mach_port.h' -o \
+      -path '*/usr/include/mach/mach_host.h' -o \
+      -path '*/usr/include/mach/mach_eventlink.h' \) -print | while read -r h; do
+      sed -i '1i #include <mach/pd_mach_compat.h>' "$h"
+    done
+    if [ -e "$sdk/usr/include/mach/mach_eventlink.h" ]; then
+      sed -i '1i #include <mach/mach_eventlink_types.h>' "$sdk/usr/include/mach/mach_eventlink.h"
+    fi
+    if [ -e "$sdk/usr/include/mach/mach_interface.h" ]; then
+      # The generated Mach client declarations are consumed by C++ runtimes
+      # as well as C clients. Keep their ABI names unmangled.
+      sed -i '2i #ifdef __cplusplus\nextern "C" {\n#endif' "$sdk/usr/include/mach/mach_interface.h"
+      sed -i '$i #ifdef __cplusplus\n}\n#endif' "$sdk/usr/include/mach/mach_interface.h"
+    fi
+    # Some Darwin consumers include mach_host.h without mach_init.h, although
+    # mach_host_self() is traditionally declared by the latter. Keep the
+    # public host interface self-contained like the system SDKs do.
+    cat >> "$sdk/usr/include/mach/mach_host.h" <<'EOF'
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern mach_port_t mach_host_self(void);
+#ifdef __cplusplus
+}
+#endif
+EOF
+    cat >> "$sdk/usr/include/mach/thread_policy.h" <<'EOF'
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern kern_return_t thread_policy_set(mach_port_t thread,
+    thread_policy_flavor_t flavor, thread_policy_t policy_info,
+    mach_msg_type_number_t policy_infoCnt);
+#ifdef __cplusplus
+}
+#endif
+EOF
+    # mach_make_memory_entry is a routine in both vm_map.defs and mach_vm.defs,
+    # so MIG emits it twice: identical Request/Reply typedefs, and a prototype
+    # typed vm_size_t here but memory_object_size_t there. Anything including
+    # mach.h and mach_vm.h together (wine's ntdll) sees both. Rename this file's
+    # typedefs - its own RequestUnion is the only user - and drop the duplicate
+    # prototype; mach_vm.h keeps the canonical one. libSystem exports neither
+    # spelling today, so no call site changes meaning.
+    perl -0777 -i -pe '
+      s/\b__Request__mach_make_memory_entry_t\b/__Request__vm_map_mach_make_memory_entry_t/g;
+      s/\b__Reply__mach_make_memory_entry_t\b/__Reply__vm_map_mach_make_memory_entry_t/g;
+      s{/\* Routine mach_make_memory_entry \*/\n(?:\#ifdef\tmig_external\nmig_external\n\#else\nextern\n\#endif\t/\* mig_external \*/\n)kern_return_t mach_make_memory_entry\n\((?:[^)]*)\n\);\n}{}s;
+    ' "$sdk/usr/include/mach/vm_map.h"
+
+    # vm_map.defs skips vm_allocate/vm_deallocate/vm_protect unless
+    # LIBSYSCALL_INTERFACE, so MIG emits no declaration for them here, but
+    # libsystem_kernel exports all three. mach_init.h for mach_task_self().
+    cat >> "$sdk/usr/include/mach/vm_map.h" <<'EOF'
+
+#include <mach/mach_init.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern kern_return_t vm_allocate(vm_map_t, vm_address_t *, vm_size_t, int);
+extern kern_return_t vm_deallocate(vm_map_t, vm_address_t, vm_size_t);
+extern kern_return_t vm_protect(vm_map_t, vm_address_t, vm_size_t, boolean_t, vm_prot_t);
+extern kern_return_t vm_remap(vm_map_t, vm_address_t *, vm_size_t, vm_address_t,
+    int, vm_map_t, vm_address_t, boolean_t, vm_prot_t *, vm_prot_t *, vm_inherit_t);
+#ifdef __cplusplus
+}
+#endif
+EOF
+    # mach_vm.defs applies the same _kernelrpc_ PREFIX as vm_map.defs, so the
+    # plain mach_vm_* entry points libsystem_kernel exports get no declaration.
+    cat >> "$sdk/usr/include/mach/mach_vm.h" <<'EOF'
+
+#include <mach/mach_init.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern kern_return_t mach_vm_allocate(vm_map_t, mach_vm_address_t *, mach_vm_size_t, int);
+extern kern_return_t mach_vm_deallocate(vm_map_t, mach_vm_address_t, mach_vm_size_t);
+extern kern_return_t mach_vm_protect(vm_map_t, mach_vm_address_t, mach_vm_size_t, boolean_t, vm_prot_t);
+extern kern_return_t mach_vm_map(vm_map_t, mach_vm_address_t *, mach_vm_size_t, mach_vm_offset_t, int, mem_entry_name_port_t, memory_object_offset_t, boolean_t, vm_prot_t, vm_prot_t, vm_inherit_t);
+extern kern_return_t mach_vm_read(vm_map_t, mach_vm_address_t, mach_vm_size_t, vm_offset_t *, mach_msg_type_number_t *);
+extern kern_return_t mach_vm_write(vm_map_t, mach_vm_address_t, vm_offset_t, mach_msg_type_number_t);
+extern kern_return_t mach_vm_region(vm_map_t, mach_vm_address_t *, mach_vm_size_t *, vm_region_flavor_t, vm_region_info_t, mach_msg_type_number_t *, mach_port_t *);
+#ifdef __cplusplus
+}
+#endif
+EOF
+    runHook postInstall
+  '';
+
+  meta = with lib; {
+    description = "Redistributable PureDarwin SDK assembled from open-source headers";
+    license = licenses.free;
+    platforms = platforms.unix;
+  };
+}

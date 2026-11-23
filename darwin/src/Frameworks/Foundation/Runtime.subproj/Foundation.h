@@ -1,0 +1,122 @@
+/*
+ * Copyright (C) 2026, Samuel Zormeister.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#if !defined(__FOUNDATION_FOUNDATION__)
+#define __FOUNDATION_FOUNDATION__ 1
+
+#include <dispatch/dispatch.h>
+// as on macOS, Foundation users get all of CoreFoundation (and with it assert.h and friends)
+#include <CoreFoundation/CoreFoundation.h>
+
+#import <Foundation/NSObjCRuntime.h>
+#import <Foundation/FoundationErrors.h>
+#import <Foundation/NSError.h>
+#import <Foundation/NSCoder.h>
+#import <Foundation/NSFormatter.h>
+#import <Foundation/NSAttributedString.h>
+#import <Foundation/NSIndexSet.h>
+#import <Foundation/NSEnumerator.h>
+#import <Foundation/NSAutoreleasePool.h>
+#import <Foundation/NSNotification.h>
+#import <Foundation/NSUndoManager.h>
+#import <Foundation/NSScanner.h>
+#import <Foundation/NSLocale.h>
+#import <Foundation/NSTextCheckingResult.h>
+#import <Foundation/NSOrthography.h>
+#import <Foundation/NSSortDescriptor.h>
+#import <Foundation/NSValueTransformer.h>
+#import <Foundation/NSOrderedSet.h>
+#import <Foundation/NSPredicate.h>
+#import <Foundation/NSExpression.h>
+#import <Foundation/NSComparisonPredicate.h>
+#import <Foundation/NSCompoundPredicate.h>
+#import <Foundation/NSSpellEngine.h>
+#import <Foundation/NSPlatform.h>
+#import <Foundation/NSRaiseException.h>
+#import <Foundation/NSKeyedArchiver.h>
+#import <Foundation/NSArchiver.h>
+#import <Foundation/NSPropertyListSerialization.h>
+#import <Foundation/NSNotificationQueue.h>
+#import <Foundation/NSDateFormatter.h>
+#import <Foundation/NSKeyValueCoding.h>
+#import <Foundation/NSKeyValueObserving.h>
+#import <Foundation/NSLock.h>
+#import <Foundation/NSHashTable.h>
+#import <Foundation/NSRaise.h>
+#import <Foundation/NSByteOrder.h>
+#import <Foundation/NSRangeEntries.h>
+#import <Foundation/NSCountedSet.h>
+#import <Foundation/NSInvocation.h>
+#import <Foundation/NSCalendar.h>
+#import <Foundation/NSNumberFormatter.h>
+#import <Foundation/NSByteCountFormatter.h>
+#import <Foundation/NSSocket.h>
+#import <Foundation/NSSocket_bsd.h>
+#import <Foundation/NSInputSource.h>
+#import <Foundation/NSSelectInputSource.h>
+#import <Foundation/NSRunLoop.h>
+#import <Foundation/NSKeyedUnarchiver.h>
+#import <Foundation/NSArray.h>
+#import <Foundation/NSData.h>
+#import <Foundation/NSDictionary.h>
+#import <Foundation/NSSet.h>
+#import <Foundation/NSNumber.h>
+#import <Foundation/NSDate.h>
+#import <Foundation/NSDateInterval.h>
+#import <Foundation/NSTimer.h>
+#import <Foundation/NSURL.h>
+#import <Foundation/NSString.h>
+#import <Foundation/NSStream.h>
+#import <Foundation/NSZone.h>
+#import <Foundation/NSGeometry.h>
+#import <Foundation/NSAffineTransform.h>
+#import <Foundation/NSException.h>
+#import <Foundation/NSValue.h>
+#import <Foundation/NSNull.h>
+#import <Foundation/NSDebug.h>
+#import <Foundation/NSBundle.h>
+#import <Foundation/NSProcessInfo.h>
+#import <Foundation/NSThread.h>
+#import <Foundation/NSUserDefaults.h>
+#import <Foundation/NSMapTable.h>
+#import <Foundation/NSCharacterSet.h>
+#import <Foundation/NSPathUtilities.h>
+#import <Foundation/NSFileManager.h>
+#import <Foundation/NSFileHandle.h>
+#import <Foundation/NSPipe.h>
+#import <Foundation/NSTask.h>
+#import <Foundation/NSDistributedLock.h>
+#import <Foundation/NSHost.h>
+#import <Foundation/NSCalendarDate.h>
+#import <Foundation/NSTimeZone.h>
+#import <Foundation/NSProxy.h>
+#import <Foundation/NSConnection.h>
+#import <Foundation/NSPort.h>
+#import <Foundation/NSPortMessage.h>
+#import <Foundation/NSOperation.h>
+#import <Foundation/NSAssertionHandler.h>
+#import <Foundation/NSNetServices.h>
+#import <Foundation/NSDistributedNotificationCenter.h>
+#import <Foundation/NSRegularExpression.h>
+#import <Foundation/NSJSONSerialization.h>
+#import <Foundation/NSPortNameServer.h>
+#import <Foundation/NSURLQueryItem.h>
+#import <Foundation/NSURLComponents.h>
+#import <Foundation/NSURLAuthenticationChallenge.h>
+#import <Foundation/NSURLRequest.h>
+#import <Foundation/NSURLSession.h>
+#import <Foundation/NSURLProtocol.h>
+#import <Foundation/NSProgress.h>
+#import <Foundation/NSUserActivity.h>
+#import <Foundation/NSUserNotification.h>
+#import <Foundation/NSAppleEventDescriptor.h>
+#import <Foundation/NSAppleEventManager.h>
+#import <Foundation/NSXPCConnection.h>
+
+#endif /* ! __FOUNDATION_FOUNDATION__ */
+#import <Foundation/NSUUID.h>

@@ -1,0 +1,166 @@
+{ stdenv
+, lib
+, cmake
+, ninja
+, openssl
+, bison
+, flex
+, perl
+, bash
+, zlib
+, ed
+, unifdef
+, tcsh
+, gnustep-base ? null
+, pax
+, coreutils
+, findutils
+, gawk
+, gnused
+, clang
+, libuuid
+, ruby
+, iig
+, libxml2
+, libtapi
+, appleSdk
+# the external corecrypto tree (corecrypto-src in flake.nix), host_corecrypto_static comes from its pd/host-static.cmake
+, corecryptoSrc
+}:
+
+let
+  nativeLdSource = lib.fileset.toSource {
+    root = ../../darwin;
+    fileset = lib.fileset.unions [
+      ../../darwin/cmake/suppress_warnings.cmake
+      ../../darwin/tools/xar
+      ../../darwin/tools/cctools/include
+      ../../darwin/tools/cctools/libmacho
+      ../../darwin/tools/cctools/libstuff
+      ../../darwin/tools/cctools/misc
+      ../../darwin/tools/cctools/ld64/src
+      ../../darwin/src/Libraries/CommonCrypto
+    ];
+  };
+
+  archDefines = lib.optionalString stdenv.hostPlatform.isAarch64 " -D__arm64__=1";
+in
+stdenv.mkDerivation {
+  pname = "kido-native-ld";
+  version = "0.1";
+
+  src = nativeLdSource;
+
+  nativeBuildInputs = [
+    cmake ninja bison flex perl bash ed unifdef tcsh
+    pax coreutils findutils gawk gnused clang ruby iig
+  ]
+  # nixpkgs marks gnustep-base linux-only, and nothing here calls it; a Darwin
+  # host has the plist tools natively.
+  ++ lib.optionals (!stdenv.hostPlatform.isDarwin) [ gnustep-base ];
+  buildInputs = [ zlib libuuid openssl libxml2 libtapi ];
+
+  configurePhase = ''
+    runHook preConfigure
+    mkdir -p sdk
+    export DARWIN_SDK_ROOT="${appleSdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+
+    mkdir -p .nix-stubs
+    cat > .nix-stubs/sw_vers <<'EOF'
+#!/bin/sh
+echo 11.3
+EOF
+    chmod +x .nix-stubs/sw_vers
+    export PATH="$PWD/.nix-stubs:$PATH"
+    patchShebangs src tools
+
+    mkdir -p .nix-native-stubs/sdk-shim-include
+    echo '#include <machine/endian.h>' > .nix-native-stubs/sdk-shim-include/endian.h
+
+    export NIX_NATIVE_DARWIN_HEADER_FLAGS="-isysroot $DARWIN_SDK_ROOT -D__APPLE__ -D__MACH__ -D__APPLE_CC__=1${archDefines}"
+    export NIX_NATIVE_DARWIN_HEADER_DIRS="$PWD/.nix-native-stubs/sdk-shim-include;$DARWIN_SDK_ROOT/usr/include"
+
+    cat > CMakeLists.txt <<'EOF'
+cmake_minimum_required(VERSION 3.15.1)
+project(PUREDARWIN_NATIVE_LD)
+
+include(cmake/suppress_warnings.cmake)
+add_compile_options(-Wno-return-type -Wno-error=cpp -Wno-nullability-completeness)
+# ld64 takes &v[0] and &v[v.size()] of vectors that may be empty all over.
+# nixpkgs' Darwin libc++ traps on that by default, Apple's build does not.
+add_compile_definitions(_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_NONE)
+
+# host_corecrypto_static, PD_CORECRYPTO_DIR also keeps CommonCrypto's asymmetric half out
+set(PD_CORECRYPTO_DIR ${corecryptoSrc})
+include(${corecryptoSrc}/pd/host-static.cmake)
+add_subdirectory(src/Libraries/CommonCrypto)
+add_subdirectory(tools/xar)
+add_subdirectory(tools/cctools/libmacho)
+add_subdirectory(tools/cctools/libstuff)
+add_subdirectory(tools/cctools/misc)
+add_subdirectory(tools/cctools/ld64/src)
+EOF
+
+    cat > src/Libraries/CommonCrypto/CMakeLists.txt <<'EOF'
+include(host_commoncrypto_static.cmake)
+EOF
+
+    # CMAKE_AR is the real ar, not the triple-named stub: llvm-ar takes
+    # its mode from the stem of argv[0], and the dot in darwin20.4 makes
+    # that stub read as a file extension.
+    cmake -S . -B build-nix-native -G Ninja \
+      -DCMAKE_C_COMPILER=${clang}/bin/clang \
+      -DCMAKE_CXX_COMPILER=${clang}/bin/clang++ \
+      -DCMAKE_AR="$(command -v ar)" \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DOPENSSL_ROOT_DIR=${openssl.dev} \
+      -DOPENSSL_CRYPTO_LIBRARY=${openssl.out}/lib/libcrypto${stdenv.hostPlatform.extensions.sharedLibrary} \
+      -DOPENSSL_SSL_LIBRARY=${openssl.out}/lib/libssl${stdenv.hostPlatform.extensions.sharedLibrary} \
+      -DZLIB_INCLUDE_DIR=${zlib.dev}/include \
+      -DZLIB_LIBRARY=${zlib.out}/lib/libz${stdenv.hostPlatform.extensions.sharedLibrary} \
+      -DLIBXML2_INCLUDE_DIR=${libxml2.dev}/include/libxml2 \
+      -DLIBXML2_LIBRARY=${libxml2.out}/lib/libxml2${stdenv.hostPlatform.extensions.sharedLibrary} \
+      -DPUREDARWIN_MACOSX_SDK="$DARWIN_SDK_ROOT" \
+      -DPUREDARWIN_LIBTAPI_INCLUDE_DIR=${lib.getDev libtapi}/include \
+      -DPUREDARWIN_LIBTAPI_LIBRARY=${lib.getLib libtapi}/lib/libtapi${stdenv.hostPlatform.extensions.sharedLibrary}
+    runHook postConfigure
+  '';
+
+  buildPhase = ''
+    runHook preBuild
+    # host_strip alongside: xnu's kernel build strips the linked kernel with
+    # $(STRIP), and llvm-strip refuses this Mach-O ("shared library is not
+    # yet supported") - only real cctools strip handles it.
+    ninja -C build-nix-native host_ld host_strip
+    runHook postBuild
+  '';
+
+  installPhase = ''
+    runHook preInstall
+    mkdir -p $out/bin
+    cp build-nix-native/tools/cctools/ld64/src/ld/ld $out/bin/ld.real
+    cat > $out/bin/ld <<'EOF'
+#!/bin/sh
+ulimit -s unlimited 2>/dev/null || true
+exec "$(dirname "$0")/ld.real" "$@"
+EOF
+    chmod +x $out/bin/ld $out/bin/ld.real
+    cp build-nix-native/tools/cctools/misc/strip $out/bin/strip
+  '' + lib.optionalString stdenv.hostPlatform.isDarwin ''
+    # libtapi's install name is @rpath/libtapi.dylib and nothing here adds an
+    # LC_RPATH, so dyld aborts on the first link. name it by store path instead.
+    for bin in $out/bin/ld.real $out/bin/strip; do
+      install_name_tool -change @rpath/libtapi.dylib \
+        ${lib.getLib libtapi}/lib/libtapi.dylib "$bin"
+    done
+  '' + ''
+    runHook postInstall
+  '';
+
+  meta = with lib; {
+    description = "Apple's cctools ld64, built for linking PureDarwin (host and target)";
+    # Needed on a Darwin host too: nixpkgs ld64 leaves kmod_info start/stop
+    # kext-relative, which makes the kernel collection unbootable.
+    platforms = platforms.unix;
+  };
+}

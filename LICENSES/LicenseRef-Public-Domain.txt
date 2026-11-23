@@ -1,0 +1,7 @@
+Public domain
+
+Some files in this repository were placed in the public domain by their
+authors. They carry no license and need no license text; each says so in
+its own header. Examples: the LibTomCrypt-derived RC2 code in
+darwin/external/corecrypto/ccrc2 and the time zone code in
+darwin/src/Libraries/libSystem/libc/stdtime.

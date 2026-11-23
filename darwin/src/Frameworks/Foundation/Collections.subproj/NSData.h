@@ -1,0 +1,118 @@
+/*
+ * Copyright (C) 2026, Samuel Zormeister.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#ifndef NSData_h
+#define NSData_h
+
+#import <Foundation/NSObject.h>
+#import <Foundation/NSObjCRuntime.h>
+#import <Foundation/NSRange.h>
+
+@class NSURL, NSError;
+
+typedef NS_OPTIONS(NSUInteger, NSDataReadingOptions) {
+    NSDataReadingMappedIfSafe = 1 << 0,
+    NSDataReadingUncached = 1 << 1,
+    NSDataReadingMappedAlways = 1 << 3
+};
+
+typedef NS_OPTIONS(NSUInteger, NSDataBase64EncodingOptions) {
+    NSDataBase64Encoding64CharacterLineLength = 1UL << 0,
+    NSDataBase64Encoding76CharacterLineLength = 1UL << 1,
+    NSDataBase64EncodingEndLineWithCarriageReturn = 1UL << 4,
+    NSDataBase64EncodingEndLineWithLineFeed = 1UL << 5,
+};
+
+typedef NS_OPTIONS(NSUInteger, NSDataBase64DecodingOptions) {
+    NSDataBase64DecodingIgnoreUnknownCharacters = 1UL << 0,
+};
+
+typedef NS_OPTIONS(NSUInteger, NSDataWritingOptions) {
+    NSDataWritingAtomic = 1 << 0,
+    NSDataWritingWithoutOverwriting = 1 << 1
+};
+
+@interface NSData : NSObject <NSCopying, NSMutableCopying>
+
++ (instancetype)data;
++ (instancetype)dataWithBytes:(const void *)bytes length:(NSUInteger)length;
++ (instancetype)dataWithBytesNoCopy:(void *)bytes length:(NSUInteger)length;
++ (instancetype)dataWithBytesNoCopy:(void *)bytes
+                             length:(NSUInteger)length
+                       freeWhenDone:(BOOL)freeWhenDone;
++ (instancetype)dataWithData:(NSData *)data;
++ (nullable instancetype)dataWithContentsOfFile:(NSString *)path;
+- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically;
+- (BOOL)writeToFile:(NSString *)path options:(NSDataWritingOptions)options
+              error:(NSError **)error;
++ (nullable instancetype)dataWithContentsOfFile:(NSString *)path
+                                        options:(NSDataReadingOptions)options
+                                          error:(NSError **)error;
+
+- (instancetype)init;
+- (instancetype)initWithBytes:(const void *)bytes length:(NSUInteger)length;
+- (instancetype)initWithBytesNoCopy:(void *)bytes length:(NSUInteger)length;
+- (instancetype)initWithBytesNoCopy:(void *)bytes
+                             length:(NSUInteger)length
+                       freeWhenDone:(BOOL)freeWhenDone;
+- (instancetype)initWithData:(NSData *)data;
+- (nullable instancetype)initWithContentsOfFile:(NSString *)path;
+
+/* The URL forms, for file URLs. Nothing here fetches over the network, so a
+ * non-file URL reports failure rather than pretending. */
++ (nullable instancetype)dataWithContentsOfURL:(NSURL *)url;
++ (nullable instancetype)dataWithContentsOfURL:(NSURL *)url
+                                       options:(NSDataReadingOptions)options
+                                         error:(NSError **)error;
+- (nullable instancetype)initWithContentsOfURL:(NSURL *)url;
+- (nullable instancetype)initWithContentsOfURL:(NSURL *)url
+                                       options:(NSDataReadingOptions)options
+                                         error:(NSError **)error;
+- (BOOL)writeToURL:(NSURL *)url atomically:(BOOL)atomically;
+- (BOOL)writeToURL:(NSURL *)url
+           options:(NSDataWritingOptions)options
+             error:(NSError **)error;
+
+- (const void *)bytes;
+- (NSUInteger)length;
+
+- (void)getBytes:(void *)buffer length:(NSUInteger)length;
+- (void)getBytes:(void *)buffer range:(NSRange)range;
+- (NSData *)subdataWithRange:(NSRange)range;
+- (BOOL)isEqualToData:(NSData *)other;
+
+- (NSString *)base64EncodedStringWithOptions:(NSDataBase64EncodingOptions)options;
+- (NSData *)base64EncodedDataWithOptions:(NSDataBase64EncodingOptions)options;
+- (nullable instancetype)initWithBase64EncodedString:(NSString *)string options:(NSDataBase64DecodingOptions)options;
+- (nullable instancetype)initWithBase64EncodedData:(NSData *)data options:(NSDataBase64DecodingOptions)options;
+
+@end
+
+@interface NSMutableData : NSData
+
++ (instancetype)dataWithCapacity:(NSUInteger)capacity;
++ (instancetype)dataWithLength:(NSUInteger)length;
+
+- (instancetype)initWithCapacity:(NSUInteger)capacity;
+- (instancetype)initWithLength:(NSUInteger)length;
+
+- (void *)mutableBytes;
+- (void)setLength:(NSUInteger)length;
+- (void)appendBytes:(const void *)bytes length:(NSUInteger)length;
+- (void)appendData:(NSData *)other;
+- (void)replaceBytesInRange:(NSRange)range withBytes:(const void *)bytes;
+- (void)replaceBytesInRange:(NSRange)range
+                  withBytes:(const void *)bytes
+                     length:(NSUInteger)length;
+- (void)increaseLengthBy:(NSUInteger)extra;
+- (void)resetBytesInRange:(NSRange)range;
+- (void)setData:(NSData *)data;
+
+@end
+
+#endif /* NSData_h */

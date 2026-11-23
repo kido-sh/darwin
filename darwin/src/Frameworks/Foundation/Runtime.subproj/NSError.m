@@ -1,0 +1,112 @@
+/*
+ * Copyright (C) 2026, Samuel Zormeister.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#import <Foundation/NSError.h>
+#import <Foundation/NSDictionary.h>
+#import <Foundation/NSArray.h>
+#import <Foundation/NSString.h>
+#include <CoreFoundation/CFString.h>
+
+NSErrorDomain const NSCocoaErrorDomain = @"NSCocoaErrorDomain";
+NSErrorDomain const NSPOSIXErrorDomain = @"NSPOSIXErrorDomain";
+NSErrorDomain const NSOSStatusErrorDomain = @"NSOSStatusErrorDomain";
+NSErrorDomain const NSMachErrorDomain = @"NSMachErrorDomain";
+
+NSErrorUserInfoKey const NSLocalizedDescriptionKey = @"NSLocalizedDescription";
+NSErrorUserInfoKey const NSLocalizedFailureReasonErrorKey = @"NSLocalizedFailureReason";
+NSErrorUserInfoKey const NSLocalizedRecoverySuggestionErrorKey = @"NSLocalizedRecoverySuggestion";
+NSErrorUserInfoKey const NSLocalizedRecoveryOptionsErrorKey = @"NSLocalizedRecoveryOptions";
+NSErrorUserInfoKey const NSRecoveryAttempterErrorKey = @"NSRecoveryAttempter";
+NSErrorUserInfoKey const NSUnderlyingErrorKey = @"NSUnderlyingError";
+NSErrorUserInfoKey const NSFilePathErrorKey = @"NSFilePathErrorKey";
+NSErrorUserInfoKey const NSURLErrorKey = @"NSURL";
+
+@implementation NSError {
+    NSString *_domain;
+    NSInteger _code;
+    NSDictionary *_userInfo;
+}
+
++ (instancetype)errorWithDomain:(NSString *)domain code:(NSInteger)code {
+    return [self errorWithDomain:domain code:code userInfo:nil];
+}
+
++ (instancetype)errorWithDomain:(NSString *)domain
+                           code:(NSInteger)code
+                       userInfo:(NSDictionary *)userInfo {
+    return [[[self alloc] initWithDomain:domain code:code userInfo:userInfo] autorelease];
+}
+
+- (instancetype)initWithDomain:(NSString *)domain
+                          code:(NSInteger)code
+                      userInfo:(NSDictionary *)userInfo {
+    self = [super init];
+    if (self != nil) {
+        _domain = [domain copy];
+        _code = code;
+        _userInfo = [userInfo retain];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    [_domain release];
+    [_userInfo release];
+    [super dealloc];
+}
+
+- (NSDictionary *)userInfo {
+    return _userInfo;
+}
+
+- (NSInteger)code {
+    return _code;
+}
+
+- (NSString *)domain {
+    return _domain;
+}
+
+- (NSString *)localizedDescription {
+    NSString *provided = [_userInfo objectForKey:NSLocalizedDescriptionKey];
+
+    if (provided != nil) {
+        return provided;
+    }
+    return (NSString *)CFAutorelease(CFStringCreateWithFormat(kCFAllocatorDefault, NULL,
+                                                CFSTR("%@ error %ld"),
+                                                (CFStringRef)_domain, (long)_code));
+}
+
+- (NSString *)localizedFailureReason {
+    return [_userInfo objectForKey:NSLocalizedFailureReasonErrorKey];
+}
+
+- (NSString *)localizedRecoverySuggestion {
+    return [_userInfo objectForKey:NSLocalizedRecoverySuggestionErrorKey];
+}
+
+- (NSArray *)localizedRecoveryOptions {
+    return [_userInfo objectForKey:NSLocalizedRecoveryOptionsErrorKey];
+}
+
+
+// the form macOS logs an error in
+- (NSString *)description {
+    return [NSString stringWithFormat:@"Error Domain=%@ Code=%ld \"%@\" UserInfo=%@", [self domain], (long)[self code],
+        [self localizedDescription], [self userInfo]];
+}
+
+// SPI: daemons turn off localized file names in error descriptions. none are localized here, the flag is kept
+static BOOL fileNameLocalizationEnabled = YES;
+
++ (void)_setFileNameLocalizationEnabled:(BOOL)enabled {
+    fileNameLocalizationEnabled = enabled;
+}
+
+@end

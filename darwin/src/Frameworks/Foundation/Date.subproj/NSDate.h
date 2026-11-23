@@ -1,0 +1,48 @@
+/*
+ * Copyright (C) 2026, Samuel Zormeister.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#ifndef NSDate_h
+#define NSDate_h
+
+#import <Foundation/NSObject.h>
+#import <Foundation/NSObjCRuntime.h>
+
+typedef double NSTimeInterval;
+
+@class NSTimeZone;
+
+@interface NSDate : NSObject
+
++ (instancetype)date;
++ (instancetype)now;
++ (instancetype)dateWithTimeIntervalSinceNow:(NSTimeInterval)seconds;
++ (instancetype)dateWithTimeIntervalSinceReferenceDate:(NSTimeInterval)seconds;
++ (instancetype)dateWithTimeIntervalSince1970:(NSTimeInterval)seconds;
++ (instancetype)distantFuture;
++ (instancetype)distantPast;
+- (instancetype)init;
+- (instancetype)initWithTimeIntervalSinceReferenceDate:(NSTimeInterval)seconds;
+- (instancetype)initWithTimeIntervalSinceNow:(NSTimeInterval)seconds;
+- (instancetype)initWithTimeIntervalSince1970:(NSTimeInterval)seconds;
+- (instancetype)initWithTimeInterval:(NSTimeInterval)seconds sinceDate:(NSDate *)date;
+
+/* The class-method form callers use to read the clock without allocating. */
++ (NSTimeInterval)timeIntervalSinceReferenceDate;
+
+- (NSTimeInterval)timeIntervalSinceDate:(NSDate *)other;
+- (NSComparisonResult)compare:(NSDate *)other;
+- (NSTimeInterval)timeIntervalSinceNow;
+- (NSTimeInterval)timeIntervalSinceReferenceDate;
+- (NSTimeInterval)timeIntervalSince1970;
+- (BOOL)isEqualToDate:(NSDate *)other;
+- (NSString *)descriptionWithCalendarFormat:(NSString *)format timeZone:(NSTimeZone *)zone locale:(id)locale;
+- (instancetype)dateByAddingTimeInterval:(NSTimeInterval)seconds;
+
+@end
+
+#endif /* NSDate_h */

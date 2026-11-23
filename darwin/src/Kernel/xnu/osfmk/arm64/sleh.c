@@ -1,0 +1,4619 @@
+/*
+ * Copyright (c) 2012-2023 Apple Inc. All rights reserved.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
+ *
+ * This file contains Original Code and/or Modifications of Original Code
+ * as defined in and that are subject to the Apple Public Source License
+ * Version 2.0 (the 'License'). You may not use this file except in
+ * compliance with the License. The rights granted to you under the License
+ * may not be used to create, or enable the creation or redistribution of,
+ * unlawful or unlicensed copies of an Apple operating system, or to
+ * circumvent, violate, or enable the circumvention or violation of, any
+ * terms of an Apple operating system software license agreement.
+ *
+ * Please obtain a copy of the License at
+ * http://www.opensource.apple.com/apsl/ and read it before using this file.
+ *
+ * The Original Code and all software distributed under the License are
+ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
+ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
+ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
+ * Please see the License for the specific language governing rights and
+ * limitations under the License.
+ *
+ * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
+ */
+
+#include <kern/thread_call.h>
+#include <arm/caches_internal.h>
+#include <arm/cpu_data.h>
+#include <arm/cpu_data_internal.h>
+#include <arm/misc_protos.h>
+#include <arm/thread.h>
+#include <arm/rtclock.h>
+#include <arm/trap_internal.h> /* for IS_ARM_GDB_TRAP() et al */
+#include <arm64/proc_reg.h>
+#include <arm64/machine_machdep.h>
+#include <kern/turnstile.h>
+#include <kern/cpc.h>
+#include <arm64/instructions.h>
+
+#include <kern/debug.h>
+#include <kern/locks.h>
+#include <kern/startup.h>
+#include <arm/machine_routines.h>
+#include <kern/exc_guard.h>
+#include <kern/restartable.h>
+#include <kern/socd_client.h>
+#include <kern/task.h>
+/* Not <sys/proc.h>: it drags in BSD's sys/types.h, which redefines types
+ * (int32_t, dev_t, clock_t) this osfmk file already has from elsewhere. */
+extern int proc_pid(struct proc *);
+#include <kern/thread.h>
+#include <kern/processor.h>
+#include <kern/zalloc_internal.h>
+#include <mach/exception.h>
+#include <mach/arm/traps.h>
+#include <mach/vm_types.h>
+#include <mach/machine/thread_status.h>
+
+#include <machine/atomic.h>
+#include <machine/limits.h>
+#include <machine/machine_cpc.h>
+
+#include <pexpert/pexpert.h>
+#include <pexpert/arm/protos.h>
+#include <pexpert/arm64/apple_arm64_cpu.h>
+#include <pexpert/arm64/apple_arm64_regs.h>
+#include <pexpert/arm64/board_config.h>
+
+#include <vm/vm_page.h>
+#include <vm/pmap.h>
+#include <vm/vm_fault.h>
+#include <vm/vm_kern.h>
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_kern_xnu.h>
+
+#include <sys/errno.h>
+#include <sys/kdebug.h>
+#include <sys/code_signing.h>
+#include <sys/reason.h>
+#include <kperf/kperf.h>
+
+#include <kern/policy_internal.h>
+#if CONFIG_TELEMETRY
+#include <kern/telemetry.h>
+#include <kern/trap_telemetry.h>
+#endif
+
+#include <prng/entropy.h>
+
+
+
+
+#include <arm64/platform_error_handler.h>
+
+#if KASAN_TBI
+#include <san/kasan.h>
+#endif /* KASAN_TBI */
+
+#if CONFIG_UBSAN_MINIMAL
+#include <san/ubsan_minimal.h>
+#endif
+
+#if HAS_MTE
+#include <arm64/mte_xnu.h>
+#endif /* HAS_MTE */
+
+
+
+#ifndef __arm64__
+#error Should only be compiling for arm64.
+#endif
+
+#if DEBUG || DEVELOPMENT
+#define HAS_TELEMETRY_KERNEL_BRK 1
+#endif
+
+
+#define TEST_CONTEXT32_SANITY(context) \
+	(context->ss.ash.flavor == ARM_SAVED_STATE32 && context->ss.ash.count == ARM_SAVED_STATE32_COUNT && \
+	 context->ns.nsh.flavor == ARM_NEON_SAVED_STATE32 && context->ns.nsh.count == ARM_NEON_SAVED_STATE32_COUNT)
+
+#define TEST_CONTEXT64_SANITY(context) \
+	(context->ss.ash.flavor == ARM_SAVED_STATE64 && context->ss.ash.count == ARM_SAVED_STATE64_COUNT && \
+	 context->ns.nsh.flavor == ARM_NEON_SAVED_STATE64 && context->ns.nsh.count == ARM_NEON_SAVED_STATE64_COUNT)
+
+#define ASSERT_CONTEXT_SANITY(context) \
+	assert(TEST_CONTEXT32_SANITY(context) || TEST_CONTEXT64_SANITY(context))
+
+
+#define COPYIN(src, dst, size)                           \
+	(PSR64_IS_KERNEL(get_saved_state_cpsr(state))) ? \
+	copyin_kern(src, dst, size) :                    \
+	copyin(src, dst, size)
+
+#define COPYOUT(src, dst, size)                          \
+	(PSR64_IS_KERNEL(get_saved_state_cpsr(state))) ? \
+	copyout_kern(src, dst, size)                   : \
+	copyout(src, dst, size)
+
+// Below is for concatenating a string param to a string literal
+#define STR1(x) #x
+#define STR(x) STR1(x)
+
+#define ARM64_KDBG_CODE_KERNEL (0 << 8)
+#define ARM64_KDBG_CODE_USER   (1 << 8)
+#define ARM64_KDBG_CODE_GUEST  (2 << 8)
+
+_Static_assert(ARM64_KDBG_CODE_GUEST <= KDBG_CODE_MAX, "arm64 KDBG trace codes out of range");
+_Static_assert(ARM64_KDBG_CODE_GUEST <= UINT16_MAX, "arm64 KDBG trace codes out of range");
+
+void panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss) __abortlike;
+
+void sleh_synchronous_sp1(arm_context_t *, uint64_t, vm_offset_t) __abortlike;
+void sleh_synchronous(arm_context_t *, uint64_t, vm_offset_t, bool);
+
+
+
+void sleh_irq(arm_saved_state_t *);
+void sleh_fiq(arm_saved_state_t *);
+void sleh_serror(arm_context_t *context, uint64_t esr, vm_offset_t far);
+void sleh_invalid_stack(arm_context_t *context, uint64_t esr, vm_offset_t far) __dead2;
+
+static void sleh_interrupt_handler_prologue(arm_saved_state_t *, unsigned int type);
+static void sleh_interrupt_handler_epilogue(void);
+
+static void handle_svc(arm_saved_state_t *);
+static void handle_mach_absolute_time_trap(arm_saved_state_t *);
+static void handle_mach_continuous_time_trap(arm_saved_state_t *);
+
+static void handle_msr_trap(arm_saved_state_t *state, uint64_t esr);
+#if __has_feature(ptrauth_calls)
+static void handle_pac_fail(arm_saved_state_t *state, uint64_t esr) __dead2;
+static inline uint64_t fault_addr_bitmask(unsigned int bit_from, unsigned int bit_to);
+#endif
+static void handle_bti_fail(arm_saved_state_t *state, uint64_t esr);
+extern kern_return_t arm_fast_fault(pmap_t, vm_map_address_t, vm_prot_t, bool, bool);
+
+static void handle_uncategorized(arm_saved_state_t *);
+
+static void handle_kernel_breakpoint(arm_saved_state_t *, uint64_t);
+
+static void handle_user_breakpoint(arm_saved_state_t *, uint64_t) __dead2;
+
+typedef void (*abort_inspector_t)(uint32_t, fault_status_t *, vm_prot_t *);
+static void inspect_instruction_abort(uint32_t, fault_status_t *, vm_prot_t *);
+static void inspect_data_abort(uint32_t, fault_status_t *, vm_prot_t *);
+
+static int is_vm_fault(fault_status_t);
+static int is_translation_fault(fault_status_t);
+static int is_alignment_fault(fault_status_t);
+
+typedef void (*abort_handler_t)(arm_saved_state_t *, uint64_t, vm_offset_t, fault_status_t, vm_prot_t, expected_fault_handler_t);
+static void handle_user_abort(arm_saved_state_t *, uint64_t, vm_offset_t, fault_status_t, vm_prot_t, expected_fault_handler_t);
+static void handle_kernel_abort(arm_saved_state_t *, uint64_t, vm_offset_t, fault_status_t, vm_prot_t, expected_fault_handler_t);
+
+static void handle_pc_align(arm_saved_state_t *ss) __dead2;
+static void handle_sp_align(arm_saved_state_t *ss) __dead2;
+static void handle_sw_step_debug(arm_saved_state_t *ss) __dead2;
+static void handle_wf_trap(arm_saved_state_t *ss) __dead2;
+static void handle_fp_trap(arm_saved_state_t *ss, uint64_t esr) __dead2;
+#if HAS_ARM_FEAT_SME
+static void handle_sme_trap(arm_saved_state_t *state, uint64_t esr);
+#endif /* HAS_ARM_FEAT_SME */
+
+static void handle_watchpoint(vm_offset_t fault_addr) __dead2;
+
+static void handle_abort(arm_saved_state_t *, uint64_t, vm_offset_t, abort_inspector_t, abort_handler_t, expected_fault_handler_t);
+
+static void handle_user_trapped_instruction32(arm_saved_state_t *, uint64_t esr) __dead2;
+
+static void handle_simd_trap(arm_saved_state_t *, uint64_t esr) __dead2;
+
+extern void current_cached_proc_cred_update(void);
+void   mach_syscall_trace_exit(unsigned int retval, unsigned int call_number);
+
+struct proc;
+
+typedef uint32_t arm64_instr_t;
+
+extern void
+unix_syscall(struct arm_saved_state * regs, thread_t thread_act, struct proc * proc);
+
+extern void
+mach_syscall(struct arm_saved_state*);
+
+#if CONFIG_SPTM
+bool sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr, uint64_t far, uint64_t spsr);
+#endif /* CONFIG_SPTM */
+
+#if CONFIG_DTRACE
+extern kern_return_t dtrace_user_probe(arm_saved_state_t* regs);
+extern boolean_t dtrace_tally_fault(user_addr_t);
+
+/*
+ * Traps for userland processing. Can't include bsd/sys/fasttrap_isa.h, so copy
+ * and paste the trap instructions
+ * over from that file. Need to keep these in sync!
+ */
+#define FASTTRAP_ARM32_INSTR 0xe7ffdefc
+#define FASTTRAP_THUMB32_INSTR 0xdefc
+#define FASTTRAP_ARM64_INSTR 0xe7eeee7e
+
+#define FASTTRAP_ARM32_RET_INSTR 0xe7ffdefb
+#define FASTTRAP_THUMB32_RET_INSTR 0xdefb
+#define FASTTRAP_ARM64_RET_INSTR 0xe7eeee7d
+
+/* See <rdar://problem/4613924> */
+perfCallback tempDTraceTrapHook = NULL; /* Pointer to DTrace fbt trap hook routine */
+#endif
+
+
+
+extern void arm64_thread_exception_return(void) __dead2;
+
+#if defined(APPLETYPHOON)
+#define CPU_NAME "Typhoon"
+#elif defined(APPLETWISTER)
+#define CPU_NAME "Twister"
+#elif defined(APPLEHURRICANE)
+#define CPU_NAME "Hurricane"
+#elif defined(APPLELIGHTNING)
+#define CPU_NAME "Lightning"
+#elif defined(APPLEEVEREST)
+#define CPU_NAME "Everest"
+#elif defined(APPLEH16)
+#define CPU_NAME "AppleH16"
+#elif defined(APPLEACC8)
+#define CPU_NAME "AppleACC8"
+#else
+#define CPU_NAME "Unknown"
+#endif
+
+#if (CONFIG_KERNEL_INTEGRITY && defined(KERNEL_INTEGRITY_WT))
+#define ESR_WT_SERROR(esr) (((esr) & 0xffffff00) == 0xbf575400)
+#define ESR_WT_REASON(esr) ((esr) & 0xff)
+
+#define WT_REASON_NONE           0
+#define WT_REASON_INTEGRITY_FAIL 1
+#define WT_REASON_BAD_SYSCALL    2
+#define WT_REASON_NOT_LOCKED     3
+#define WT_REASON_ALREADY_LOCKED 4
+#define WT_REASON_SW_REQ         5
+#define WT_REASON_PT_INVALID     6
+#define WT_REASON_PT_VIOLATION   7
+#define WT_REASON_REG_VIOLATION  8
+#endif
+
+// Also needed without Apple IPI registers:
+// GIC SGIs carry the scheduler IPIs on this platform, dispatched from sleh_fiq()
+#if defined(HAS_IPI) || HAS_GICV3_FIQ || defined(SUN50I)
+void cpu_signal_handler(void);
+#endif
+#if defined(HAS_IPI)
+extern unsigned int gFastIPI;
+#endif /* defined(HAS_IPI) */
+
+static arm_saved_state64_t *original_faulting_state = NULL;
+
+/*
+ * A self-restrict mode describes which (if any, or several) special permissive
+ * modes are active at the time of a fault. This, in part, determines how the
+ * fault will be handled.
+ */
+__options_closed_decl(self_restrict_mode_t, unsigned int, {
+	/* None of the special modes are active. */
+	SELF_RESTRICT_NONE  = 0U,
+
+	/*
+	 * Any of the other more specific modes, this should be active if any other
+	 * mode is active.
+	 */
+	SELF_RESTRICT_ANY   = (1U << 0),
+
+	/* Reserved */
+
+	/* Reserved */
+});
+
+
+TUNABLE(bool, fp_exceptions_enabled, "-fp_exceptions", false);
+
+extern const vm_map_address_t physmap_base;
+extern const vm_map_address_t physmap_end;
+extern vm_offset_t static_memory_end;
+
+/*
+ * Fault copyio_recovery_entry in copyin/copyout routines.
+ *
+ * Offets are expressed in bytes from &copy_recovery_table
+ */
+struct copyio_recovery_entry {
+	ptrdiff_t cre_start;
+	ptrdiff_t cre_end;
+	ptrdiff_t cre_recovery;
+#if HAS_MTE
+	uint8_t recover_from_kernel_read_tag_check_fault;
+	uint8_t recover_from_kernel_write_tag_check_fault;
+	uint8_t padding[6];
+#endif
+};
+
+extern struct copyio_recovery_entry copyio_recover_table[];
+extern struct copyio_recovery_entry copyio_recover_table_end[];
+
+static inline ptrdiff_t
+copyio_recovery_offset(uintptr_t addr)
+{
+	return (ptrdiff_t)(addr - (uintptr_t)copyio_recover_table);
+}
+
+#if !HAS_APPLE_PAC
+static inline uintptr_t
+copyio_recovery_addr(ptrdiff_t offset)
+{
+	return (uintptr_t)copyio_recover_table + (uintptr_t)offset;
+}
+#endif
+
+static inline struct copyio_recovery_entry *
+find_copyio_recovery_entry(uint64_t pc)
+{
+	ptrdiff_t offset = copyio_recovery_offset(pc);
+	struct copyio_recovery_entry *e;
+
+	for (e = copyio_recover_table; e < copyio_recover_table_end; e++) {
+		if (offset >= e->cre_start && offset < e->cre_end) {
+			return e;
+		}
+	}
+
+	return NULL;
+}
+
+static inline int
+is_vm_fault(fault_status_t status)
+{
+	switch (status) {
+	case FSC_TRANSLATION_FAULT_L0:
+	case FSC_TRANSLATION_FAULT_L1:
+	case FSC_TRANSLATION_FAULT_L2:
+	case FSC_TRANSLATION_FAULT_L3:
+	case FSC_ACCESS_FLAG_FAULT_L1:
+	case FSC_ACCESS_FLAG_FAULT_L2:
+	case FSC_ACCESS_FLAG_FAULT_L3:
+	case FSC_PERMISSION_FAULT_L1:
+	case FSC_PERMISSION_FAULT_L2:
+	case FSC_PERMISSION_FAULT_L3:
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
+static inline int
+is_translation_fault(fault_status_t status)
+{
+	switch (status) {
+	case FSC_TRANSLATION_FAULT_L0:
+	case FSC_TRANSLATION_FAULT_L1:
+	case FSC_TRANSLATION_FAULT_L2:
+	case FSC_TRANSLATION_FAULT_L3:
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
+static inline int
+is_permission_fault(fault_status_t status)
+{
+	switch (status) {
+	case FSC_PERMISSION_FAULT_L1:
+	case FSC_PERMISSION_FAULT_L2:
+	case FSC_PERMISSION_FAULT_L3:
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
+static inline int
+is_alignment_fault(fault_status_t status)
+{
+	return status == FSC_ALIGNMENT_FAULT;
+}
+
+static inline int
+is_parity_error(fault_status_t status)
+{
+	switch (status) {
+#if defined(ARM64_BOARD_CONFIG_T6020)
+		/*
+		 * H14 Erratum (rdar://61553243): Despite having FEAT_RAS implemented,
+		 * FSC_SYNC_PARITY_X can be reported for data and instruction aborts
+		 * and should be interpreted as FSC_SYNC_EXT_ABORT_x
+		 */
+#else
+	/*
+	 * TODO: According to ARM ARM, Async Parity (0b011001) is a DFSC that is
+	 * only applicable to AArch32 HSR register. Can this be removed?
+	 */
+	case FSC_ASYNC_PARITY:
+	case FSC_SYNC_PARITY:
+	case FSC_SYNC_PARITY_TT_L1:
+	case FSC_SYNC_PARITY_TT_L2:
+	case FSC_SYNC_PARITY_TT_L3:
+		return TRUE;
+#endif
+	default:
+		return FALSE;
+	}
+}
+
+static inline int
+is_sync_external_abort(fault_status_t status)
+{
+	switch (status) {
+#if defined(ARM64_BOARD_CONFIG_T6020)
+	/*
+	 * H14 Erratum (rdar://61553243): Despite having FEAT_RAS implemented,
+	 * FSC_SYNC_PARITY_x can be reported for data and instruction aborts
+	 * and should be interpreted as FSC_SYNC_EXT_ABORT_x
+	 */
+	case FSC_SYNC_PARITY:
+#endif /* defined(ARM64_BOARD_CONFIG_T6020) */
+	case FSC_SYNC_EXT_ABORT:
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
+static inline int
+is_table_walk_error(fault_status_t status)
+{
+	switch (status) {
+	case FSC_SYNC_EXT_ABORT_TT_L1:
+	case FSC_SYNC_EXT_ABORT_TT_L2:
+	case FSC_SYNC_EXT_ABORT_TT_L3:
+#if defined(ARM64_BOARD_CONFIG_T6020)
+	/*
+	 * H14 Erratum(rdar://61553243): Despite having FEAT_RAS implemented,
+	 * FSC_SYNC_PARITY_x can be reported for data and instruction aborts
+	 * and should be interpreted as FSC_SYNC_EXT_ABORT_x
+	 */
+	case FSC_SYNC_PARITY_TT_L1:
+	case FSC_SYNC_PARITY_TT_L2:
+	case FSC_SYNC_PARITY_TT_L3:
+#endif /* defined(ARM64_BOARD_CONFIG_T6020) */
+		return TRUE;
+	default:
+		return FALSE;
+	}
+}
+
+
+#if HAS_MTE
+static void
+mte_send_sync_soft_mode_exception(thread_t thread, vm_map_address_t address, mach_exception_data_type_t mx_code);
+
+static inline int
+is_tag_check_fault(fault_status_t status)
+{
+	return status == FSC_SYNC_TAG_CHECK_FAULT;
+}
+
+static inline bool
+is_canonical_memory_permission_fault(uint64_t esr)
+{
+	return ESR_ISS2(esr) & ISS2_DA_TND;
+}
+
+static inline uint16_t
+tag_check_fault_type(pmap_t pmap, vm_map_address_t fault_address)
+{
+	if (pmap_is_tagged_mapping(pmap, pmap_strip_addr(pmap, fault_address))) {
+		return EXC_ARM_MTE_TAGCHECK_FAIL;
+	} else {
+		return EXC_ARM_MTE_CANONICAL_FAIL;
+	}
+}
+#endif /* HAS_MTE */
+
+
+
+static inline int
+is_servicible_fault(fault_status_t status, uint64_t esr, vm_offset_t fault_addr, pmap_t pmap)
+{
+#if HAS_MTE
+	if (is_tag_check_fault(status)) {
+		/*
+		 * Never called from the context of a kernel thread with its map switched
+		 * to a user map, so current_task() is always the task responsible for
+		 * the fault.
+		 */
+		task_t current = current_task_early();
+		/*
+		 * If the task is running in soft mode, we can "service" the fault by
+		 * clearing TCF0 and letting the thread try again.
+		 */
+		if (current && task_has_sec_soft_mode(current)) {
+			return TRUE;
+		}
+	}
+	if (is_canonical_memory_permission_fault(esr)) {
+		/*
+		 * This fault was caused by a tag write to canonically tagged
+		 * memory.  Trying to fault in the data page won't do any good.
+		 */
+		return FALSE;
+	}
+#else
+#pragma unused(esr)
+#endif
+
+#pragma unused(fault_addr, pmap)
+
+	return is_vm_fault(status);
+}
+
+__dead2 __unused
+static void
+arm64_implementation_specific_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far)
+{
+#pragma unused (state)
+	panic_plain("Unhandled implementation specific error: esr 0x%llx far 0x%lx\n",
+	    esr, (unsigned long)far);
+}
+
+#if CONFIG_KERNEL_INTEGRITY
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
+static void
+kernel_integrity_error_handler(uint64_t esr, vm_offset_t far)
+{
+#if defined(KERNEL_INTEGRITY_WT)
+#if (DEVELOPMENT || DEBUG)
+	if (ESR_WT_SERROR(esr)) {
+		switch (ESR_WT_REASON(esr)) {
+		case WT_REASON_INTEGRITY_FAIL:
+			panic_plain("Kernel integrity, violation in frame 0x%016lx.", far);
+		case WT_REASON_BAD_SYSCALL:
+			panic_plain("Kernel integrity, bad syscall.");
+		case WT_REASON_NOT_LOCKED:
+			panic_plain("Kernel integrity, not locked.");
+		case WT_REASON_ALREADY_LOCKED:
+			panic_plain("Kernel integrity, already locked.");
+		case WT_REASON_SW_REQ:
+			panic_plain("Kernel integrity, software request.");
+		case WT_REASON_PT_INVALID:
+			panic_plain("Kernel integrity, encountered invalid TTE/PTE while "
+			    "walking 0x%016lx.", far);
+		case WT_REASON_PT_VIOLATION:
+			panic_plain("Kernel integrity, violation in mapping 0x%016lx.",
+			    far);
+		case WT_REASON_REG_VIOLATION:
+			panic_plain("Kernel integrity, violation in system register %d.",
+			    (unsigned) far);
+		default:
+			panic_plain("Kernel integrity, unknown (esr=0x%08llx).", esr);
+		}
+	}
+#else
+	if (ESR_WT_SERROR(esr)) {
+		panic_plain("SError esr: 0x%08llx far: 0x%016lx.", esr, far);
+	}
+#endif
+#endif
+}
+#pragma clang diagnostic pop
+#endif
+
+static void
+arm64_platform_error(arm_saved_state_t *state, uint64_t esr, vm_offset_t far, platform_error_source_t source)
+{
+#if CONFIG_KERNEL_INTEGRITY
+	kernel_integrity_error_handler(esr, far);
+#endif
+
+	(void)source;
+	cpu_data_t *cdp = getCpuDatap();
+
+	if (PE_handle_platform_error(far)) {
+		return;
+	} else if (cdp->platform_error_handler != NULL) {
+		cdp->platform_error_handler(cdp->cpu_id, far);
+	} else {
+		arm64_implementation_specific_error(state, esr, far);
+	}
+}
+
+
+void
+panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss)
+{
+	boolean_t ss_valid;
+
+	ss_valid = is_saved_state64(ss);
+	arm_saved_state64_t *state = saved_state64(ss);
+
+	os_atomic_cmpxchg(&original_faulting_state, NULL, state, seq_cst);
+
+	// rdar://80659177
+	// Read SoCD tracepoints up to twice — once the first time we call panic and
+	// another time if we encounter a nested panic after that.
+	static int twice = 2;
+	if (twice > 0) {
+		twice--;
+		SOCD_TRACE_XNU(KERNEL_STATE_PANIC,
+		    SOCD_TRACE_MODE_STICKY_TRACEPOINT,
+		    ADDR(state->pc),
+		    PACK_LSB(VALUE(state->lr), VALUE(ss_valid)),
+		    PACK_2X32(VALUE(state->esr), VALUE(state->cpsr)),
+		    VALUE(state->far));
+	}
+
+
+
+	panic_plain("%s at pc 0x%016llx, lr 0x%016llx (saved state: %p%s)\n"
+	    "\t  x0:  0x%016llx x1:  0x%016llx  x2:  0x%016llx  x3:  0x%016llx\n"
+	    "\t  x4:  0x%016llx x5:  0x%016llx  x6:  0x%016llx  x7:  0x%016llx\n"
+	    "\t  x8:  0x%016llx x9:  0x%016llx  x10: 0x%016llx  x11: 0x%016llx\n"
+	    "\t  x12: 0x%016llx x13: 0x%016llx  x14: 0x%016llx  x15: 0x%016llx\n"
+	    "\t  x16: 0x%016llx x17: 0x%016llx  x18: 0x%016llx  x19: 0x%016llx\n"
+	    "\t  x20: 0x%016llx x21: 0x%016llx  x22: 0x%016llx  x23: 0x%016llx\n"
+	    "\t  x24: 0x%016llx x25: 0x%016llx  x26: 0x%016llx  x27: 0x%016llx\n"
+	    "\t  x28: 0x%016llx fp:  0x%016llx  lr:  0x%016llx  sp:  0x%016llx\n"
+	    "\t  pc:  0x%016llx cpsr: 0x%08x         esr: 0x%016llx  far: 0x%016llx\n",
+	    msg, state->pc, state->lr, ss, (ss_valid ? "" : " INVALID"),
+	    state->x[0], state->x[1], state->x[2], state->x[3],
+	    state->x[4], state->x[5], state->x[6], state->x[7],
+	    state->x[8], state->x[9], state->x[10], state->x[11],
+	    state->x[12], state->x[13], state->x[14], state->x[15],
+	    state->x[16], state->x[17], state->x[18], state->x[19],
+	    state->x[20], state->x[21], state->x[22], state->x[23],
+	    state->x[24], state->x[25], state->x[26], state->x[27],
+	    state->x[28], state->fp, state->lr, state->sp,
+	    state->pc, state->cpsr, state->esr, state->far);
+}
+
+void
+sleh_synchronous_sp1(arm_context_t *context, uint64_t esr, vm_offset_t far __unused)
+{
+	esr_exception_class_t  class = ESR_EC(esr);
+	arm_saved_state_t    * state = &context->ss;
+
+	switch (class) {
+	case ESR_EC_UNCATEGORIZED:
+	{
+#if (DEVELOPMENT || DEBUG)
+		uint32_t instr = *((uint32_t*)get_saved_state_pc(state));
+		if (IS_ARM_GDB_TRAP(instr)) {
+			DebuggerCall(EXC_BREAKPOINT, state);
+		}
+		OS_FALLTHROUGH; // panic if we return from the debugger
+#else
+		panic_with_thread_kernel_state("Unexpected debugger trap while SP1 selected", state);
+#endif /* (DEVELOPMENT || DEBUG) */
+	}
+	default:
+		panic_with_thread_kernel_state("Synchronous exception taken while SP1 selected", state);
+	}
+}
+
+
+__attribute__((noreturn))
+void
+thread_exception_return(void)
+{
+	thread_t thread = current_thread();
+	if (thread->machine.exception_trace_code != 0) {
+		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, thread->machine.exception_trace_code) | DBG_FUNC_END, 0, 0, 0, 0, 0);
+		thread->machine.exception_trace_code = 0;
+	}
+
+	thread->machine.el0_synchronous_trap = false;
+
+#if KASAN_TBI
+	kasan_unpoison_curstack(true);
+#endif /* KASAN_TBI */
+	arm64_thread_exception_return();
+	__builtin_unreachable();
+}
+
+/*
+ * check whether task vtimers are running and set thread and CPU BSD AST
+ *
+ * must be called with interrupts masked so updates of fields are atomic
+ * must be emitted inline to avoid generating an FBT probe on the exception path
+ *
+ */
+__attribute__((__always_inline__))
+static inline void
+task_vtimer_check(thread_t thread)
+{
+	task_t task = get_threadtask_early(thread);
+
+	if (__improbable(task != NULL && task->vtimers)) {
+		thread_ast_set(thread, AST_BSD);
+		thread->machine.CpuDatap->cpu_pending_ast |= AST_BSD;
+	}
+}
+
+#if MACH_ASSERT
+/**
+ * A version of get_preemption_level() that works in early boot.
+ *
+ * If an exception is raised in early boot before the initial thread has been
+ * set up, then calling get_preemption_level() in the SLEH will trigger an
+ * infinitely-recursing exception. This function handles this edge case.
+ */
+static inline int
+sleh_get_preemption_level(void)
+{
+	if (__improbable(current_thread() == NULL)) {
+		return 0;
+	}
+	return get_preemption_level();
+}
+#endif // MACH_ASSERT
+
+static inline bool
+is_platform_error(uint64_t esr)
+{
+	esr_exception_class_t class = ESR_EC(esr);
+	uint32_t iss = ESR_ISS(esr);
+	fault_status_t fault_code;
+
+	if (class == ESR_EC_DABORT_EL0 || class == ESR_EC_DABORT_EL1) {
+		fault_code = ISS_DA_FSC(iss);
+	} else if (class == ESR_EC_IABORT_EL0 || class == ESR_EC_IABORT_EL1) {
+		fault_code = ISS_IA_FSC(iss);
+	} else {
+		return false;
+	}
+
+	return is_parity_error(fault_code) || is_sync_external_abort(fault_code) ||
+	       is_table_walk_error(fault_code);
+}
+
+void
+sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused bool did_initiate_panic_lockdown)
+{
+	esr_exception_class_t  class   = ESR_EC(esr);
+	arm_saved_state_t    * state   = &context->ss;
+	thread_t               thread  = current_thread();
+#if MACH_ASSERT
+	int                    preemption_level = sleh_get_preemption_level();
+#endif
+	expected_fault_handler_t expected_fault_handler = NULL;
+#ifdef CONFIG_XNUPOST
+	expected_fault_handler_t saved_expected_fault_handler = NULL;
+	uintptr_t saved_expected_fault_addr = 0;
+	uintptr_t saved_expected_fault_pc = 0;
+#endif /* CONFIG_XNUPOST */
+
+	ASSERT_CONTEXT_SANITY(context);
+
+	task_vtimer_check(thread);
+
+#if CONFIG_DTRACE
+	/*
+	 * Handle kernel DTrace probes as early as possible to minimize the likelihood
+	 * that this path will itself trigger a DTrace probe, which would lead to infinite
+	 * probe recursion.
+	 */
+	if (__improbable((class == ESR_EC_UNCATEGORIZED) && tempDTraceTrapHook &&
+	    (tempDTraceTrapHook(EXC_BAD_INSTRUCTION, state, 0, 0) == KERN_SUCCESS))) {
+#if CONFIG_SPTM
+		if (__improbable(did_initiate_panic_lockdown)) {
+			panic("Unexpectedly initiated lockdown for DTrace probe?");
+		}
+#endif
+		return;
+	}
+#endif
+	bool is_user = PSR64_IS_USER(get_saved_state_cpsr(state));
+
+#if CONFIG_SPTM
+	// Lockdown should only be initiated for kernel exceptions
+	assert(!(is_user && did_initiate_panic_lockdown));
+#endif /* CONFIG_SPTM */
+
+	/*
+	 * Use KERNEL_DEBUG_CONSTANT_IST here to avoid producing tracepoints
+	 * that would disclose the behavior of PT_DENY_ATTACH processes.
+	 */
+	if (is_user) {
+		/* Sanitize FAR (but only if the exception was taken from userspace) */
+		switch (class) {
+		case ESR_EC_IABORT_EL1:
+		case ESR_EC_IABORT_EL0:
+			/* If this is a SEA, since we can't trust FnV, just clear FAR from the save area. */
+			if (ISS_IA_FSC(ESR_ISS(esr)) == FSC_SYNC_EXT_ABORT) {
+				saved_state64(state)->far = 0;
+			}
+			break;
+		case ESR_EC_DABORT_EL1:
+		case ESR_EC_DABORT_EL0:
+			/* If this is a SEA, since we can't trust FnV, just clear FAR from the save area. */
+			if (ISS_DA_FSC(ESR_ISS(esr)) == FSC_SYNC_EXT_ABORT) {
+				saved_state64(state)->far = 0;
+			}
+			break;
+		case ESR_EC_WATCHPT_MATCH_EL1:
+		case ESR_EC_WATCHPT_MATCH_EL0:
+		case ESR_EC_PC_ALIGN:
+			break;  /* FAR_ELx is valid */
+		default:
+			saved_state64(state)->far = 0;
+			break;
+		}
+
+		thread->machine.exception_trace_code = (uint16_t)(ARM64_KDBG_CODE_USER | class);
+		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, thread->machine.exception_trace_code) | DBG_FUNC_START,
+		    esr, far, get_saved_state_pc(state), 0, 0);
+	} else {
+		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, ARM64_KDBG_CODE_KERNEL | class) | DBG_FUNC_START,
+		    esr, VM_KERNEL_ADDRHIDE(far), VM_KERNEL_UNSLIDE(get_saved_state_pc(state)), 0, 0);
+	}
+
+	if (__improbable(ESR_INSTR_IS_2BYTES(esr))) {
+		/*
+		 * We no longer support 32-bit, which means no 2-byte
+		 * instructions.
+		 */
+		if (is_user) {
+			panic("Exception on 2-byte instruction, "
+			    "context=%p, esr=%#llx, far=%p",
+			    context, esr, (void *)far);
+		} else {
+			panic_with_thread_kernel_state("Exception on 2-byte instruction", state);
+		}
+	}
+
+#ifdef CONFIG_XNUPOST
+	if (thread->machine.expected_fault_handler != NULL) {
+		bool matching_fault_pc = false;
+		saved_expected_fault_handler = thread->machine.expected_fault_handler;
+		saved_expected_fault_addr = thread->machine.expected_fault_addr;
+		saved_expected_fault_pc = thread->machine.expected_fault_pc;
+
+		thread->machine.expected_fault_handler = NULL;
+		thread->machine.expected_fault_addr = 0;
+		thread->machine.expected_fault_pc = 0;
+
+#if __has_feature(ptrauth_calls)
+		/*
+		 * Compare only the bits of PC which make up the virtual address.
+		 * This ignores the upper bits, which may have been corrupted by HW in
+		 * platform dependent ways to signal pointer authentication fault.
+		 */
+		uint64_t fault_addr_mask = fault_addr_bitmask(0, 64 - T1SZ_BOOT - 1);
+		uint64_t masked_expected_pc = saved_expected_fault_pc & fault_addr_mask;
+		uint64_t masked_saved_pc = get_saved_state_pc(state) & fault_addr_mask;
+		matching_fault_pc = masked_expected_pc == masked_saved_pc;
+#else
+		matching_fault_pc =
+		    (saved_expected_fault_pc == get_saved_state_pc(state));
+#endif /* ptrauth_call */
+		if (saved_expected_fault_addr == far ||
+		    matching_fault_pc) {
+			expected_fault_handler = saved_expected_fault_handler;
+		}
+	}
+#endif /* CONFIG_XNUPOST */
+
+	if (__improbable(is_platform_error(esr))) {
+		/*
+		 * Must gather error info in platform error handler before
+		 * thread is preempted to another core/cluster to guarantee
+		 * accurate error details
+		 */
+
+		arm64_platform_error(state, esr, far, PLAT_ERR_SRC_SYNC);
+#if CONFIG_SPTM
+		if (__improbable(did_initiate_panic_lockdown)) {
+			panic("Panic lockdown initiated for platform error");
+		}
+#endif
+		return;
+	}
+
+	if (is_user && class == ESR_EC_DABORT_EL0) {
+		thread_reset_pcs_will_fault(thread);
+	}
+
+#if CONFIG_SPTM
+	if (__improbable(did_initiate_panic_lockdown && current_thread() != NULL)) {
+		/*
+		 * If we initiated panic lockdown, we must disable preemption before
+		 * enabling interrupts. While unlikely, preempting the panicked thread
+		 * after lockdown has occurred may hang the system if all cores end up
+		 * blocked while attempting to return to user space.
+		 */
+		disable_preemption();
+	}
+#endif /* CONFIG_SPTM */
+
+	/* Inherit the interrupt masks from previous context */
+	if (SPSR_INTERRUPTS_ENABLED(get_saved_state_cpsr(state))) {
+		ml_set_interrupts_enabled(TRUE);
+	}
+
+	if (is_user) {
+		thread->machine.el0_synchronous_trap = true;
+	}
+
+	switch (class) {
+	case ESR_EC_SVC_64:
+		if (!is_saved_state64(state) || !is_user) {
+			panic("Invalid SVC_64 context");
+		}
+
+		handle_svc(state);
+		break;
+
+	case ESR_EC_DABORT_EL0:
+		handle_abort(state, esr, far, inspect_data_abort, handle_user_abort, expected_fault_handler);
+		break;
+
+	case ESR_EC_MSR_TRAP:
+		handle_msr_trap(state, esr);
+		break;
+/**
+ * Some APPLEVIRTUALPLATFORM targets do not specify armv8.6, but it's still possible for
+ * them to be hosted by a host that implements ARM_FPAC. There's no way for such a host
+ * to disable it or trap it without substantial performance penalty. Therefore, the FPAC
+ * handler here needs to be built into the guest kernels to prevent the exception to fall
+ * through.
+ */
+#if __has_feature(ptrauth_calls)
+	case ESR_EC_PAC_FAIL:
+#ifdef CONFIG_XNUPOST
+		if (expected_fault_handler != NULL && expected_fault_handler(state)) {
+			break;
+		}
+#endif /* CONFIG_XNUPOST */
+		handle_pac_fail(state, esr);
+		__builtin_unreachable();
+
+#endif /* __has_feature(ptrauth_calls) */
+
+#if HAS_ARM_FEAT_SME
+	case ESR_EC_SME:
+		handle_sme_trap(state, esr);
+		break;
+#endif /* HAS_ARM_FEAT_SME */
+
+	case ESR_EC_IABORT_EL0:
+		handle_abort(state, esr, far, inspect_instruction_abort, handle_user_abort, expected_fault_handler);
+		break;
+
+	case ESR_EC_IABORT_EL1:
+#ifdef CONFIG_XNUPOST
+		if ((expected_fault_handler != NULL) && expected_fault_handler(state)) {
+			break;
+		}
+#endif /* CONFIG_XNUPOST */
+
+		panic_with_thread_kernel_state("Kernel instruction fetch abort", state);
+
+	case ESR_EC_PC_ALIGN:
+		handle_pc_align(state);
+		__builtin_unreachable();
+
+	case ESR_EC_DABORT_EL1:
+		handle_abort(state, esr, far, inspect_data_abort, handle_kernel_abort, expected_fault_handler);
+		break;
+
+	case ESR_EC_UNCATEGORIZED:
+		assert(!ESR_ISS(esr));
+
+#if CONFIG_XNUPOST
+		if (!is_user && (expected_fault_handler != NULL) && expected_fault_handler(state)) {
+			/*
+			 * The fault handler accepted the exception and handled it on its
+			 * own. Don't trap to the debugger/panic.
+			 */
+			break;
+		}
+#endif /* CONFIG_XNUPOST */
+		handle_uncategorized(&context->ss);
+		break;
+
+	case ESR_EC_SP_ALIGN:
+		handle_sp_align(state);
+		__builtin_unreachable();
+
+	case ESR_EC_BKPT_AARCH32:
+		handle_user_breakpoint(state, esr);
+		__builtin_unreachable();
+
+	case ESR_EC_BRK_AARCH64:
+#ifdef CONFIG_XNUPOST
+		if ((expected_fault_handler != NULL) && expected_fault_handler(state)) {
+			break;
+		}
+#endif /* CONFIG_XNUPOST */
+		if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+			handle_kernel_breakpoint(state, esr);
+			break;
+		} else {
+			handle_user_breakpoint(state, esr);
+			__builtin_unreachable();
+		}
+
+	case ESR_EC_BKPT_REG_MATCH_EL0:
+		if (FSC_DEBUG_FAULT == ISS_SSDE_FSC(esr)) {
+			handle_user_breakpoint(state, esr);
+		}
+		panic("Unsupported Class %u event code. state=%p class=%u esr=%llu far=%p",
+		    class, state, class, esr, (void *)far);
+		__builtin_unreachable();
+
+	case ESR_EC_BKPT_REG_MATCH_EL1:
+		panic_with_thread_kernel_state("Hardware Breakpoint Debug exception from kernel. Panic (by design)", state);
+		__builtin_unreachable();
+
+	case ESR_EC_SW_STEP_DEBUG_EL0:
+		if (FSC_DEBUG_FAULT == ISS_SSDE_FSC(esr)) {
+			handle_sw_step_debug(state);
+		}
+		panic("Unsupported Class %u event code. state=%p class=%u esr=%llu far=%p",
+		    class, state, class, esr, (void *)far);
+		__builtin_unreachable();
+
+	case ESR_EC_SW_STEP_DEBUG_EL1:
+		panic_with_thread_kernel_state("Software Step Debug exception from kernel. Panic (by design)", state);
+		__builtin_unreachable();
+
+	case ESR_EC_WATCHPT_MATCH_EL0:
+		if (FSC_DEBUG_FAULT == ISS_SSDE_FSC(esr)) {
+			handle_watchpoint(far);
+		}
+		panic("Unsupported Class %u event code. state=%p class=%u esr=%llu far=%p",
+		    class, state, class, esr, (void *)far);
+		__builtin_unreachable();
+
+	case ESR_EC_WATCHPT_MATCH_EL1:
+		/*
+		 * If we hit a watchpoint in kernel mode, probably in a copyin/copyout which we don't want to
+		 * abort.  Turn off watchpoints and keep going; we'll turn them back on in return_from_exception..
+		 */
+		if (FSC_DEBUG_FAULT == ISS_SSDE_FSC(esr)) {
+			arm_debug_set(NULL);
+			break; /* return to first level handler */
+		}
+		panic("Unsupported Class %u event code. state=%p class=%u esr=%llu far=%p",
+		    class, state, class, esr, (void *)far);
+		__builtin_unreachable();
+
+	case ESR_EC_TRAP_SIMD_FP:
+		handle_simd_trap(state, esr);
+		__builtin_unreachable();
+
+	case ESR_EC_ILLEGAL_INSTR_SET:
+		panic("Illegal instruction set exception. state=%p class=%u esr=%llu far=%p spsr=0x%x",
+		    state, class, esr, (void *)far, get_saved_state_cpsr(state));
+		__builtin_unreachable();
+
+	case ESR_EC_MCR_MRC_CP15_TRAP:
+	case ESR_EC_MCRR_MRRC_CP15_TRAP:
+	case ESR_EC_MCR_MRC_CP14_TRAP:
+	case ESR_EC_LDC_STC_CP14_TRAP:
+	case ESR_EC_MCRR_MRRC_CP14_TRAP:
+		handle_user_trapped_instruction32(state, esr);
+		__builtin_unreachable();
+
+	case ESR_EC_WFI_WFE:
+		// Use of WFI or WFE instruction when they have been disabled for EL0
+		handle_wf_trap(state);
+		__builtin_unreachable();
+
+	case ESR_EC_FLOATING_POINT_64:
+		handle_fp_trap(state, esr);
+		__builtin_unreachable();
+	case ESR_EC_BTI_FAIL:
+#ifdef CONFIG_XNUPOST
+		if ((expected_fault_handler != NULL) && expected_fault_handler(state)) {
+			break;
+		}
+#endif /* CONFIG_XNUPOST */
+		handle_bti_fail(state, esr);
+		__builtin_unreachable();
+
+	default:
+		handle_uncategorized(state);
+	}
+
+#ifdef CONFIG_XNUPOST
+	if (saved_expected_fault_handler != NULL) {
+		thread->machine.expected_fault_handler = saved_expected_fault_handler;
+		thread->machine.expected_fault_addr = saved_expected_fault_addr;
+		thread->machine.expected_fault_pc = saved_expected_fault_pc;
+	}
+#endif /* CONFIG_XNUPOST */
+
+	if (is_user) {
+		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, thread->machine.exception_trace_code) | DBG_FUNC_END,
+		    esr, far, get_saved_state_pc(state), 0, 0);
+		thread->machine.exception_trace_code = 0;
+	} else {
+		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+		    MACHDBG_CODE(DBG_MACH_EXCP_SYNC_ARM, ARM64_KDBG_CODE_KERNEL | class) | DBG_FUNC_END,
+		    esr, VM_KERNEL_ADDRHIDE(far), VM_KERNEL_UNSLIDE(get_saved_state_pc(state)), 0, 0);
+	}
+
+#if CONFIG_SPTM
+	if (__improbable(did_initiate_panic_lockdown)) {
+#if CONFIG_XNUPOST
+		bool can_recover = !!(expected_fault_handler);
+#else
+		bool can_recover = false;
+#endif /* CONFIG_XNU_POST */
+
+		if (can_recover) {
+			/*
+			 * If we matched an exception handler, this was a simulated lockdown
+			 * and so we can recover. Re-enable preemption if we disabled it.
+			 */
+			if (current_thread() != NULL) {
+				enable_preemption();
+			}
+		} else {
+			/*
+			 * fleh already triggered a lockdown but we, for whatever reason,
+			 * didn't end up finding a reason to panic. Catch all panic in this
+			 * case.
+			 * Note that the panic here has no security benefit as the system is
+			 * already hosed, this is merely for telemetry.
+			 */
+			panic_with_thread_kernel_state("Panic lockdown initiated", state);
+		}
+	}
+#endif /* CONFIG_SPTM */
+
+#if MACH_ASSERT
+	if (preemption_level != sleh_get_preemption_level()) {
+		panic("synchronous exception changed preemption level from %d to %d", preemption_level, sleh_get_preemption_level());
+	}
+#endif
+
+	if (is_user) {
+		thread->machine.el0_synchronous_trap = false;
+	}
+}
+
+// FEAT_LSE atomics for CPUs without them (Cortex-A53). Every emulated atomic on a
+// 16-byte granule takes the same mutex, so they stay atomic among themselves
+LCK_GRP_DECLARE(pd_lse_grp, "pd_lse");
+static lck_mtx_t pd_lse_mtx[64];
+
+static void
+pd_lse_init(void)
+{
+	for (int i = 0; i < 64; i++) {
+		lck_mtx_init(&pd_lse_mtx[i], &pd_lse_grp, LCK_ATTR_NULL);
+	}
+}
+STARTUP(LOCKS, STARTUP_RANK_LAST, pd_lse_init);
+
+static uint64_t
+pd_xreg(arm_saved_state64_t *ss, uint32_t r)
+{
+	return r == 31 ? 0 : (uint64_t)ss->x[r];
+}
+
+static void
+pd_set_xreg(arm_saved_state64_t *ss, uint32_t r, uint64_t v)
+{
+	if (r != 31) {
+		ss->x[r] = (int64_t)v;
+	}
+}
+
+static int64_t
+pd_sext(uint64_t v, uint32_t bytes)
+{
+	uint32_t sh = 64 - 8 * bytes;
+	return (int64_t)(v << sh) >> sh;
+}
+
+// Returns 0 when emulated, -1 when not an LSE form, or the user fault address via *bad
+static int
+pd_emulate_lse(arm_saved_state64_t *ss, uint32_t instr, uint64_t *bad)
+{
+	uint32_t size = instr >> 30, bytes = 1u << size;
+	uint32_t rs = (instr >> 16) & 0x1F, rn = (instr >> 5) & 0x1F, rt = instr & 0x1F;
+	uint64_t mask = bytes == 8 ? ~0ULL : ((1ULL << (8 * bytes)) - 1);
+	uint64_t addr = rn == 31 ? ss->sp : (uint64_t)ss->x[rn];
+	lck_mtx_t *m;
+	uint64_t old = 0, nv, pair[2], opair[2];
+	bool atomic_op = (instr & 0x3F200C00U) == 0x38200000U;
+	bool cas = (instr & 0x3FA07C00U) == 0x08A07C00U;
+	bool casp = (instr & 0xBFA07C00U) == 0x08207C00U;
+	uint32_t o3 = (instr >> 15) & 1, opc = (instr >> 12) & 7;
+
+	if (!atomic_op && !cas && !casp) {
+		return -1;
+	}
+	if (atomic_op && o3 && !(opc == 0 || (opc == 4 && rs == 31))) {
+		return -1;      // only SWP and LDAPR live under o3=1
+	}
+	addr = (addr << T0SZ_BOOT) >> T0SZ_BOOT;
+	*bad = addr;
+
+	if (atomic_op && o3 && opc == 4) {  // LDAPR: an acquire load
+		if (copyin(addr, (char *)&old, bytes) != 0) {
+			return 1;
+		}
+		__builtin_arm_dmb(0xB);
+		pd_set_xreg(ss, rt, old & mask);
+		return 0;
+	}
+
+	m = &pd_lse_mtx[(addr >> 4) & 63];
+	lck_mtx_lock(m);
+	__builtin_arm_dmb(0xB);
+	if (casp) {
+		// CASP Ws/Xs pairs: bit 30 picks 64-bit registers
+		uint32_t eb = (instr >> 30) & 1 ? 8 : 4;
+		uint64_t em = eb == 8 ? ~0ULL : 0xFFFFFFFFULL;
+
+		bytes = 2 * eb;
+		opair[0] = opair[1] = 0;
+		if (copyin(addr, (char *)opair, bytes) != 0) {
+			lck_mtx_unlock(m);
+			return 1;
+		}
+		if (eb == 4) {
+			opair[1] = opair[0] >> 32;
+			opair[0] &= em;
+		}
+		if (opair[0] == (pd_xreg(ss, rs) & em) && opair[1] == (pd_xreg(ss, rs + 1) & em)) {
+			pair[0] = pd_xreg(ss, rt) & em;
+			pair[1] = pd_xreg(ss, rt + 1) & em;
+			if (eb == 4) {
+				pair[0] |= pair[1] << 32;
+			}
+			if (copyout((char *)pair, addr, bytes) != 0) {
+				lck_mtx_unlock(m);
+				return 1;
+			}
+		}
+		pd_set_xreg(ss, rs, opair[0]);
+		pd_set_xreg(ss, rs + 1, opair[1]);
+	} else {
+		if (copyin(addr, (char *)&old, bytes) != 0) {
+			lck_mtx_unlock(m);
+			return 1;
+		}
+		old &= mask;
+		if (cas) {
+			// CAS: Rs is the expected value and receives the old one, Rt is stored
+			if (old == (pd_xreg(ss, rs) & mask)) {
+				nv = pd_xreg(ss, rt) & mask;
+				if (copyout((char *)&nv, addr, bytes) != 0) {
+					lck_mtx_unlock(m);
+					return 1;
+				}
+			}
+			pd_set_xreg(ss, rs, old);
+		} else {
+			uint64_t v = pd_xreg(ss, rs) & mask;
+
+			switch (o3 ? 8 : opc) {
+			case 0: nv = old + v; break;                                              /* LDADD */
+			case 1: nv = old & ~v; break;                                             /* LDCLR */
+			case 2: nv = old ^ v; break;                                              /* LDEOR */
+			case 3: nv = old | v; break;                                              /* LDSET */
+			case 4: nv = pd_sext(old, bytes) > pd_sext(v, bytes) ? old : v; break;    /* LDSMAX */
+			case 5: nv = pd_sext(old, bytes) < pd_sext(v, bytes) ? old : v; break;    /* LDSMIN */
+			case 6: nv = old > v ? old : v; break;                                    /* LDUMAX */
+			case 7: nv = old < v ? old : v; break;                                    /* LDUMIN */
+			default: nv = v; break;                                                   /* SWP */
+			}
+			nv &= mask;
+			if (copyout((char *)&nv, addr, bytes) != 0) {
+				lck_mtx_unlock(m);
+				return 1;
+			}
+			pd_set_xreg(ss, rt, old);
+		}
+	}
+	__builtin_arm_dmb(0xB);
+	lck_mtx_unlock(m);
+	return 0;
+}
+
+/*
+ * Uncategorized exceptions are a catch-all for general execution errors.
+ * ARM64_TODO: For now, we assume this is for undefined instruction exceptions.
+ */
+static void
+handle_uncategorized(arm_saved_state_t *state)
+{
+	exception_type_t           exception = EXC_BAD_INSTRUCTION;
+	mach_exception_data_type_t codes[2]  = {EXC_ARM_UNDEFINED};
+	mach_msg_type_number_t     numcodes  = 2;
+	uint32_t                   instr     = 0;
+
+	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+
+	// A PACGA another CPU rewrote to MOV Xd, XZR (below) after this one trapped on it: the
+	// trap is for the old instruction, so do what the new one does. MOV never traps on its own
+	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state)) && (instr & 0xFFFFFFE0U) == 0xAA1F03E0U) {
+		uint32_t rd = instr & 0x1F;
+
+		if (rd != 31) {
+			saved_state64(state)->x[rd] = 0;
+		}
+		saved_state64(state)->pc += 4;
+		return;
+	}
+
+	/*
+	 * Register-form PAC/XPAC (PACxx/AUTxx/XPACI/XPACD). PAuth is left off
+	 * below EL2 by the loader so these trap here rather than running against
+	 * keys nothing else agrees on. PAC only needs self-consistency, so
+	 * skipping is as sound as a real implementation.
+	 */
+	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state)) &&
+	    (instr & 0x7FE00000) == 0x5AC00000 &&
+	    ((instr >> 16) & 0x1F) == 0x1 &&
+	    (((instr >> 10) & 0x3F) <= 0xF || ((instr >> 10) & 0x3F) == 0x10 || ((instr >> 10) & 0x3F) == 0x11)) {
+		uint32_t opcode = (instr >> 10) & 0x3F;
+		uint32_t rd = instr & 0x1F;
+
+		/* PACxx: Xd untouched is correct (nothing ever signed it).
+		 * AUTxx/XPACI/XPACD: strip the PAC field so the pointer stays
+		 * dereferenceable. It is T0SZ_BOOT wide (bits 63:47 here), not 16 -
+		 * a 16-bit strip leaves bit 47 set on half of all signatures. */
+		if (((opcode & 0x4) || opcode == 0x10 || opcode == 0x11) && rd != 31) {
+			int64_t *xd = &saved_state64(state)->x[rd];
+			*xd = (int64_t)(((uint64_t)*xd << T0SZ_BOOT) >> T0SZ_BOOT);
+		}
+
+		/* set_saved_state_pc() needs CONFIG_DTRACE/XNUPOST (DEBUG-only);
+		 * write the field saved_state64() exposes unconditionally instead. */
+		saved_state64(state)->pc += 4;
+		return;
+	}
+
+	// PACGA Xd, Xn, Xm: sign/verify pairs only need the same code, zero keeps them agreeing
+	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state)) &&
+	    (instr & 0xFFE0FC00) == 0x9AC03000) {
+		uint32_t rd = instr & 0x1F;
+		uint64_t pc = get_saved_state_pc(state);
+		ppnum_t pn = pmap_find_phys(vm_map_pmap(current_map()), pc);
+
+		if (rd != 31) {
+			saved_state64(state)->x[rd] = 0;
+		}
+		// a zero code (an input hash broke Foundation), and the site is rewritten to MOV Xd, XZR
+		// in the backing page so it traps once system-wide. Executed code only, never data
+		if (pn != 0) {
+			volatile uint32_t *w = (volatile uint32_t *)phystokv(ptoa(pn) + (pc & PAGE_MASK));
+
+			if (*w == instr) {
+				*w = 0xAA1F03E0U | rd;
+				cache_sync_page(pn);
+			}
+		}
+		saved_state64(state)->pc += 4;
+		return;
+	}
+
+	/*
+	 * Combined auth+branch forms, both key variants. No-op isn't an option
+	 * here since they also branch - strip the target, then take the branch.
+	 */
+	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+		uint32_t rn = 0;
+		bool did_branch = false;
+		bool is_link = false;
+
+		/* Both key variants of each form; bit 10 selects A vs B. */
+		if (instr == 0xd65f0bff || instr == 0xd65f0fff) { /* RETAA/RETAB */
+			rn = 30; /* LR - no register field, implicit */
+			did_branch = true;
+		} else if ((instr & 0xFFFFF800) == 0xd71f0800) {  /* BRAA/BRAB   */
+			rn = (instr >> 5) & 0x1F;
+			did_branch = true;
+		} else if ((instr & 0xFFFFF81F) == 0xd61f081f) {  /* BRAAZ/BRABZ */
+			rn = (instr >> 5) & 0x1F;
+			did_branch = true;
+		} else if ((instr & 0xFFFFF800) == 0xd73f0800) {  /* BLRAA/BLRAB */
+			rn = (instr >> 5) & 0x1F;
+			did_branch = true;
+			is_link = true;
+		} else if ((instr & 0xFFFFF81F) == 0xd63f081f) {  /* BLRAAZ/BLRABZ */
+			rn = (instr >> 5) & 0x1F;
+			did_branch = true;
+			is_link = true;
+		}
+
+		if (did_branch) {
+			int64_t raw = (int64_t)get_saved_state_reg(state, rn);
+			uint64_t target = ((uint64_t)raw << T0SZ_BOOT) >> T0SZ_BOOT;
+
+			if (is_link) {
+				saved_state64(state)->lr = get_saved_state_pc(state) + 4;
+			}
+			saved_state64(state)->pc = target;
+			return;
+		}
+	}
+
+	// LDRAA/LDRAB Xt, [Xn, #simm10]{!} is auth plus load. Nothing signs, so load from the
+	// stripped base. Emulated, no single LDR form covers the offset range plus writeback
+	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state)) &&
+	    (instr & 0xFF200400U) == 0xF8200400U) {
+		arm_saved_state64_t *ss = saved_state64(state);
+		uint32_t rt = instr & 0x1F;
+		uint32_t rn = (instr >> 5) & 0x1F;
+		bool wb = ((instr >> 11) & 1) != 0;
+		int64_t imm = (int64_t)((((instr >> 22) & 1) << 9) | ((instr >> 12) & 0x1FF));
+		uint64_t base, addr, val;
+
+		imm = (imm << 54) >> 54;
+		imm <<= 3;
+		base = (rn == 31) ? ss->sp : (uint64_t)ss->x[rn];
+		base = (base << T0SZ_BOOT) >> T0SZ_BOOT;
+		addr = base + (uint64_t)imm;
+		if (copyin(addr, (char *)&val, sizeof(val)) == 0) {
+			if (rt != 31) {
+				ss->x[rt] = (int64_t)val;
+			}
+			if (wb) {
+				if (rn == 31) {
+					ss->sp = addr;
+				} else {
+					ss->x[rn] = (int64_t)addr;
+				}
+			}
+			ss->pc += 4;
+			return;
+		}
+		exception = EXC_BAD_ACCESS;
+		codes[0] = KERN_INVALID_ADDRESS;
+		codes[1] = (mach_exception_data_type_t)addr;
+		exception_triage(exception, codes, numcodes);
+		__builtin_unreachable();
+	}
+
+	// FEAT_SHA3 (EOR3, BCAX, RAX1, XAR): Apple-built libraries use it unconditionally
+	// and the Cortex-A76 lacks it. The user's NEON registers were spilled at entry
+	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state)) && (instr & 0xFF000000U) == 0xCE000000U) {
+		arm_neon_saved_state64_t *ns = neon_state64(current_thread()->machine.uNeon);
+		uint32_t rd = instr & 0x1F, rn = (instr >> 5) & 0x1F, ra = (instr >> 10) & 0x1F;
+		uint32_t rm = (instr >> 16) & 0x1F, sh = (instr >> 10) & 0x3F;
+		uint64_t n[2], m[2], a[2], d[2];
+		bool ok = true;
+
+		memcpy(n, &ns->v.q[rn], sizeof(n));
+		memcpy(m, &ns->v.q[rm], sizeof(m));
+		memcpy(a, &ns->v.q[ra], sizeof(a));
+		for (int i = 0; i < 2; i++) {
+			if ((instr & 0xFFE08000U) == 0xCE000000U) {         /* EOR3 */
+				d[i] = n[i] ^ m[i] ^ a[i];
+			} else if ((instr & 0xFFE08000U) == 0xCE200000U) {  /* BCAX */
+				d[i] = n[i] ^ (m[i] & ~a[i]);
+			} else if ((instr & 0xFFE0FC00U) == 0xCE608C00U) {  /* RAX1 */
+				d[i] = n[i] ^ ((m[i] << 1) | (m[i] >> 63));
+			} else if ((instr & 0xFFE00000U) == 0xCE800000U) {  /* XAR */
+				uint64_t x = n[i] ^ m[i];
+				d[i] = sh ? ((x >> sh) | (x << (64 - sh))) : x;
+			} else {
+				ok = false;
+			}
+		}
+		if (ok) {
+			memcpy(&ns->v.q[rd], d, sizeof(d));
+			saved_state64(state)->pc += 4;
+			return;
+		}
+	}
+
+	// FEAT_FP16 FCMP/FCMPE Hn, Hm|#0.0: compared as integers (no FP in the kernel)
+	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state)) && (instr & 0xFFE0FC07U) == 0x1EE02000U) {
+		arm_neon_saved_state64_t *ns = neon_state64(current_thread()->machine.uNeon);
+		uint32_t rn = (instr >> 5) & 0x1F, rm = (instr >> 16) & 0x1F, zero = (instr >> 3) & 1;
+		uint16_t a16, b16 = 0;
+		uint32_t nzcv;
+
+		memcpy(&a16, &ns->v.q[rn], 2);
+		if (!zero) {
+			memcpy(&b16, &ns->v.q[rm], 2);
+		}
+		if (((a16 & 0x7C00) == 0x7C00 && (a16 & 0x3FF)) || ((b16 & 0x7C00) == 0x7C00 && (b16 & 0x3FF))) {
+			nzcv = 0x3;             // unordered: C V
+		} else if (((a16 | b16) & 0x7FFF) == 0 || a16 == b16) {
+			nzcv = 0x6;             // equal: Z C
+		} else {
+			// sign-magnitude to a monotonic integer
+			int32_t ka = (a16 & 0x8000) ? -(int32_t)(a16 & 0x7FFF) : (int32_t)a16;
+			int32_t kb = (b16 & 0x8000) ? -(int32_t)(b16 & 0x7FFF) : (int32_t)b16;
+			nzcv = ka < kb ? 0x8 : 0x2;     // less: N, greater: C
+		}
+		saved_state64(state)->cpsr = (saved_state64(state)->cpsr & ~0xF0000000U) | (nzcv << 28);
+		saved_state64(state)->pc += 4;
+		return;
+	}
+
+	// FEAT_DotProd (SDOT/UDOT) and FEAT_FP16's FMOV Hd,#imm: ARMv8.2, absent on Cortex-A53
+	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state)) &&
+	    ((instr & 0x9FE0FC00U) == 0x0E809400U || (instr & 0x9FC0F400U) == 0x0F80E000U ||
+	    (instr & 0xFFE01FE0U) == 0x1EE01000U)) {
+		arm_neon_saved_state64_t *ns = neon_state64(current_thread()->machine.uNeon);
+		uint32_t rd = instr & 0x1F, rn = (instr >> 5) & 0x1F;
+
+		if ((instr & 0xFFE01FE0U) == 0x1EE01000U) {
+			// VFPExpandImm for half precision: sign, NOT(b6):b6:b6:b5:b4, b3:0 then zeros
+			uint32_t imm8 = (instr >> 13) & 0xFF, b6 = (imm8 >> 6) & 1;
+			uint16_t h = (uint16_t)(((imm8 >> 7) << 15) | ((b6 ^ 1) << 14) | (b6 << 13) | (b6 << 12) |
+			    (((imm8 >> 4) & 3) << 10) | ((imm8 & 0xF) << 6));
+			uint64_t v[2] = { h, 0 };
+
+			memcpy(&ns->v.q[rd], v, sizeof(v));
+		} else {
+			bool q = (instr >> 30) & 1, u = (instr >> 29) & 1, elem = (instr & 0x9FC0F400U) == 0x0F80E000U;
+			uint32_t rm = (instr >> 16) & 0x1F;
+			uint32_t idx = elem ? ((((instr >> 11) & 1) << 1) | ((instr >> 21) & 1)) : 0;
+			uint8_t n[16], m[16];
+			uint32_t d[4];
+
+			memcpy(n, &ns->v.q[rn], 16);
+			memcpy(m, &ns->v.q[rm], 16);
+			memcpy(d, &ns->v.q[rd], 16);
+			for (uint32_t lane = 0; lane < (q ? 4u : 2u); lane++) {
+				uint32_t mb = elem ? idx * 4 : lane * 4;
+				int32_t acc = 0;
+
+				for (uint32_t k = 0; k < 4; k++) {
+					acc += u ? (int32_t)n[lane * 4 + k] * (int32_t)m[mb + k] :
+					    (int32_t)(int8_t)n[lane * 4 + k] * (int32_t)(int8_t)m[mb + k];
+				}
+				d[lane] += (uint32_t)acc;
+			}
+			if (!q) {
+				d[2] = d[3] = 0;
+			}
+			memcpy(&ns->v.q[rd], d, 16);
+		}
+		saved_state64(state)->pc += 4;
+		return;
+	}
+
+	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+		uint64_t bad = 0;
+		int lr = pd_emulate_lse(saved_state64(state), instr, &bad);
+
+		if (lr == 0) {
+			saved_state64(state)->pc += 4;
+			return;
+		}
+		if (lr > 0) {
+			exception = EXC_BAD_ACCESS;
+			codes[0] = KERN_INVALID_ADDRESS;
+			codes[1] = (mach_exception_data_type_t)bad;
+			exception_triage(exception, codes, numcodes);
+			__builtin_unreachable();
+		}
+	}
+
+#if CONFIG_DTRACE
+
+	if (PSR64_IS_USER64(get_saved_state_cpsr(state))) {
+		/*
+		 * For a 64bit user process, we care about all 4 bytes of the
+		 * instr.
+		 */
+		if (instr == FASTTRAP_ARM64_INSTR || instr == FASTTRAP_ARM64_RET_INSTR) {
+			if (dtrace_user_probe(state) == KERN_SUCCESS) {
+				return;
+			}
+		}
+	} else if (PSR64_IS_USER32(get_saved_state_cpsr(state))) {
+		/*
+		 * For a 32bit user process, we check for thumb mode, in
+		 * which case we only care about a 2 byte instruction length.
+		 * For non-thumb mode, we care about all 4 bytes of the instructin.
+		 */
+		if (get_saved_state_cpsr(state) & PSR64_MODE_USER32_THUMB) {
+			if (((uint16_t)instr == FASTTRAP_THUMB32_INSTR) ||
+			    ((uint16_t)instr == FASTTRAP_THUMB32_RET_INSTR)) {
+				if (dtrace_user_probe(state) == KERN_SUCCESS) {
+					return;
+				}
+			}
+		} else {
+			if ((instr == FASTTRAP_ARM32_INSTR) ||
+			    (instr == FASTTRAP_ARM32_RET_INSTR)) {
+				if (dtrace_user_probe(state) == KERN_SUCCESS) {
+					return;
+				}
+			}
+		}
+	}
+
+#endif /* CONFIG_DTRACE */
+
+	if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+		if (IS_ARM_GDB_TRAP(instr)) {
+			boolean_t interrupt_state;
+			exception = EXC_BREAKPOINT;
+
+			interrupt_state = ml_set_interrupts_enabled(FALSE);
+
+			/* Save off the context here (so that the debug logic
+			 * can see the original state of this thread).
+			 */
+			current_thread()->machine.kpcb = state;
+
+			/* Hop into the debugger (typically either due to a
+			 * fatal exception, an explicit panic, or a stackshot
+			 * request.
+			 */
+			DebuggerCall(exception, state);
+
+			current_thread()->machine.kpcb = NULL;
+			(void) ml_set_interrupts_enabled(interrupt_state);
+			return;
+		} else {
+			panic("Undefined kernel instruction: pc=%p instr=%x", (void*)get_saved_state_pc(state), instr);
+		}
+	}
+
+	/*
+	 * Check for GDB breakpoint via illegal opcode.
+	 */
+	if (IS_ARM_GDB_TRAP(instr)) {
+		exception = EXC_BREAKPOINT;
+		codes[0] = EXC_ARM_BREAKPOINT;
+		codes[1] = instr;
+	} else {
+		codes[1] = instr;
+		printf("Undefined user instruction pid %d pc=0x%llx instr=0x%08x SCTLR_EL1=0x%llx\n",
+		    proc_pid(current_proc()), get_saved_state_pc(state), instr,
+		    __builtin_arm_rsr64("SCTLR_EL1"));
+	}
+
+	exception_triage(exception, codes, numcodes);
+	__builtin_unreachable();
+}
+
+#if __has_feature(ptrauth_calls)
+static inline const char *
+ptrauth_key_to_string(ptrauth_key key)
+{
+	switch (key) {
+	case ptrauth_key_asia:
+		return "IA";
+	case ptrauth_key_asib:
+		return "IB";
+	case ptrauth_key_asda:
+		return "DA";
+	case ptrauth_key_asdb:
+		return "DB";
+	default:
+		__builtin_unreachable();
+	}
+}
+
+static const char *
+ptrauth_handle_brk_trap(void *tstate, uint16_t comment)
+{
+	kernel_panic_reason_t pr = PERCPU_GET(panic_reason);
+	arm_saved_state_t *state = (arm_saved_state_t *)tstate;
+
+	ptrauth_key key = (ptrauth_key)(comment - PTRAUTH_TRAP_START);
+	const char *key_str = ptrauth_key_to_string(key);
+
+	snprintf(pr->buf, sizeof(pr->buf),
+	    "Break 0x%04X instruction exception from kernel. "
+	    "Ptrauth failure with %s key resulted in 0x%016llx",
+	    comment, key_str, saved_state64(state)->x[16]);
+
+	return pr->buf;
+}
+#endif /* __has_feature(ptrauth_calls) */
+
+#if HAS_TELEMETRY_KERNEL_BRK
+static uint32_t bound_chk_violations_event;
+
+static const char *
+xnu_soft_trap_handle_breakpoint(
+	void              *tstate,
+	uint16_t          comment)
+{
+#if CONFIG_UBSAN_MINIMAL
+	if (comment == UBSAN_SOFT_TRAP_SIGNED_OF) {
+		ubsan_handle_brk_trap(tstate, comment);
+	}
+#else
+	(void)tstate;
+#endif
+
+	if (comment == CLANG_SOFT_TRAP_BOUND_CHK) {
+		os_atomic_inc(&bound_chk_violations_event, relaxed);
+	}
+	return NULL;
+}
+#endif /* HAS_TELEMETRY_KERNEL_BRK */
+
+static const char *
+xnu_hard_trap_handle_breakpoint(void *tstate, uint16_t comment)
+{
+	kernel_panic_reason_t pr = PERCPU_GET(panic_reason);
+	arm_saved_state64_t *state = saved_state64(tstate);
+
+	switch (comment) {
+	case XNU_HARD_TRAP_SAFE_UNLINK:
+		snprintf(pr->buf, sizeof(pr->buf),
+		    "panic: corrupt list around element %p",
+		    (void *)state->x[8]);
+		return pr->buf;
+
+	case XNU_HARD_TRAP_STRING_CHK:
+		return "panic: string operation caused an overflow";
+
+	case XNU_HARD_TRAP_ASSERT_FAILURE:
+		/*
+		 * Read the implicit assert arguments, see:
+		 * ML_TRAP_REGISTER_1: x8
+		 * ML_TRAP_REGISTER_2: x16
+		 * ML_TRAP_REGISTER_3: x17
+		 */
+		panic_assert_format(pr->buf, sizeof(pr->buf),
+		    (struct mach_assert_hdr *)state->x[8],
+		    state->x[16], state->x[17]);
+		return pr->buf;
+
+	default:
+		return NULL;
+	}
+}
+
+#if __has_feature(ptrauth_calls)
+KERNEL_BRK_DESCRIPTOR_DEFINE(ptrauth_desc,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_PTRAUTH,
+    .base                = PTRAUTH_TRAP_START,
+    .max                 = PTRAUTH_TRAP_END,
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
+    .handle_breakpoint   = ptrauth_handle_brk_trap);
+#endif
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(clang_desc,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_CLANG,
+    .base                = CLANG_ARM_TRAP_START,
+    .max                 = CLANG_ARM_TRAP_END,
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
+    .handle_breakpoint   = NULL);
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(libcxx_desc,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_LIBCXX,
+    .base                = LIBCXX_TRAP_START,
+    .max                 = LIBCXX_TRAP_END,
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
+    .handle_breakpoint   = NULL);
+
+#if HAS_TELEMETRY_KERNEL_BRK
+KERNEL_BRK_DESCRIPTOR_DEFINE(xnu_soft_traps_desc,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_TELEMETRY,
+    .base                = XNU_SOFT_TRAP_START,
+    .max                 = XNU_SOFT_TRAP_END,
+    .options             = BRK_TELEMETRY_OPTIONS_RECOVERABLE_DEFAULT(
+	    /* enable_telemetry */ true),
+    .handle_breakpoint   = xnu_soft_trap_handle_breakpoint);
+#endif /* HAS_TELEMETRY_KERNEL_BRK */
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(xnu_hard_traps_desc,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_XNU,
+    .base                = XNU_HARD_TRAP_START,
+    .max                 = XNU_HARD_TRAP_END,
+    .options             = BRK_TELEMETRY_OPTIONS_FATAL_DEFAULT,
+    .handle_breakpoint   = xnu_hard_trap_handle_breakpoint);
+
+static void
+#if !HAS_TELEMETRY_KERNEL_BRK
+__attribute__((noreturn))
+#endif
+handle_kernel_breakpoint(arm_saved_state_t *state, uint64_t esr)
+{
+	uint16_t comment = ISS_BRK_COMMENT(esr);
+	const struct kernel_brk_descriptor *desc;
+	const char *msg = NULL;
+
+	desc = find_kernel_brk_descriptor_by_comment(comment);
+
+	if (!desc) {
+		goto brk_out;
+	}
+
+#if HAS_TELEMETRY_KERNEL_BRK
+	if (desc->options.enable_trap_telemetry) {
+		trap_telemetry_report_exception(
+			/* trap_type   */ desc->type,
+			/* trap_code   */ comment,
+			/* options     */ desc->options.telemetry_options,
+			/* saved_state */ (void *)state);
+	}
+#endif
+
+	if (desc->handle_breakpoint) {
+		msg = desc->handle_breakpoint(state, comment);
+	}
+
+#if HAS_TELEMETRY_KERNEL_BRK
+	/* Still alive? Check if we should recover. */
+	if (desc->options.recoverable) {
+		add_saved_state_pc(state, 4);
+		return;
+	}
+#endif
+
+brk_out:
+	if (msg == NULL) {
+		kernel_panic_reason_t pr = PERCPU_GET(panic_reason);
+
+		if (comment == CLANG_ARM_TRAP_BOUND_CHK) {
+			msg = tsnprintf(pr->buf, sizeof(pr->buf),
+			    "Bounds safety trap");
+		} else {
+			msg = tsnprintf(pr->buf, sizeof(pr->buf),
+			    "Break 0x%04X instruction exception from kernel. "
+			    "Panic (by design)",
+			    comment);
+		}
+	}
+
+	panic_with_thread_kernel_state(msg, state);
+	__builtin_unreachable();
+#undef MSG_FMT
+}
+
+/*
+ * Similar in spirit to kernel_brk_descriptor, but with less flexible semantics:
+ * each descriptor defines a `brk` label range for use from userspace.
+ * When used, system policy may decide to kill the calling process without giving them opportunity to
+ * catch the exception or continue execution from a signal handler.
+ * This is used to enforce security boundaries: userspace code may use this mechanism
+ * to reliably terminate when internal inconsistencies are detected.
+ * Note that we don't invariably terminate without giving the process a say: we might only enforce
+ * such a policy if a security feature is enabled, for example.
+ */
+typedef struct user_brk_label_range_descriptor {
+	uint16_t base;
+	uint16_t max;
+} user_brk_label_range_descriptor_t;
+
+const user_brk_label_range_descriptor_t user_brk_descriptors[] = {
+#if __has_feature(ptrauth_calls)
+	/* PAC failures detected in data by userspace */
+	{
+		/* Use the exact same label range as kernel PAC */
+		.base   = PTRAUTH_TRAP_START,
+		.max    = PTRAUTH_TRAP_END,
+	},
+#endif /* __has_feature(ptrauth_calls) */
+	/* Available for use by system libraries when detecting disallowed conditions */
+	{
+		/* Note this uses the same range as the kernel-specific XNU_HARD_TRAP range */
+		.base   = 0xB000,
+		.max    = 0xBFFF,
+	}
+};
+const int user_brk_descriptor_count = sizeof(user_brk_descriptors) / sizeof(user_brk_descriptors[0]);
+
+const static inline user_brk_label_range_descriptor_t *
+find_user_brk_descriptor_by_comment(uint16_t comment)
+{
+	for (int desc_idx = 0; desc_idx < user_brk_descriptor_count; desc_idx++) {
+		const user_brk_label_range_descriptor_t* des = &user_brk_descriptors[desc_idx];
+		if (comment >= des->base && comment <= des->max) {
+			return des;
+		}
+	}
+
+	return NULL;
+}
+
+// pdbrklog=NAME: a user brk in a process whose name starts with NAME dumps its registers and
+// any string they point at (directly or once removed), where libxpc and Swift leave their reason
+extern void IOLog(const char *, ...) __printflike(1, 2);
+
+static int
+pd_brk_str(user_addr_t a, char *out, size_t len)
+{
+	size_t got = 0;
+	size_t i;
+
+	if (a < 0x1000 || copyinstr(a, out, len, &got) != 0 || got < 5)
+		return 0;
+	for (i = 0; i + 1 < got; i++) {
+		if (out[i] < 0x20 || out[i] > 0x7e)
+			return 0;
+	}
+	return 1;
+}
+
+static void
+pd_brk_dump(arm_saved_state_t *state)
+{
+	static char want[32];
+	static int parsed;
+	const char *name = proc_best_name(current_proc());
+	char str[160];
+	int i;
+
+	if (!parsed) {
+		parsed = PE_parse_boot_argn("pdbrklog", want, sizeof(want)) ? 1 : 2;
+	}
+	if (parsed != 1 || name == NULL || strncmp(name, want, strlen(want)) != 0) {
+		return;
+	}
+	IOLog("PD-brk: %s[%d] pc 0x%llx lr 0x%llx fp 0x%llx sp 0x%llx\n", name, proc_pid(current_proc()),
+	    (unsigned long long)get_saved_state_pc(state), (unsigned long long)get_saved_state_lr(state),
+	    (unsigned long long)get_saved_state_fp(state), (unsigned long long)get_saved_state_sp(state));
+	for (i = 0; i < 29; i++) {
+		uint64_t r = saved_state64(state)->x[i];
+		uint64_t p = 0;
+
+		if (pd_brk_str((user_addr_t)r, str, sizeof(str))) {
+			IOLog("PD-brk:   x%d 0x%llx \"%s\"\n", i, r, str);
+		} else if (r >= 0x1000 && copyin((user_addr_t)r, &p, sizeof(p)) == 0 && pd_brk_str((user_addr_t)p, str, sizeof(str))) {
+			IOLog("PD-brk:   x%d 0x%llx -> 0x%llx \"%s\"\n", i, r, p, str);
+		} else {
+			IOLog("PD-brk:   x%d 0x%llx\n", i, r);
+		}
+	}
+}
+
+// pdfaultlog=NAME: an unresolved user fault in a process whose name starts with NAME logs the
+// fault, its registers (with any strings they point at) and a frame-pointer backtrace
+static void
+pd_fault_dump(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr, kern_return_t code)
+{
+	static char want[32];
+	static int parsed;
+	const char *name = proc_best_name(current_proc());
+	uint64_t fp, frame[2];
+	char str[160];
+	int i;
+
+	if (!parsed) {
+		parsed = PE_parse_boot_argn("pdfaultlog", want, sizeof(want)) ? 1 : 2;
+	}
+	if (parsed != 1 || name == NULL || strncmp(name, want, strlen(want)) != 0) {
+		return;
+	}
+	IOLog("PD-fault: %s[%d] addr 0x%llx esr 0x%llx kr %d pc 0x%llx lr 0x%llx sp 0x%llx slide 0x%x\n", name,
+	    proc_pid(current_proc()), (unsigned long long)fault_addr, (unsigned long long)esr, code,
+	    (unsigned long long)get_saved_state_pc(state), (unsigned long long)get_saved_state_lr(state),
+	    (unsigned long long)get_saved_state_sp(state), current_task()->task_shared_region_slide);
+	// the instructions at pc, for finding the image in the shared cache by content
+	{
+		uint32_t insn[4] = {};
+
+		if (copyin((user_addr_t)get_saved_state_pc(state), insn, sizeof(insn)) == 0)
+			IOLog("PD-fault:   insn %08x %08x %08x %08x\n", insn[0], insn[1], insn[2], insn[3]);
+	}
+	// what x0 points at: for an objc_msgSend fault, the receiver's isa word
+	{
+		uint64_t x0 = saved_state64(state)->x[0], words[2] = {};
+
+		if (x0 >= 0x1000 && copyin((user_addr_t)x0, words, sizeof(words)) == 0)
+			IOLog("PD-fault:   [x0] 0x%llx 0x%llx\n", words[0], words[1]);
+	}
+	for (i = 0; i < 29; i++) {
+		uint64_t r = saved_state64(state)->x[i];
+
+		if (pd_brk_str((user_addr_t)r, str, sizeof(str))) {
+			IOLog("PD-fault:   x%d 0x%llx \"%s\"\n", i, r, str);
+		} else {
+			IOLog("PD-fault:   x%d 0x%llx\n", i, r);
+		}
+	}
+	fp = get_saved_state_fp(state);
+	for (i = 0; i < 24 && fp >= 0x1000 && (fp & 7) == 0 && copyin((user_addr_t)fp, frame, sizeof(frame)) == 0; i++) {
+		IOLog("PD-fault:   frame %d ret 0x%llx\n", i, (unsigned long long)(frame[1] & 0x00007fffffffffffULL));
+		if (frame[0] <= fp) break;
+		fp = frame[0];
+	}
+}
+
+// pdstack=NAME (pdstackint=SECS, 60): every SECS the user threads of processes whose name starts
+// with NAME log a frame-pointer backtrace, a spindump for a stall that logs nothing itself
+#define PD_STACK_TASKS          8
+#define PD_STACK_THREADS        64
+#define PD_STACK_FRAMES         32
+#define PD_STACK_VA_MASK        0x00007fffffffffffULL
+
+static int pd_stack_regs;
+static void pd_stack_dump_regs(vm_map_t map, arm_saved_state_t *st);
+
+// a blocked thread's kernel frames from its switch context, unslid, to look up in the kernel's symbols
+static void
+pd_stack_kernel(thread_t thread)
+{
+	arm_kernel_saved_state_t *ks = &thread_get_kernel_state(thread)->machine.ss;
+	uintptr_t lo = thread->kernel_stack, hi = lo + kernel_stack_size, fp = ks->fp;
+	uint64_t pcs[PD_STACK_FRAMES];
+	char line[8 * 20 + 1];
+	int n = 0;
+
+	pcs[n++] = VM_KERNEL_UNSLIDE(ks->lr);
+	while (n < PD_STACK_FRAMES && fp >= lo && fp + 16 <= hi && (fp & 7) == 0) {
+		uintptr_t next = ((uintptr_t *)fp)[0], lr = ((uintptr_t *)fp)[1];
+
+		pcs[n++] = VM_KERNEL_UNSLIDE(lr);
+		if (next <= fp) break;
+		fp = next;
+	}
+	for (int i = 0; i < n; i += 8) {
+		int len = 0;
+
+		line[0] = 0;
+		for (int j = i; j < n && j < i + 8; j++)
+			len += snprintf(line + len, sizeof(line) - len, " %llu", (unsigned long long)pcs[j]);
+		IOLog("PD-stack:   kernel%s\n", line);
+	}
+}
+
+static void
+pd_stack_thread(task_t task, thread_t thread)
+{
+	arm_saved_state_t *st = find_user_regs(thread);
+	vm_map_t map = get_task_map(task);
+	uint64_t fp, frame[2], pcs[PD_STACK_FRAMES];
+	char line[8 * 20 + 1];
+	int n = 0;
+
+	if (st == NULL || !is_saved_state64(st)) return;
+	pcs[n++] = get_saved_state_pc(st) & PD_STACK_VA_MASK;
+	pcs[n++] = get_saved_state_lr(st) & PD_STACK_VA_MASK;
+	fp = get_saved_state_fp(st);
+	while (n < PD_STACK_FRAMES && fp >= 0x1000 && (fp & 7) == 0 &&
+	    copyinmap(map, (vm_map_offset_t)fp, frame, sizeof(frame)) == KERN_SUCCESS) {
+		pcs[n++] = frame[1] & PD_STACK_VA_MASK;
+		if (frame[0] <= fp) break;
+		fp = frame[0];
+	}
+	// x16 is the syscall number of a thread waiting in the kernel (negative for mach traps), the block hint says on what kind of primitive,
+	// and cpu is the processor the thread last ran on
+	IOLog("PD-stack:  tid 0x%llx state 0x%x frames %d x16 %lld hint %d cpu %d\n", (unsigned long long)thread_tid(thread),
+	    thread->state, n, (long long)get_saved_state_reg(st, 16), (int)thread->block_hint,
+	    thread->last_processor != PROCESSOR_NULL ? thread->last_processor->cpu_id : -1);
+	if (thread != current_thread() && (thread->state & TH_WAIT) && thread->kernel_stack && thread->machine.kpcb == NULL)
+		pd_stack_kernel(thread);
+	for (int i = 0; i < n; i += 8) {
+		int len = 0;
+
+		line[0] = 0;
+		for (int j = i; j < n && j < i + 8; j++)
+			len += snprintf(line + len, sizeof(line) - len, " 0x%llx", (unsigned long long)pcs[j]);
+		IOLog("PD-stack:   %s\n", line);
+	}
+	if (pd_stack_regs)
+		pd_stack_dump_regs(map, st);
+}
+
+// pdstackregs: a waiting thread's saved registers, what pointer-like ones point at, and the words
+// below each frame pointer, where the frames keep their locals
+static void
+pd_stack_dump_regs(vm_map_t map, arm_saved_state_t *st)
+{
+	uint64_t fp = get_saved_state_fp(st), w[8];
+
+	for (int r = 0; r < 29; r++) {
+		uint64_t v = get_saved_state_reg(st, r);
+
+		if (v >= 0x100000000ULL && v < 0x0000800000000000ULL && (v & 7) == 0 &&
+		    copyinmap(map, (vm_map_offset_t)v, w, 4 * sizeof(uint64_t)) == KERN_SUCCESS)
+			IOLog("PD-stack:    x%d 0x%llx -> 0x%llx 0x%llx 0x%llx 0x%llx\n", r, (unsigned long long)v,
+			    (unsigned long long)w[0], (unsigned long long)w[1], (unsigned long long)w[2], (unsigned long long)w[3]);
+		else
+			IOLog("PD-stack:    x%d 0x%llx\n", r, (unsigned long long)v);
+	}
+	for (int k = 0; k < 8 && fp >= 0x1000 && (fp & 7) == 0; k++) {
+		uint64_t frame[2];
+
+		if (copyinmap(map, (vm_map_offset_t)(fp - sizeof(w)), w, sizeof(w)) == KERN_SUCCESS)
+			IOLog("PD-stack:    fp%d 0x%llx: %llx %llx %llx %llx %llx %llx %llx %llx\n", k, (unsigned long long)fp,
+			    w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]);
+		if (copyinmap(map, (vm_map_offset_t)fp, frame, sizeof(frame)) != KERN_SUCCESS || frame[0] <= fp)
+			break;
+		fp = frame[0];
+	}
+}
+
+static void
+pd_stack_task(task_t task)
+{
+	thread_t threads[PD_STACK_THREADS];
+	thread_t thread;
+	int n = 0, total;
+
+	task_lock(task);
+	total = task->thread_count;
+	queue_iterate(&task->threads, thread, thread_t, task_threads) {
+		if (n == PD_STACK_THREADS) break;
+		thread_reference(thread);
+		threads[n++] = thread;
+	}
+	task_unlock(task);
+
+	// from the timer the task may have exited since it was picked
+	if (get_bsdtask_info(task) == NULL) {
+		for (int i = 0; i < n; i++)
+			thread_deallocate(threads[i]);
+		return;
+	}
+	IOLog("PD-stack: %s[%d] %d threads, shared cache slide 0x%x\n", proc_best_name(get_bsdtask_info(task)),
+	    task_pid(task), total, task->task_shared_region_slide);
+	for (int i = 0; i < n; i++) {
+		pd_stack_thread(task, threads[i]);
+		thread_deallocate(threads[i]);
+	}
+}
+
+void pd_stack_check(void);
+
+// want is a comma-separated list of name prefixes
+static bool
+pd_stack_name_wanted(const char *name, const char *want)
+{
+	while (*want) {
+		size_t len = 0;
+
+		while (want[len] && want[len] != ',') len++;
+		if (len > 0 && strncmp(name, want, len) == 0) return true;
+		want += len;
+		if (*want == ',') want++;
+	}
+	return false;
+}
+
+static thread_call_t pd_stack_tc;
+static uint64_t pd_stack_period;
+
+// samples from a thread call too, so tasks are still dumped once nothing makes syscalls (shutdown)
+static void
+pd_stack_timer(thread_call_param_t p0 __unused, thread_call_param_t p1 __unused)
+{
+	pd_stack_check();
+	thread_call_enter_delayed(pd_stack_tc, mach_absolute_time() + pd_stack_period);
+}
+
+void
+pd_stack_check(void)
+{
+	static int state;	// 0 unparsed, 1 armed, 2 off, 3 sampling
+	static uint64_t deadline, period;
+	static char want[96];
+	task_t found[PD_STACK_TASKS];
+	task_t task;
+	int secs = 60, n = 0;
+
+	if (state == 2) return;
+	if (state == 0) {
+		state = 2;
+		if (PE_parse_boot_argn("pdstack", want, sizeof(want)) && want[0] != 0) {
+			(void)PE_parse_boot_argn("pdstackint", &secs, sizeof(secs));
+			(void)PE_parse_boot_argn("pdstackregs", &pd_stack_regs, sizeof(pd_stack_regs));
+			nanoseconds_to_absolutetime((uint64_t)(secs > 0 ? secs : 60) * NSEC_PER_SEC, &period);
+			deadline = mach_absolute_time() + period;
+			state = 1;
+			pd_stack_period = period;
+			pd_stack_tc = thread_call_allocate_with_options(pd_stack_timer, NULL, THREAD_CALL_PRIORITY_KERNEL,
+			    THREAD_CALL_OPTIONS_ONCE);
+			if (pd_stack_tc != NULL)
+				thread_call_enter_delayed(pd_stack_tc, mach_absolute_time() + period);
+		}
+		return;
+	}
+	if (state != 1 || mach_absolute_time() < deadline || !OSCompareAndSwap(1, 3, (volatile UInt32 *)&state))
+		return;
+
+	lck_mtx_lock(&tasks_threads_lock);
+	queue_iterate(&tasks, task, task_t, tasks) {
+		void *bsd = get_bsdtask_info(task);
+
+		if (n == PD_STACK_TASKS) break;
+		if (bsd == NULL || !pd_stack_name_wanted(proc_best_name(bsd), want)) continue;
+		task_reference(task);
+		found[n++] = task;
+	}
+	lck_mtx_unlock(&tasks_threads_lock);
+
+	for (int i = 0; i < n; i++) {
+		pd_stack_task(found[i]);
+		task_deallocate(found[i]);
+	}
+	deadline = mach_absolute_time() + period;
+	state = 1;
+}
+
+static void
+handle_user_breakpoint(arm_saved_state_t *state, uint64_t esr __unused)
+{
+	exception_type_t           exception = EXC_BREAKPOINT;
+	mach_exception_data_type_t codes[2]  = {EXC_ARM_BREAKPOINT};
+	mach_msg_type_number_t     numcodes  = 2;
+
+	if (ESR_EC(esr) == ESR_EC_BRK_AARCH64) {
+		/*
+		 * Consult the trap labels we know about to decide whether userspace
+		 * should be given the opportunity to handle the exception.
+		 */
+		uint16_t brk_label = ISS_BRK_COMMENT(esr);
+		const struct user_brk_label_range_descriptor* descriptor = find_user_brk_descriptor_by_comment(brk_label);
+		printf("User BRK pid %d pc=0x%llx label=0x%x%s\n",
+		    proc_pid(current_proc()), get_saved_state_pc(state), brk_label,
+		    (descriptor && descriptor->base == PTRAUTH_TRAP_START) ? " (PAC trap)" : "");
+		pd_brk_dump(state);
+		/*
+		 * Note it's no problem if we don't recognize the label.
+		 * In this case we'll just go through normal exception delivery.
+		 */
+		if (descriptor != NULL) {
+			exception |= EXC_MAY_BE_UNRECOVERABLE_BIT;
+
+#if __has_feature(ptrauth_calls)
+			/*
+			 * We have additional policy specifically for PAC violations.
+			 * To make the rest of the code easier to follow, don't set
+			 * EXC_MAY_BE_UNRECOVERABLE_BIT here and just set EXC_PTRAUTH_BIT instead.
+			 * Conceptually a PAC failure is absolutely 'maybe unrecoverable', but it's
+			 * not really worth excising the discrepency from the plumbing.
+			 */
+			if (descriptor->base == PTRAUTH_TRAP_START) {
+				exception &= ~(EXC_MAY_BE_UNRECOVERABLE_BIT);
+				exception |= EXC_PTRAUTH_BIT;
+			}
+#endif /* __has_feature(ptrauth_calls) */
+		}
+	}
+
+	codes[1] = get_saved_state_pc(state);
+	exception_triage(exception, codes, numcodes);
+	__builtin_unreachable();
+}
+
+static void
+handle_watchpoint(vm_offset_t fault_addr)
+{
+	exception_type_t           exception = EXC_BREAKPOINT;
+	mach_exception_data_type_t codes[2]  = {EXC_ARM_DA_DEBUG};
+	mach_msg_type_number_t     numcodes  = 2;
+
+	codes[1] = fault_addr;
+	exception_triage(exception, codes, numcodes);
+	__builtin_unreachable();
+}
+
+static void
+handle_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr,
+    abort_inspector_t inspect_abort, abort_handler_t handler, expected_fault_handler_t expected_fault_handler)
+{
+	fault_status_t fault_code;
+	vm_prot_t      fault_type;
+
+	inspect_abort(ESR_ISS(esr), &fault_code, &fault_type);
+	handler(state, esr, fault_addr, fault_code, fault_type, expected_fault_handler);
+}
+
+static void
+inspect_instruction_abort(uint32_t iss, fault_status_t *fault_code, vm_prot_t *fault_type)
+{
+	getCpuDatap()->cpu_stat.instr_ex_cnt++;
+	*fault_code = ISS_IA_FSC(iss);
+	*fault_type = (VM_PROT_READ | VM_PROT_EXECUTE);
+}
+
+static void
+inspect_data_abort(uint32_t iss, fault_status_t *fault_code, vm_prot_t *fault_type)
+{
+	getCpuDatap()->cpu_stat.data_ex_cnt++;
+	*fault_code = ISS_DA_FSC(iss);
+
+	/*
+	 * Cache maintenance operations always report faults as write access.
+	 * Change these to read access, unless they report a permission fault.
+	 * Only certain cache maintenance operations (e.g. 'dc ivac') require write
+	 * access to the mapping, but if a cache maintenance operation that only requires
+	 * read access generates a permission fault, then we will not be able to handle
+	 * the fault regardless of whether we treat it as a read or write fault.
+	 */
+	if ((iss & ISS_DA_WNR) && (!(iss & ISS_DA_CM) || is_permission_fault(*fault_code))) {
+		*fault_type = (VM_PROT_READ | VM_PROT_WRITE);
+	} else {
+		*fault_type = (VM_PROT_READ);
+	}
+}
+
+#if __has_feature(ptrauth_calls)
+static inline uint64_t
+fault_addr_bitmask(unsigned int bit_from, unsigned int bit_to)
+{
+	return ((1ULL << (bit_to - bit_from + 1)) - 1) << bit_from;
+}
+
+static inline bool
+fault_addr_bit(vm_offset_t fault_addr, unsigned int bit)
+{
+	return (bool)((fault_addr >> bit) & 1);
+}
+
+extern int gARM_FEAT_FPAC;
+extern int gARM_FEAT_FPACCOMBINE;
+extern int gARM_FEAT_PAuth2;
+
+/**
+ * Determines whether a fault address taken at EL0 contains a PAC error code
+ * corresponding to the specified kind of ptrauth key.
+ */
+static bool
+user_fault_matches_pac_error_code(vm_offset_t fault_addr, uint64_t pc, bool data_key)
+{
+	if (gARM_FEAT_FPACCOMBINE) {
+		/*
+		 * CPUs with FPACCOMBINE always raise PAC Fail exceptions during
+		 * PAC failure.  If the CPU took any other kind of exception, we
+		 * can rule out PAC as the root cause.
+		 */
+		return false;
+	}
+
+	if (data_key && gARM_FEAT_FPAC) {
+		uint32_t instr;
+		int err = copyin(pc, (char *)&instr, sizeof(instr));
+		if (!err && !ARM64_INSTR_IS_LDRAx(instr)) {
+			/*
+			 * On FPAC-enabled devices, PAC failure can only cause
+			 * data aborts during "combined" LDRAx instructions.  If
+			 * PAC fails during a discrete AUTxx + LDR/STR
+			 * instruction sequence, then the AUTxx instruction
+			 * raises a PAC Fail exception rather than poisoning its
+			 * output address.
+			 *
+			 * In principle the same logic applies to instruction
+			 * aborts.  But we have no way to identify the exact
+			 * instruction that caused the abort, so we can't tell
+			 * if it was a combined branch + auth instruction.
+			 */
+			return false;
+		}
+	}
+
+	bool instruction_tbi = !(get_tcr() & TCR_TBID0_TBI_DATA_ONLY);
+	bool tbi = data_key || __improbable(instruction_tbi);
+
+	if (gARM_FEAT_PAuth2) {
+		/*
+		 * EnhancedPAC2 CPUs don't encode error codes at fixed positions, so
+		 * treat all non-canonical address bits like potential poison bits.
+		 */
+		uint64_t mask = fault_addr_bitmask(64 - T0SZ_BOOT, 54);
+		if (!tbi) {
+			mask |= fault_addr_bitmask(56, 63);
+		}
+		return (fault_addr & mask) != 0;
+	} else {
+		unsigned int poison_shift;
+		if (tbi) {
+			poison_shift = 53;
+		} else {
+			poison_shift = 61;
+		}
+
+		/* PAC error codes are always in the form key_number:NOT(key_number) */
+		bool poison_bit_1 = fault_addr_bit(fault_addr, poison_shift);
+		bool poison_bit_2 = fault_addr_bit(fault_addr, poison_shift + 1);
+		return poison_bit_1 != poison_bit_2;
+	}
+}
+#endif /* __has_feature(ptrauth_calls) */
+
+/**
+ * Determines whether the userland thread has a JIT region in RW mode, TPRO
+ * in RW mode, or JCTL_EL0 in pointer signing mode.  A fault in any of these trusted
+ * code paths may indicate an attack on WebKit.  Rather than letting a
+ * potentially-compromised process try to handle the exception, it will be killed
+ * by the kernel and a crash report will be generated.
+ */
+static self_restrict_mode_t
+user_fault_in_self_restrict_mode(thread_t thread __unused)
+{
+	self_restrict_mode_t out = SELF_RESTRICT_NONE;
+
+	return out;
+}
+
+static void
+handle_pc_align(arm_saved_state_t *ss)
+{
+	exception_type_t exc;
+	mach_exception_data_type_t codes[2];
+	mach_msg_type_number_t numcodes = 2;
+
+	if (!PSR64_IS_USER(get_saved_state_cpsr(ss))) {
+		panic_with_thread_kernel_state("PC alignment exception from kernel.", ss);
+	}
+
+	exc = EXC_BAD_ACCESS;
+#if __has_feature(ptrauth_calls)
+	uint64_t pc = get_saved_state_pc(ss);
+	if (user_fault_matches_pac_error_code(pc, pc, false)) {
+		exc |= EXC_PTRAUTH_BIT;
+	}
+#endif /* __has_feature(ptrauth_calls) */
+
+	codes[0] = EXC_ARM_DA_ALIGN;
+	codes[1] = get_saved_state_pc(ss);
+
+	exception_triage(exc, codes, numcodes);
+	__builtin_unreachable();
+}
+
+static void
+handle_sp_align(arm_saved_state_t *ss)
+{
+	exception_type_t exc;
+	mach_exception_data_type_t codes[2];
+	mach_msg_type_number_t numcodes = 2;
+
+	if (!PSR64_IS_USER(get_saved_state_cpsr(ss))) {
+		panic_with_thread_kernel_state("SP alignment exception from kernel.", ss);
+	}
+
+	exc = EXC_BAD_ACCESS;
+#if __has_feature(ptrauth_calls)
+	if (user_fault_matches_pac_error_code(get_saved_state_sp(ss), get_saved_state_pc(ss), true)) {
+		exc |= EXC_PTRAUTH_BIT;
+	}
+#endif /* __has_feature(ptrauth_calls) */
+
+	codes[0] = EXC_ARM_SP_ALIGN;
+	codes[1] = get_saved_state_sp(ss);
+
+	exception_triage(exc, codes, numcodes);
+	__builtin_unreachable();
+}
+
+static void
+handle_wf_trap(arm_saved_state_t *state)
+{
+	exception_type_t exc;
+	mach_exception_data_type_t codes[2];
+	mach_msg_type_number_t numcodes = 2;
+	uint32_t instr = 0;
+
+	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+
+	exc = EXC_BAD_INSTRUCTION;
+	codes[0] = EXC_ARM_UNDEFINED;
+	codes[1] = instr;
+
+	exception_triage(exc, codes, numcodes);
+	__builtin_unreachable();
+}
+
+static void
+handle_fp_trap(arm_saved_state_t *state, uint64_t esr)
+{
+	exception_type_t exc = EXC_ARITHMETIC;
+	mach_exception_data_type_t codes[2];
+	mach_msg_type_number_t numcodes = 2;
+	uint32_t instr = 0;
+
+	if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+		panic_with_thread_kernel_state("Floating point exception from kernel", state);
+	}
+
+	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+	codes[1] = instr;
+
+	/* The floating point trap flags are only valid if TFV is set. */
+	if (!fp_exceptions_enabled) {
+		exc = EXC_BAD_INSTRUCTION;
+		codes[0] = EXC_ARM_UNDEFINED;
+	} else if (!(esr & ISS_FP_TFV)) {
+		codes[0] = EXC_ARM_FP_UNDEFINED;
+	} else if (esr & ISS_FP_UFF) {
+		codes[0] = EXC_ARM_FP_UF;
+	} else if (esr & ISS_FP_OFF) {
+		codes[0] = EXC_ARM_FP_OF;
+	} else if (esr & ISS_FP_IOF) {
+		codes[0] = EXC_ARM_FP_IO;
+	} else if (esr & ISS_FP_DZF) {
+		codes[0] = EXC_ARM_FP_DZ;
+	} else if (esr & ISS_FP_IDF) {
+		codes[0] = EXC_ARM_FP_ID;
+	} else if (esr & ISS_FP_IXF) {
+		codes[0] = EXC_ARM_FP_IX;
+	} else {
+		panic("Unrecognized floating point exception, state=%p, esr=%#llx", state, esr);
+	}
+
+	exception_triage(exc, codes, numcodes);
+	__builtin_unreachable();
+}
+
+
+
+/*
+ * handle_alignment_fault_from_user:
+ *   state: Saved state
+ *
+ * Attempts to deal with an alignment fault from userspace (possibly by
+ * emulating the faulting instruction).  If emulation failed due to an
+ * unservicable fault, the ESR for that fault will be stored in the
+ * recovery_esr field of the thread by the exception code.
+ *
+ * Returns:
+ *   -1:     Emulation failed (emulation of state/instr not supported)
+ *   0:      Successfully emulated the instruction
+ *   EFAULT: Emulation failed (probably due to permissions)
+ *   EINVAL: Emulation failed (probably due to a bad address)
+ */
+
+
+static int
+handle_alignment_fault_from_user(arm_saved_state_t *state, kern_return_t *vmfr)
+{
+	int ret = -1;
+
+#pragma unused (state)
+#pragma unused (vmfr)
+
+	return ret;
+}
+
+
+
+#if HAS_ARM_FEAT_SME
+static void
+handle_sme_trap(arm_saved_state_t *state, uint64_t esr)
+{
+	exception_type_t exc = EXC_BAD_INSTRUCTION;
+	mach_exception_data_type_t codes[2] = {EXC_ARM_UNDEFINED};
+	mach_msg_type_number_t numcodes = 2;
+
+	if (!PSR64_IS_USER(get_saved_state_cpsr(state))) {
+		panic("SME exception from kernel, state=%p, esr=%#llx", state, esr);
+	}
+	if (!arm_sme_version()) {
+		/*
+		 * If SME is disabled in software but userspace executes an SME
+		 * instruction anyway, then the CPU will still raise an
+		 * SME-specific trap.  Triage it as if the CPU raised an
+		 * undefined-instruction trap.
+		 */
+		exception_triage(exc, codes, numcodes);
+		__builtin_unreachable();
+	}
+
+	if (ISS_SME_SMTC(ESR_ISS(esr)) == ISS_SME_SMTC_CAPCR) {
+		thread_t thread = current_thread();
+		switch (machine_thread_sme_state_alloc(thread)) {
+		case KERN_SUCCESS:
+			return;
+
+
+		default:
+			panic("Failed to allocate SME state for thread %p", thread);
+		}
+	}
+
+	uint32_t instr;
+	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+	codes[1] = instr;
+
+	exception_triage(exc, codes, numcodes);
+	__builtin_unreachable();
+}
+#endif /* HAS_ARM_FEAT_SME */
+
+static void
+handle_sw_step_debug(arm_saved_state_t *state)
+{
+	thread_t thread = current_thread();
+	exception_type_t exc;
+	mach_exception_data_type_t codes[2];
+	mach_msg_type_number_t numcodes = 2;
+
+	if (!PSR64_IS_USER(get_saved_state_cpsr(state))) {
+		panic_with_thread_kernel_state("SW_STEP_DEBUG exception from kernel.", state);
+	}
+
+	// Disable single step and unmask interrupts (in the saved state, anticipating next exception return)
+	if (thread->machine.DebugData != NULL) {
+		thread->machine.DebugData->uds.ds64.mdscr_el1 &= ~0x1;
+	} else {
+		panic_with_thread_kernel_state("SW_STEP_DEBUG exception thread DebugData is NULL.", state);
+	}
+
+	mask_user_saved_state_cpsr(thread->machine.upcb, 0, PSR64_SS | DAIF_ALL);
+
+	// Special encoding for gdb single step event on ARM
+	exc = EXC_BREAKPOINT;
+	codes[0] = 1;
+	codes[1] = 0;
+
+	exception_triage(exc, codes, numcodes);
+	__builtin_unreachable();
+}
+
+#if MACH_ASSERT
+TUNABLE_WRITEABLE(self_restrict_mode_t, panic_on_jit_guard, "panic_on_jit_guard", SELF_RESTRICT_NONE);
+#endif /* MACH_ASSERT */
+
+static void
+handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr,
+    fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
+{
+	exception_type_t           exc      = EXC_BAD_ACCESS;
+	mach_exception_data_type_t codes[2];
+	mach_msg_type_number_t     numcodes = 2;
+	thread_t                   thread   = current_thread();
+	vm_map_t                   map      = thread->map;
+	pmap_t                     pmap     = map->pmap;
+
+	(void)expected_fault_handler;
+
+	if (__improbable(!SPSR_INTERRUPTS_ENABLED(get_saved_state_cpsr(state)))) {
+		panic_with_thread_kernel_state("User abort from non-interruptible context", state);
+	}
+
+	thread->iotier_override = THROTTLE_LEVEL_NONE; /* Reset IO tier override before handling abort from userspace */
+
+	if (!is_servicible_fault(fault_code, esr, fault_addr, pmap) &&
+	    thread->t_rr_state.trr_fault_state != TRR_FAULT_NONE) {
+		thread_reset_pcs_done_faulting(thread);
+	}
+
+#if HAS_MTE
+	if (is_tag_check_fault(fault_code)) {
+		pmap_t current_pmap = current_map()->pmap;
+		codes[0] = tag_check_fault_type(current_pmap, fault_addr);
+	} else if (is_canonical_memory_permission_fault(esr)) {
+		codes[0] = KERN_PROTECTION_FAILURE;
+	} else
+#endif
+	if (is_vm_fault(fault_code)) {
+		vm_offset_t     vm_fault_addr = fault_addr;
+		kern_return_t   result = KERN_FAILURE;
+
+		assert(map != kernel_map);
+
+		if (!(fault_type & VM_PROT_EXECUTE)) {
+			vm_fault_addr = VM_USER_STRIP_TBI(fault_addr);
+		}
+
+		/* check to see if it is just a pmap ref/modify fault */
+		if (!is_translation_fault(fault_code)) {
+			result = arm_fast_fault(pmap,
+			    vm_fault_addr,
+			    fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), TRUE);
+		}
+		if (result != KERN_SUCCESS) {
+
+			{
+				/* We have to fault the page in */
+				result = vm_fault(map, vm_fault_addr, fault_type,
+				    /* change_wiring */ FALSE, VM_KERN_MEMORY_NONE, THREAD_ABORTSAFE,
+				    /* caller_pmap */ NULL, /* caller_pmap_addr */ 0);
+			}
+		}
+		if (thread->t_rr_state.trr_fault_state != TRR_FAULT_NONE) {
+			thread_reset_pcs_done_faulting(thread);
+		}
+		if (result == KERN_SUCCESS || result == KERN_ABORTED) {
+			return;
+		}
+
+		if (result == KERN_INVALID_GUARD_OBJECT_SLOT) {
+			/*
+			 * use OS_REASON_MTE_FAIL even for guard objects,
+			 * launchd(1) doesn't get the exception_type through
+			 * libproc, so it's easier to use that namespace
+			 * for all Memory Integrity Enforcement features.
+			 */
+			exit_with_fatal_exception_and_notify(current_proc(),
+			    OS_REASON_MTE_FAIL, exc, result, fault_addr, PX_KTRIAGE);
+			thread_exception_return();
+			__builtin_unreachable();
+		}
+
+		/*
+		 * vm_fault() should never return KERN_FAILURE for page faults from user space.
+		 * If it does, we're leaking preemption disables somewhere in the kernel.
+		 */
+		if (__improbable(result == KERN_FAILURE)) {
+			panic("vm_fault() KERN_FAILURE from user fault on thread %p", thread);
+		}
+
+		codes[0] = result;
+	} else if (is_alignment_fault(fault_code)) {
+		kern_return_t vmfkr = KERN_SUCCESS;
+		thread->machine.recover_esr = 0;
+		thread->machine.recover_far = 0;
+		int result = handle_alignment_fault_from_user(state, &vmfkr);
+		if (result == 0) {
+			/* Successfully emulated, or instruction
+			 * copyin() for decode/emulation failed.
+			 * Continue, or redrive instruction.
+			 */
+			thread_exception_return();
+		} else if (((result == EFAULT) || (result == EINVAL)) &&
+		    (thread->machine.recover_esr == 0)) {
+			/*
+			 * If we didn't actually take a fault, but got one of
+			 * these errors, then we failed basic sanity checks of
+			 * the fault address.  Treat this as an invalid
+			 * address.
+			 */
+			codes[0] = KERN_INVALID_ADDRESS;
+		} else if ((result == EFAULT) &&
+		    (thread->machine.recover_esr)) {
+			/*
+			 * Since alignment aborts are prioritized
+			 * ahead of translation aborts, the misaligned
+			 * atomic emulation flow may have triggered a
+			 * VM pagefault, which the VM could not resolve.
+			 * Report the VM fault error in codes[]
+			 */
+
+			codes[0] = vmfkr;
+			assertf(vmfkr != KERN_SUCCESS, "Unexpected vmfkr 0x%x", vmfkr);
+			/* Cause ESR_EC to reflect an EL0 abort */
+			thread->machine.recover_esr &= ~ESR_EC_MASK;
+			thread->machine.recover_esr |= (ESR_EC_DABORT_EL0 << ESR_EC_SHIFT);
+			set_saved_state_esr(thread->machine.upcb, thread->machine.recover_esr);
+			set_saved_state_far(thread->machine.upcb, thread->machine.recover_far);
+			fault_addr = thread->machine.recover_far;
+		} else {
+			/* This was just an unsupported alignment
+			 * exception. Misaligned atomic emulation
+			 * timeouts fall in this category.
+			 */
+			codes[0] = EXC_ARM_DA_ALIGN;
+		}
+	} else if (is_parity_error(fault_code)) {
+#if defined(APPLE_ARM64_ARCH_FAMILY)
+		/*
+		 * Platform errors are handled in sleh_sync before interrupts are enabled.
+		 */
+#else
+		panic("User parity error.");
+#endif
+	} else {
+		codes[0] = KERN_FAILURE;
+	}
+
+#if CODE_SIGNING_MONITOR
+	/*
+	 * If the code reaches here, it means we weren't able to resolve the fault and we're
+	 * going to be sending the task an exception. On systems which have the code signing
+	 * monitor enabled, an execute fault which cannot be handled must result in sending
+	 * a SIGKILL to the task.
+	 */
+	if (is_vm_fault(fault_code) && (fault_type & VM_PROT_EXECUTE)) {
+		csm_code_signing_violation(current_proc(), fault_addr);
+	}
+#endif
+
+	codes[1] = fault_addr;
+	pd_fault_dump(state, esr, fault_addr, (kern_return_t)codes[0]);
+#if __has_feature(ptrauth_calls)
+	bool is_data_abort = (ESR_EC(esr) == ESR_EC_DABORT_EL0);
+	if (user_fault_matches_pac_error_code(fault_addr, get_saved_state_pc(state), is_data_abort)) {
+		exc |= EXC_PTRAUTH_BIT;
+	}
+#endif /* __has_feature(ptrauth_calls) */
+
+	const self_restrict_mode_t self_restrict_mode = user_fault_in_self_restrict_mode(thread);
+	if ((self_restrict_mode != SELF_RESTRICT_NONE) &&
+	    task_is_jit_exception_fatal(get_threadtask(thread))) {
+#if MACH_ASSERT
+		/*
+		 * Case: panic_on_jit_guard=1. Catch an early process creation TPRO issue causing
+		 * rdar://129742083. Only panic during early process creation (1 thread, few syscalls
+		 * issued) to avoid spurious panics.
+		 */
+		const self_restrict_mode_t self_restrict_panic_mask = panic_on_jit_guard & self_restrict_mode;
+		bool should_panic = ((self_restrict_panic_mask == SELF_RESTRICT_ANY) &&
+		    (current_task()->thread_count == 1) &&
+		    (thread->syscalls_unix < 24));
+
+		/*
+		 * Modes other than ANY will force panic, skipping checks that were done in the ANY case,
+		 * but allowing us to filter on a more specific scenario (e.g. TPRO, JIT, etc).  This is
+		 * meant to catch a TPRO issue causing rdar://145703251. Restrict to KERN_PROTECTION_FAILURE
+		 * only to avoid failures from the more frequent case of KERN_INVALID_ADDRESS that aren't
+		 * of interest for that radar.
+		 */
+		should_panic |= (codes[0] == KERN_PROTECTION_FAILURE)
+		    && ((self_restrict_panic_mask & ~SELF_RESTRICT_ANY) != 0);
+
+		printf("\nGUARD_REASON_JIT exc %d codes=<0x%llx,0x%llx> syscalls %d task %p thread %p va 0x%lx code 0x%x type 0x%x esr 0x%llx\n",
+		    exc, codes[0], codes[1], thread->syscalls_unix, current_task(), thread, fault_addr, fault_code, fault_type, esr);
+		if (should_panic) {
+			panic("GUARD_REASON_JIT exc %d codes=<0x%llx,0x%llx> syscalls %d task %p thread %p va 0x%lx code 0x%x type 0x%x esr 0x%llx state %p j %d t %d s user 0x%llx (0x%llx) jb 0x%llx (0x%llx)",
+			    exc, codes[0], codes[1], thread->syscalls_unix, current_task(), thread, fault_addr, fault_code, fault_type, esr, state,
+			    0, 0, 0ull, 0ull,
+			    0ull, 0ull
+			    );
+		}
+#endif /* MACH_ASSERT */
+
+		/* Perform fatal exception logic. */
+		exit_with_fatal_exception_and_notify(current_proc(), OS_REASON_SELF_RESTRICT,
+		    exc, codes[0], codes[1], PX_KTRIAGE);
+		thread_exception_return();
+		__builtin_unreachable();
+	}
+
+#if HAS_MTE
+	if (codes[0] == EXC_ARM_MTE_TAGCHECK_FAIL || codes[0] == EXC_ARM_MTE_CANONICAL_FAIL) {
+		/*
+		 * If soft-mode is enabled, we trigger a simulated crash, then we'll clear TCF0
+		 * and let the thread try again.
+		 */
+		if (task_has_sec_soft_mode(current_task())) {
+			mte_send_sync_soft_mode_exception(thread, /* fault_addr */ codes[1], /* mx_code */ codes[0]);
+			/* Disable tag checking for userspace addresses. This will be our first and last tag check fault. */
+			mte_disable_user_checking(current_task());
+
+			if (thread->t_rr_state.trr_fault_state != TRR_FAULT_NONE) {
+				thread_reset_pcs_done_faulting(thread);
+			}
+			/* Retry with tag checking disabled. */
+			thread_exception_return();
+		}
+
+		if (is_address_space_debugged(current_proc())) {
+			exception_triage(exc, codes, numcodes);
+			__builtin_unreachable();
+		}
+
+		/* Hard-mode: Perform fatal exception logic. */
+		exit_with_fatal_exception_and_notify(current_proc(), OS_REASON_MTE_FAIL,
+		    exc, codes[0], codes[1], PX_KTRIAGE);
+		thread_exception_return();
+		__builtin_unreachable();
+	}
+#endif /* HAS_MTE */
+
+	exception_triage(exc, codes, numcodes);
+	__builtin_unreachable();
+}
+
+/**
+ * Panic because the kernel abort handler tried to apply a recovery handler that
+ * isn't inside copyio_recover_table[].
+ *
+ * @param state original saved-state
+ * @param recover invalid recovery handler
+ */
+__attribute__((noreturn, used))
+static void
+panic_on_invalid_recovery_handler(arm_saved_state_t *state, struct copyio_recovery_entry *recover)
+{
+	panic("attempt to set invalid recovery handler %p on kernel saved-state %p", recover, state);
+}
+
+/**
+ * Update a thread saved-state to store an error code in x0 and branch to a
+ * copyio recovery handler.
+ *
+ * @param state original saved-state
+ * @param esr ESR_ELx value for the fault taken
+ * @param fault_addr FAR_ELx value for the fault taken
+ * @param thread target thread
+ * @param recover destination copyio recovery handler
+ * @param x0 error code to populate into x0
+ */
+static void
+handle_kernel_abort_recover_with_error_code(
+	arm_saved_state_t              *state,
+	uint64_t                        esr,
+	vm_offset_t                     fault_addr,
+	thread_t                        thread,
+	struct copyio_recovery_entry   *_Nonnull recover,
+	uint64_t                       x0)
+{
+	thread->machine.recover_esr = esr;
+	thread->machine.recover_far = fault_addr;
+	saved_state64(state)->x[0] = x0;
+#if defined(HAS_APPLE_PAC)
+	MANIPULATE_SIGNED_THREAD_STATE(state,
+	    "adrp	x6, _copyio_recover_table_end@page		\n"
+	    "add	x6, x6, _copyio_recover_table_end@pageoff	\n"
+	    "cmp	%[recover], x6					\n"
+	    "b.lt	1f						\n"
+	    "bl		_panic_on_invalid_recovery_handler		\n"
+	    "brk	#0						\n"
+	    "1:								\n"
+	    "adrp	x6, _copyio_recover_table@page			\n"
+	    "add	x6, x6, _copyio_recover_table@pageoff		\n"
+	    "subs	x7, %[recover], x6				\n"
+	    "b.pl	1f						\n"
+	    "bl		_panic_on_invalid_recovery_handler		\n"
+	    "brk	#0						\n"
+	    "1:								\n"
+	    "udiv	x8, x7, %[SIZEOF_RECOVER]			\n"
+	    "mul	x8, x8, %[SIZEOF_RECOVER]			\n"
+	    "cmp	x7, x8						\n"
+	    "b.eq	1f						\n"
+	    "bl		_panic_on_invalid_recovery_handler		\n"
+	    "brk	#0						\n"
+	    "1:								\n"
+	    "ldr	x1, [%[recover], %[CRE_RECOVERY]]		\n"
+	    "add	x1, x1, x6					\n"
+	    "str	x1, [x0, %[SS64_PC]]				\n",
+	    [recover] "r"(recover),
+	    [SIZEOF_RECOVER] "r"((sizeof(*recover))),
+	    [CRE_RECOVERY] "i"(offsetof(struct copyio_recovery_entry, cre_recovery))
+	    );
+#else
+	ptrdiff_t recover_offset = (uintptr_t)recover - (uintptr_t)copyio_recover_table;
+	if ((uintptr_t)recover < (uintptr_t)copyio_recover_table ||
+	    (uintptr_t)recover >= (uintptr_t)copyio_recover_table_end ||
+	    (recover_offset % sizeof(*recover)) != 0) {
+		panic_on_invalid_recovery_handler(state, recover);
+	}
+	saved_state64(state)->pc = copyio_recovery_addr(recover->cre_recovery);
+#endif
+}
+
+static inline void
+handle_kernel_abort_recover(
+	arm_saved_state_t              *state,
+	uint64_t                        esr,
+	vm_offset_t                     fault_addr,
+	thread_t                        thread,
+	struct copyio_recovery_entry   *_Nonnull recover)
+{
+	handle_kernel_abort_recover_with_error_code(state, esr, fault_addr, thread, recover, EFAULT);
+}
+
+static void
+record_async_map_fault_address(
+	vm_map_t                map,
+	uint64_t                code,
+	vm_map_address_t        fault_address)
+{
+	vm_map_async_fault_t fault = {
+		.code    = code,
+		.address = fault_address,
+	};
+
+	/*
+	 * Attempt to report the faulting address. If this fails, we know that
+	 * a faulting address has already been reported. Accordingly, we can
+	 * just ignore the failure and continue on since we never send more than
+	 * one async fault guard exception per task anyway.
+	 */
+
+	(void)os_atomic_cmpxchg(&map->async_fault,
+	    (vm_map_async_fault_t){ }, fault, relaxed);
+
+	/*
+	 * We cannot set the AST here, as we'd need to take a task lock and we
+	 * may deadlock. On exit from the switched map operation or on return
+	 * from the IOMD read/writeBytes path, the caller will check whether
+	 * an exception happened by inspecting `async_fault.code` and
+	 * act accordingly.
+	 */
+}
+
+/*
+ * We took a fault accessing a userspace address, while in a kernel thread that
+ * temporarily switched to the user map in order to do work on behalf of the
+ * target process.  Record onto the map the faulting address.
+ *
+ * This is essentially a thin layer over record_async_map_fault_address(),
+ * just adding a bunch of sanity checks that we don't start hitting unexpected
+ * faults.
+ */
+static void
+record_async_kernel_interposed_map_fault_address(
+	uint64_t                code,
+	vm_map_address_t        fault_addr)
+{
+	vm_map_t map = current_map();
+
+	assert(vm_kernel_map_is_kernel(current_task()->map));
+	assert(!vm_kernel_map_is_kernel(map));
+
+	if (!map->owning_task && !map->terminated) {
+		panic("Kernel tag-check fault on %p @ %#llx prior to vm_map_setup",
+		    map, map->async_fault.address);
+	}
+
+	record_async_map_fault_address(map, code, fault_addr);
+}
+
+#if HAS_MTE
+static void
+mte_send_sync_soft_mode_exception(thread_t thread, vm_map_address_t address, mach_exception_data_type_t mx_code)
+{
+	uint64_t code = mx_code | kGUARD_EXC_MTE_SOFT_MODE;
+	EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VIRT_MEMORY);
+	EXC_GUARD_ENCODE_FLAVOR(code, kGUARD_EXC_MTE_SYNC_FAULT);
+	thread_guard_violation(thread, code, address, /* sticky */ false);
+}
+
+/*
+ * We took a fault during a copyio routine, over a user address, in the context
+ * of a user thread that "synchronously" asked the kernel to access a pointer.
+ * The intention is to kill the user thread (EXC_BAD_ACCESS), but since we might
+ * be within an interrupt context, delay sending the exception to the guard AST.
+ */
+static void
+mte_send_sync_kernel_on_user_fault(thread_t thread, vm_map_address_t fault_addr, mach_exception_data_type_t mx_code)
+{
+	/* Soft-mode: send a sync fault simulated exception. */
+	if (task_has_sec_soft_mode(get_threadtask(thread))) {
+		mte_send_sync_soft_mode_exception(thread, fault_addr, mx_code);
+		return;
+	}
+
+	/* Hard-mode: send an old fashioned Tag Check Fault. */
+	set_saved_state_far(thread->machine.upcb, fault_addr);
+	int flags = PX_KTRIAGE;
+	exception_info_t info = {
+		.os_reason = OS_REASON_MTE_FAIL,
+		.exception_type = EXC_BAD_ACCESS,
+		.mx_code = mx_code,
+		.mx_subcode = fault_addr
+	};
+	exit_with_mach_exception_using_ast(info, flags, /* fatal */ true);
+}
+
+/*
+ * We took a fault while servicing an AST, over a user address, on behalf of
+ * a user process. The intention is to kill the user thread. The notification
+ * is sent to the current thread, so we can use
+ * thread_guard_violation()->thread_ast_mach_exception().
+ *
+ * @param thread current thread.
+ * @param code must be either a TAG CHECK FAIL or a CANONICAL (TAG CHECK) FAIL.
+ * @param fault_addr the address that the fault was taken on.
+ */
+static void
+mte_send_async_ast_fault(thread_t thread, mach_exception_data_type_t code, vm_map_address_t fault_addr)
+{
+	bool soft_mode = task_has_sec_soft_mode(get_threadtask(thread));
+
+	assert(EXC_GUARD_DECODE_GUARD_TARGET(code) == EXC_ARM_MTE_TAGCHECK_FAIL ||
+	    EXC_GUARD_DECODE_GUARD_TARGET(code) == EXC_ARM_MTE_CANONICAL_FAIL);
+	if (soft_mode) {
+		code |= kGUARD_EXC_MTE_SOFT_MODE;
+	}
+	thread_guard_violation(thread, code, fault_addr, /* not sticky in soft_mode */ !soft_mode);
+}
+
+static void
+handle_kernel_tag_check_fault(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr,
+    thread_t thread, struct copyio_recovery_entry *recover)
+{
+	/*
+	 * MTE tag check faults are treated as non-recoverable security
+	 * violations, even when they're raised inside a copyio routine.
+	 *
+	 * If the fault happened while accessing a user address inside a copyio
+	 * routine in the context of a userspace process, assume the current
+	 * process supplied that address and deliver a Mach exception.  This may
+	 * manifest either as `EXC_BAD_ACCESS` or a Mach guard exception.
+	 * The former is used when the fault was raised while servicing a
+	 * synchronous EL0 exception, so the crashing EL0 thread state will
+	 * likely have something to do with the root cause.
+	 *
+	 * If such a fault happened in the context of a kernel thread, assume
+	 * that the kernel is doing work on behalf of the process that owns the
+	 * current map and set a guard exception on the map to asynchronously
+	 * kill it.
+	 *
+	 * If the fault happened while accessing a kernel address, and the
+	 * copyio handler didn't explicitly say that it needs to tolerate kernel
+	 * tag check faults, then panic.  (We'll assume the kernel is always
+	 * responsible for mistagged kernel addresses: copy_validate() should
+	 * keep misbehaving userspace processes from passing those in.)
+	 */
+
+	/* Use the TTBR selector to determine whether it's a user or kernel address. */
+	bool is_user_addr = (fault_addr & TTBR_SELECTOR) == 0;
+	/* Are we running as a kernel thread. */
+	bool is_kernel_thread = vm_kernel_map_is_kernel(current_task()->map);
+
+	/*
+	 * Only attempt recovery if we have a recovery handler associated.
+	 * Recovery step will differ depending on whether we faulted on a user or kernel address.
+	 */
+	if (recover) {
+		mach_exception_data_type_t code;
+
+		code = tag_check_fault_type(current_map()->pmap, fault_addr);
+
+		if (is_user_addr) {
+			uint64_t error_code = EFAULT;
+			task_t owning_task = current_task();
+			bool in_el0_sync_trap = thread->machine.el0_synchronous_trap &&
+			    current_cpu_datap()->cpu_int_state == NULL;
+
+			if (in_el0_sync_trap) {
+				/* "Synchronous" software exception. */
+				mte_send_sync_kernel_on_user_fault(thread, fault_addr, code);
+			} else {
+				/* "Asynchronous" software exception */
+#if DEVELOPMENT || DEBUG
+				if (mte_panic_on_async_fault()) {
+					panic_with_thread_kernel_state("Kernel AST tag check fault accessing user space", state);
+				}
+#endif /* DEVELOPMENT || DEBUG */
+
+				if (is_kernel_thread) {
+					/* kernel thread executes with switched map. */
+					EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VIRT_MEMORY);
+					EXC_GUARD_ENCODE_FLAVOR(code, kGUARD_EXC_MTE_ASYNC_KERN_FAULT);
+					record_async_kernel_interposed_map_fault_address(code, fault_addr);
+					owning_task = current_map()->owning_task;
+				} else {
+					/* Asynchronous but within current_thread() */
+					EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VIRT_MEMORY);
+					EXC_GUARD_ENCODE_FLAVOR(code, kGUARD_EXC_MTE_ASYNC_USER_FAULT);
+					mte_send_async_ast_fault(thread, code, fault_addr);
+				}
+			}
+			/*
+			 * If in soft-mode, retry with tag checking disabled. If the map was terminated,
+			 * we raced down here killing the task, so the soft-mode check is moot.
+			 */
+			if (owning_task && task_has_sec_soft_mode(owning_task)) {
+				mte_disable_user_checking(owning_task);
+				error_code = EAGAIN;
+			}
+			/*
+			 * We took this exception from inside kernel copyio code.  Even
+			 * if we're not going to retry it, the kernel thread needs to
+			 * clean things up by branching to the copyio recovery handler.
+			 */
+			handle_kernel_abort_recover_with_error_code(state, esr, fault_addr, thread, recover, error_code);
+			return;
+		} else {
+			/* We further filter the side of the access that is actually allowed to fault. */
+			bool is_write_access = (ESR_ISS(esr) & ISS_DA_WNR);
+
+			if ((recover->recover_from_kernel_read_tag_check_fault && !is_write_access) ||
+			    (recover->recover_from_kernel_write_tag_check_fault && is_write_access)) {
+				/* Are we within an IOMD critical region - that will give us a task to blame. */
+				task_t task_providing_faultable_buffer = current_thread_get_iomd_faultable_access_buffer_provider();
+				if (task_providing_faultable_buffer != NULL) {
+					/* Same drill as the kernel thread case above: record here the required information. */
+					EXC_GUARD_ENCODE_TYPE(code, GUARD_TYPE_VIRT_MEMORY);
+					EXC_GUARD_ENCODE_FLAVOR(code, kGUARD_EXC_MTE_ASYNC_KERN_FAULT);
+#if DEVELOPMENT || DEBUG
+					record_async_map_fault_address(task_providing_faultable_buffer->map,
+					    code, fault_addr);
+					if (mte_panic_on_async_fault()) {
+						panic_with_thread_kernel_state("Kernel AST tag check fault accessing physmap", state);
+					}
+#else /* DEVELOPMENT || DEBUG */
+					record_async_map_fault_address(task_providing_faultable_buffer->map,
+					    code, 0xdeadbeef);
+#endif /* DEVELOPMENT || DEBUG */
+				}
+
+				/* No fault, just clean recovery returning EFAULT. */
+				handle_kernel_abort_recover(state, esr, fault_addr, thread, recover);
+				return;
+			}
+			/* Fallthrough to regular panic scenario. */
+		}
+	}
+
+	/*
+	 * Everything past this point doesn't have a recovery handler and is a fatal violation.
+	 * Package up and report as much useful information as possible.
+	 */
+#define MSG_FMT "Kernel tag check fault (expected tagged address: 0x%016llx)"
+	char msg[strlen(MSG_FMT)
+	- strlen("0x%016llx") + strlen("0xFFFFFFFFFFFFFFFF")
+	+ 1];
+
+	vm_address_t expected_tagged_address = vm_memtag_load_tag(fault_addr);
+	snprintf(msg, sizeof(msg), MSG_FMT, (uint64_t)expected_tagged_address);
+	panic_with_thread_kernel_state(msg, state);
+#undef MSG_FMT
+}
+#endif /* HAS_MTE */
+
+static void
+handle_kernel_guard_object_fault(vm_offset_t fault_addr, thread_t thread)
+{
+	exception_info_t info = {
+		.mx_code    = KERN_INVALID_GUARD_OBJECT_SLOT,
+		.mx_subcode = fault_addr,
+	};
+	task_t task = get_threadtask(thread);
+
+	assert((fault_addr & TTBR_SELECTOR) == 0);
+
+	if (thread->machine.el0_synchronous_trap &&
+	    current_cpu_datap()->cpu_int_state == NULL) {
+		/*
+		 * Case 1: "synchronous" software exception, just exit
+		 */
+		set_saved_state_far(thread->machine.upcb, fault_addr);
+		info.os_reason      = OS_REASON_MTE_FAIL;
+		info.exception_type = EXC_BAD_ACCESS;
+		exit_with_mach_exception_using_ast(info, PX_KTRIAGE,
+		    task->task_exc_guard & TASK_EXC_GUARD_VM_FATAL);
+	} else if (task == kernel_task) {
+		/*
+		 * Case 2: asynchronous exception in kernel context
+		 */
+		EXC_GUARD_ENCODE_TYPE(info.mx_code, GUARD_TYPE_VIRT_MEMORY);
+		EXC_GUARD_ENCODE_FLAVOR(info.mx_code, kGUARD_EXC_GUARD_OBJECT_ASYNC_KERN_FAULT);
+		record_async_kernel_interposed_map_fault_address(info.mx_code, fault_addr);
+	} else {
+		/*
+		 * Case 3: asynchronous exception in current_thread() context
+		 */
+		info.os_reason      = OS_REASON_GUARD;
+		info.exception_type = EXC_GUARD;
+		EXC_GUARD_ENCODE_TYPE(info.mx_code, GUARD_TYPE_VIRT_MEMORY);
+		EXC_GUARD_ENCODE_FLAVOR(info.mx_code, kGUARD_EXC_GUARD_OBJECT_ASYNC_USER_FAULT);
+		exit_with_mach_exception_using_ast(info, PX_KTRIAGE,
+		    task->task_exc_guard & TASK_EXC_GUARD_VM_FATAL);
+	}
+}
+
+#if defined(SUN50I)
+// on msm8916, stores to __DATA_CONST before machine_lockdown() sometimes fault though the tables grant
+// EL1 write, so a write the leaf entry grants drops the address from every TLB and retries, logged
+static uint32_t pd_static_fault_retries;
+
+static bool
+pd_static_fault_retry(vm_offset_t va, uint64_t esr)
+{
+	uint64_t tcr = __builtin_arm_rsr64("TCR_EL1");
+	unsigned t1sz = (unsigned)((tcr >> 16) & 0x3f);
+	unsigned top = t1sz <= 24 ? 0 : (t1sz <= 33 ? 1 : 2);
+	uint64_t table = __builtin_arm_rsr64("TTBR1_EL1") & 0x0000fffffffff000ULL;
+	uint64_t desc = 0;
+	unsigned level;
+
+	for (level = top; level <= 3; level++) {
+		unsigned shift = 39 - 9 * level;
+		uint64_t mask = level == top ? ((1ULL << (64 - t1sz - shift)) - 1) : 0x1ff;
+		desc = ((volatile uint64_t *)phystokv(table))[((uint64_t)va >> shift) & mask];
+		if ((desc & 3) != 3 || level == 3) {
+			break;
+		}
+		table = desc & 0x0000fffffffff000ULL;
+	}
+	bool writable = (desc & 1) && ((desc >> 7) & 1) == 0;   // valid, AP[2] clear: EL1 read/write
+	printf("PD-SFAULT %u va 0x%lx esr 0x%llx leaf L%u 0x%016llx %s\n", pd_static_fault_retries,
+	    (unsigned long)va, esr, level, desc, writable ? "writable: retrying" : "read-only");
+	if (!writable || pd_static_fault_retries >= 16) {
+		return false;
+	}
+	pd_static_fault_retries++;
+	__asm__ volatile ("dsb ishst; tlbi vaae1is, %0; dsb ish; isb" :: "r"(((uint64_t)va >> 12) & 0xfffffffffffULL) : "memory");
+	return true;
+}
+#endif
+
+static void
+handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr,
+    fault_status_t fault_code, vm_prot_t fault_type, expected_fault_handler_t expected_fault_handler)
+{
+	thread_t thread = current_thread();
+	struct copyio_recovery_entry *recover = find_copyio_recovery_entry(
+		get_saved_state_pc(state));
+
+#ifndef CONFIG_XNUPOST
+	(void)expected_fault_handler;
+#endif /* CONFIG_XNUPOST */
+
+
+#if CONFIG_DTRACE
+	if (is_vm_fault(fault_code) && thread->t_dtrace_inprobe) { /* Executing under dtrace_probe? */
+		if (dtrace_tally_fault(fault_addr)) { /* Should a fault under dtrace be ignored? */
+			/*
+			 * Point to next instruction, or recovery handler if set.
+			 */
+			if (recover) {
+				handle_kernel_abort_recover(state, esr, VM_USER_STRIP_PTR(fault_addr), thread, recover);
+			} else {
+				add_saved_state_pc(state, 4);
+			}
+			return;
+		} else {
+			panic_with_thread_kernel_state("Unexpected page fault under dtrace_probe", state);
+		}
+	}
+#endif
+
+#if HAS_MTE
+	if (is_tag_check_fault(fault_code)) {
+#ifdef CONFIG_XNUPOST
+		if (expected_fault_handler && expected_fault_handler(state)) {
+			return;
+		}
+#endif /* CONFIG_XNUPOST */
+
+		handle_kernel_tag_check_fault(state, esr, fault_addr, thread, recover);
+		return;
+	} else
+#endif /* HAS_MTE */
+	if (is_vm_fault(fault_code)) {
+		kern_return_t result = KERN_FAILURE;
+		vm_map_t      map;
+		int           interruptible;
+
+#ifdef CONFIG_XNUPOST
+		if (expected_fault_handler && expected_fault_handler(state)) {
+			return;
+		}
+#endif /* CONFIG_XNUPOST */
+
+		if (VM_KERNEL_ADDRESS(fault_addr) || thread == THREAD_NULL || recover == 0) {
+			/*
+			 * If no recovery handler is supplied, always drive the fault against
+			 * the kernel map.  If the fault was taken against a userspace VA, indicating
+			 * an unprotected access to user address space, vm_fault() should fail and
+			 * ultimately lead to a panic here.
+			 */
+			map = kernel_map;
+			interruptible = THREAD_UNINT;
+
+#if CONFIG_KERNEL_TAGGING
+			/*
+			 * If kernel tagging is enabled, canonicalize the address here, so that we have a
+			 * chance to find it in the VM ranges. Do not mess with exec fault cases.
+			 */
+			if (!((fault_type) & VM_PROT_EXECUTE)) {
+				fault_addr = vm_memtag_canonicalize(map, fault_addr);
+			}
+#endif /* CONFIG_KERNEL_TAGGING */
+		} else {
+			map = thread->map;
+
+			/**
+			 * In the case that the recovery handler is set (e.g., during copyio
+			 * and dtrace probes), we don't want the vm_fault() operation to be
+			 * aborted early. Those code paths can't handle restarting the
+			 * vm_fault() operation so don't allow it to return early without
+			 * creating the wanted mapping.
+			 */
+			interruptible = (recover) ? THREAD_UNINT : THREAD_ABORTSAFE;
+
+#if HAS_MTE || HAS_MTE_EMULATION_SHIMS
+			/*
+			 * If we have MTE enabled on the process, allow recovery of tagged
+			 * addresses.
+			 */
+			if (current_task_has_sec_enabled() && recover) {
+				if (!((fault_type) & VM_PROT_EXECUTE)) {
+					fault_addr = vm_memtag_canonicalize(map, fault_addr);
+				}
+			}
+#endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
+		}
+
+		/*
+		 * Ensure no faults in the physical aperture. This could happen if
+		 * a page table is incorrectly allocated from the read only region
+		 * when running with KTRR.
+		 */
+		if (__improbable(fault_addr >= physmap_base) && (fault_addr < physmap_end)) {
+			panic_with_thread_kernel_state("Unexpected fault in kernel physical aperture", state);
+		}
+		if (__improbable(fault_addr >= gVirtBase && fault_addr < static_memory_end)) {
+#if defined(SUN50I)
+			if (pd_static_fault_retry(fault_addr, esr)) {
+				return;
+			}
+#endif
+			panic_with_thread_kernel_state("Unexpected fault in kernel static region", state);
+		}
+
+		/* check to see if it is just a pmap ref/modify fault */
+		if (!is_translation_fault(fault_code)) {
+			result = arm_fast_fault(map->pmap,
+			    fault_addr,
+			    fault_type, (fault_code == FSC_ACCESS_FLAG_FAULT_L3), FALSE);
+			if (result == KERN_SUCCESS) {
+				return;
+			}
+		}
+
+		/**
+		 * vm_fault() can be called with preemption disabled (and indeed this is expected for
+		 * certain copyio() scenarios), but can't safely be called with interrupts disabled once
+		 * the system has gone multi-threaded.  Other than some early-boot situations such as
+		 * startup kext loading, kernel paging operations should never be triggered by
+		 * non-interruptible code in the first place, so a fault from such a context will
+		 * ultimately produce a kernel data abort panic anyway.  In these cases, skip calling
+		 * vm_fault() to avoid masking the real kernel panic with a failed VM locking assertion.
+		 */
+		if (__probable(SPSR_INTERRUPTS_ENABLED(get_saved_state_cpsr(state)) ||
+		    startup_phase < STARTUP_SUB_EARLY_BOOT ||
+		    current_cpu_datap()->cpu_hibernate)) {
+			if (result != KERN_PROTECTION_FAILURE) {
+				// VM will query this property when deciding to throttle this fault, we don't want to
+				// throttle kernel faults for copyio faults. The presence of a recovery entry is used as a
+				// proxy for being in copyio code.
+				bool const was_recover = thread->recover;
+				thread->recover = was_recover || recover;
+
+				/*
+				 *  We have to "fault" the page in.
+				 */
+				result = vm_fault(map, fault_addr, fault_type,
+				    /* change_wiring */ FALSE, VM_KERN_MEMORY_NONE, interruptible,
+				    /* caller_pmap */ NULL, /* caller_pmap_addr */ 0);
+
+				thread->recover = was_recover;
+			}
+
+			if (result == KERN_SUCCESS) {
+				return;
+			}
+		}
+
+		if (recover) {
+			/*
+			 *  Handle guard object faults during copyio() routines
+			 */
+			if ((fault_addr & TTBR_SELECTOR) == 0) {
+#if CONFIG_MAP_RANGES
+				if (result == KERN_INVALID_ADDRESS &&
+				    vm_map_in_user_range_voids(map, fault_addr, 1)) {
+					result = KERN_INVALID_GUARD_OBJECT_SLOT;
+				}
+#endif /* CONFIG_MAP_RANGES */
+				if (result == KERN_INVALID_GUARD_OBJECT_SLOT) {
+					handle_kernel_guard_object_fault(fault_addr, thread);
+				}
+			}
+
+			/*
+			 *  If we have a recover handler, invoke it now.
+			 */
+			handle_kernel_abort_recover(state, esr, fault_addr, thread, recover);
+			return;
+		}
+
+		panic_fault_address = fault_addr;
+	} else if (is_alignment_fault(fault_code)) {
+		if (recover) {
+			handle_kernel_abort_recover(state, esr, fault_addr, thread, recover);
+			return;
+		}
+		panic_with_thread_kernel_state("Unaligned kernel data abort.", state);
+	} else if (is_parity_error(fault_code)) {
+#if defined(APPLE_ARM64_ARCH_FAMILY)
+		/*
+		 * Platform errors are handled in sleh_sync before interrupts are enabled.
+		 */
+#else
+		panic_with_thread_kernel_state("Kernel parity error.", state);
+#endif
+	} else {
+		kprintf("Unclassified kernel abort (fault_code=0x%x)\n", fault_code);
+	}
+
+	panic_with_thread_kernel_state("Kernel data abort.", state);
+}
+
+extern void syscall_trace(struct arm_saved_state * regs);
+
+static void
+handle_svc(arm_saved_state_t *state)
+{
+	int      trap_no = get_saved_state_svc_number(state);
+	thread_t thread  = current_thread();
+	struct   proc *p;
+
+#define handle_svc_kprintf(x...) /* kprintf("handle_svc: " x) */
+
+#define TRACE_SYSCALL 1
+#if TRACE_SYSCALL
+	syscall_trace(state);
+#endif
+
+	thread->iotier_override = THROTTLE_LEVEL_NONE; /* Reset IO tier override before handling SVC from userspace */
+
+	if (trap_no == (int)PLATFORM_SYSCALL_TRAP_NO) {
+		platform_syscall(state);
+		panic("Returned from platform_syscall()?");
+	}
+
+	current_cached_proc_cred_update();
+
+	if (trap_no < 0) {
+		switch (trap_no) {
+		case MACH_ARM_TRAP_ABSTIME:
+			handle_mach_absolute_time_trap(state);
+			return;
+		case MACH_ARM_TRAP_CONTTIME:
+			handle_mach_continuous_time_trap(state);
+			return;
+		}
+
+		/* Counting perhaps better in the handler, but this is how it's been done */
+		thread->syscalls_mach++;
+		mach_syscall(state);
+	} else {
+		/* Counting perhaps better in the handler, but this is how it's been done */
+		thread->syscalls_unix++;
+		p = get_bsdthreadtask_info(thread);
+
+		assert(p);
+
+		unix_syscall(state, thread, p);
+	}
+}
+
+static void
+handle_mach_absolute_time_trap(arm_saved_state_t *state)
+{
+	uint64_t now = mach_absolute_time();
+	saved_state64(state)->x[0] = now;
+}
+
+static void
+handle_mach_continuous_time_trap(arm_saved_state_t *state)
+{
+	uint64_t now = mach_continuous_time();
+	saved_state64(state)->x[0] = now;
+}
+
+
+__attribute__((noreturn))
+static void
+handle_msr_trap(arm_saved_state_t *state, uint64_t esr)
+{
+	exception_type_t           exception = EXC_BAD_INSTRUCTION;
+	mach_exception_data_type_t codes[2]  = {EXC_ARM_UNDEFINED};
+	mach_msg_type_number_t     numcodes  = 2;
+	uint32_t                   instr     = 0;
+
+	if (!is_saved_state64(state)) {
+		panic("MSR/MRS trap (ESR 0x%llx) from 32-bit state", esr);
+	}
+
+	if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+		panic("MSR/MRS trap (ESR 0x%llx) from kernel", esr);
+	}
+
+	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+	codes[1] = instr;
+
+	exception_triage(exception, codes, numcodes);
+	__builtin_unreachable();
+}
+
+#if __has_feature(ptrauth_calls)
+static void
+stringify_gpr(unsigned int r, char reg[4])
+{
+	switch (r) {
+	case 29:
+		strncpy(reg, "fp", 4);
+		return;
+
+	case 30:
+		strncpy(reg, "lr", 4);
+		return;
+
+	case 31:
+		strncpy(reg, "xzr", 4);
+		return;
+
+	default:
+		snprintf(reg, 4, "x%u", r);
+		return;
+	}
+}
+
+static void
+autxx_instruction_extract_reg(uint32_t instr, char reg[4])
+{
+	unsigned int rd = ARM64_INSTR_AUTxx_RD_GET(instr);
+	stringify_gpr(rd, reg);
+}
+
+static const char *
+autix_system_instruction_extract_reg(uint32_t instr)
+{
+	unsigned int crm_op2 = ARM64_INSTR_AUTIx_SYSTEM_CRM_OP2_GET(instr);
+	if (crm_op2 == ARM64_INSTR_AUTIx_SYSTEM_CRM_OP2_AUTIA1716 ||
+	    crm_op2 == ARM64_INSTR_AUTIx_SYSTEM_CRM_OP2_AUTIB1716) {
+		return "x17";
+	} else {
+		return "lr";
+	}
+}
+
+static void
+bxrax_instruction_extract_reg(uint32_t instr, char reg[4])
+{
+	unsigned int rn = ARM64_INSTR_BxRAx_RN_GET(instr);
+	stringify_gpr(rn, reg);
+}
+
+static void
+handle_pac_fail(arm_saved_state_t *state, uint64_t esr)
+{
+	exception_type_t           exception = EXC_BAD_ACCESS | EXC_PTRAUTH_BIT;
+	mach_exception_data_type_t codes[2]  = {EXC_ARM_PAC_FAIL};
+	mach_msg_type_number_t     numcodes  = 2;
+	uint32_t                   instr     = 0;
+
+	if (!is_saved_state64(state)) {
+		panic("PAC failure (ESR 0x%llx) from 32-bit state", esr);
+	}
+
+	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+
+	if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+#define GENERIC_PAC_FAILURE_MSG_FMT "PAC failure from kernel with %s key"
+#define AUTXX_MSG_FMT GENERIC_PAC_FAILURE_MSG_FMT " while authing %s"
+#define BXRAX_MSG_FMT GENERIC_PAC_FAILURE_MSG_FMT " while branching to %s"
+#define RETAX_MSG_FMT GENERIC_PAC_FAILURE_MSG_FMT " while returning"
+#define GENERIC_MSG_FMT GENERIC_PAC_FAILURE_MSG_FMT
+#define MAX_PAC_MSG_FMT BXRAX_MSG_FMT
+
+		char msg[strlen(MAX_PAC_MSG_FMT)
+		- strlen("%s") + strlen("IA")
+		- strlen("%s") + strlen("xzr")
+		+ 1];
+		ptrauth_key key = (ptrauth_key)(esr & 0x3);
+		const char *key_str = ptrauth_key_to_string(key);
+
+		if (ARM64_INSTR_IS_AUTxx(instr)) {
+			char reg[4];
+			autxx_instruction_extract_reg(instr, reg);
+			snprintf(msg, sizeof(msg), AUTXX_MSG_FMT, key_str, reg);
+		} else if (ARM64_INSTR_IS_AUTIx_SYSTEM(instr)) {
+			const char *reg = autix_system_instruction_extract_reg(instr);
+			snprintf(msg, sizeof(msg), AUTXX_MSG_FMT, key_str, reg);
+		} else if (ARM64_INSTR_IS_BxRAx(instr)) {
+			char reg[4];
+			bxrax_instruction_extract_reg(instr, reg);
+			snprintf(msg, sizeof(msg), BXRAX_MSG_FMT, key_str, reg);
+		} else if (ARM64_INSTR_IS_RETAx(instr)) {
+			snprintf(msg, sizeof(msg), RETAX_MSG_FMT, key_str);
+		} else {
+			snprintf(msg, sizeof(msg), GENERIC_MSG_FMT, key_str);
+		}
+		panic_with_thread_kernel_state(msg, state);
+	}
+
+	/* Unlike the kernel-mode case above, user-mode PAC failures normally
+	 * get no diagnostic at all before being triaged into a signal. */
+	printf("PAC failure from user pid %d at pc=0x%llx esr=0x%llx key=%s instr=0x%08x\n",
+	    proc_pid(current_proc()), get_saved_state_pc(state), esr,
+	    ptrauth_key_to_string((ptrauth_key)(esr & 0x3)), instr);
+
+	codes[1] = instr;
+
+	exception_triage(exception, codes, numcodes);
+	__builtin_unreachable();
+}
+#endif /* __has_feature(ptrauth_calls) */
+
+__attribute__((noreturn))
+static void
+handle_bti_fail(arm_saved_state_t *state, uint64_t esr)
+{
+	uint32_t btype = (uint32_t) esr & ISS_BTI_BTYPE_MASK;
+
+	if (!is_saved_state64(state)) {
+		/* BTI is an ARMv8 feature, this should not be possible */
+		panic("BTI failure for 32-bit state? (ESR=0x%llx)", esr);
+	}
+
+	/*
+	 * We currently only expect BTI to be enabled for kernel pages, so panic if
+	 * we detect otherwise.
+	 */
+	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+		panic("Unexpected non-kernel BTI failure? (ESR=0x%llx)", esr);
+	}
+
+#define BTI_FAIL_PTR_FMT "%04x"
+#define BTI_FAIL_MSG_FMT "Kernel BTI failure (BTYPE=0x" BTI_FAIL_PTR_FMT ")"
+	/* Replace the pointer format with the length of the pointer message+NULL */
+	char msg[strlen(BTI_FAIL_MSG_FMT) - strlen(BTI_FAIL_PTR_FMT) + 8 + 1];
+	snprintf(msg, sizeof(msg), BTI_FAIL_MSG_FMT, btype);
+	panic_with_thread_kernel_state(msg, state);
+	__builtin_unreachable();
+}
+
+static void
+handle_user_trapped_instruction32(arm_saved_state_t *state, uint64_t esr)
+{
+	exception_type_t           exception = EXC_BAD_INSTRUCTION;
+	mach_exception_data_type_t codes[2]  = {EXC_ARM_UNDEFINED};
+	mach_msg_type_number_t     numcodes  = 2;
+	uint32_t                   instr;
+
+	if (is_saved_state64(state)) {
+		panic("ESR (0x%llx) for instruction trapped from U32, but saved state is 64-bit.", esr);
+	}
+
+	if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+		panic("ESR (0x%llx) for instruction trapped from U32, actually came from kernel?", esr);
+	}
+
+	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+	codes[1] = instr;
+
+	exception_triage(exception, codes, numcodes);
+	__builtin_unreachable();
+}
+
+static void
+handle_simd_trap(arm_saved_state_t *state, uint64_t esr)
+{
+	exception_type_t           exception = EXC_BAD_INSTRUCTION;
+	mach_exception_data_type_t codes[2]  = {EXC_ARM_UNDEFINED};
+	mach_msg_type_number_t     numcodes  = 2;
+	uint32_t                   instr     = 0;
+
+	if (PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+		panic("ESR (0x%llx) for SIMD trap from userland, actually came from kernel?", esr);
+	}
+
+	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+	codes[1] = instr;
+
+	exception_triage(exception, codes, numcodes);
+	__builtin_unreachable();
+}
+
+#if defined(SUN50I)
+// Allwinner H616/H618: GIC-400 under ATF, so the virtual timer is an ordinary IRQ, and
+// the kernel owns the GIC because the timer is needed before the platform expert starts
+#define SUN50I_GICD_ISENABLER0  0x100
+#define SUN50I_GICD_ICENABLER0  0x180
+#define SUN50I_GICD_ICPENDR0    0x280
+#define SUN50I_GICD_ICACTIVER0  0x380
+#define SUN50I_GICD_IPRIORITYR  0x400
+#define SUN50I_GICD_ITARGETSR   0x800
+#define SUN50I_GICC_CTLR        0x000
+#define SUN50I_GICC_PMR         0x004
+#define SUN50I_GICC_IAR         0x00C
+#define SUN50I_GICC_EOIR        0x010
+#include <pexpert/device_tree.h>
+static vm_offset_t pd_sun50i_gicd, pd_sun50i_gicc;
+// the virtual timer's INTID: 27 unless the loader read another from the board's /timer node
+static uint32_t pd_sun50i_timer_intid = SUN50I_TIMER_PPI_VIRT;
+
+// the loader's /arm-io/wdt qualcomm apss watchdog, petted from the timer interrupt and the idle loop
+// it barks (a panic, then a PSCI reset) after PD_WDT_BARK_SECS and bites (a warm reset) after PD_WDT_BITE_SECS
+#define PD_WDT_RST          0x04
+#define PD_WDT_EN           0x08
+#define PD_WDT_BARK_TIME    0x10
+#define PD_WDT_BITE_TIME    0x14
+#define PD_WDT_EN_ENABLE    0x1
+#define PD_WDT_EN_BARK_IRQ  0x2
+#define PD_WDT_TICKS_PER_SEC 32768u  // the 32.768 kHz sleep clock
+#define PD_WDT_BARK_SECS    8u
+#define PD_WDT_BITE_SECS    16u
+static vm_offset_t pd_sun50i_wdt;
+static uint32_t pd_sun50i_wdt_bark_intid = GIC_SPURIOUS_IRQ;
+
+// bring-up on a board whose only console is read after a reset: pd_panic_after=<s> panics
+// that long after boot, so a healthy kernel's log comes back too
+static TUNABLE(uint32_t, pd_panic_after, "pd_panic_after", 0);
+static uint64_t pd_panic_after_deadline;
+static bool pd_panic_after_fired;
+
+void pd_sun50i_wdt_pet(void);
+void
+pd_sun50i_wdt_pet(void)
+{
+	if (pd_sun50i_wdt) {
+		*(volatile uint32_t *)(pd_sun50i_wdt + PD_WDT_RST) = 1;
+	}
+}
+
+// the loader describes the gic-400 as /arm-io/gic, reg = distributor then cpu interface
+// relative to the arm-io window, boards without the node get the h616 addresses
+static void
+pd_sun50i_gic_locate(uint64_t *gicd, uint64_t *gicc)
+{
+	DTEntry entry;
+	uint64_t const *reg;
+	unsigned int size;
+
+	*gicd = SUN50I_GICD_BASE_PHYS;
+	*gicc = SUN50I_GICC_BASE_PHYS;
+	if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) == kSuccess &&
+	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) == kSuccess &&
+	    size >= 4 * sizeof(uint64_t)) {
+		*gicd = pe_arm_get_soc_base_phys() + reg[0];
+		*gicc = pe_arm_get_soc_base_phys() + reg[2];
+	}
+	uint32_t const *ppi;
+	if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) == kSuccess &&
+	    SecureDTGetProperty(entry, "timer-ppi", (void const **)&ppi, &size) == kSuccess &&
+	    size == sizeof(uint32_t) && *ppi >= 16 && *ppi < 32) {
+		pd_sun50i_timer_intid = *ppi;
+	}
+}
+
+// /arm-io/wdt: reg (offset in the arm-io window, size) and the bark's INTID in "pd,bark-intid"
+// (not "interrupts", which IOKit would try to map through a tree with no controller for it)
+static void
+pd_sun50i_wdt_startup(volatile uint32_t *d)
+{
+	DTEntry entry;
+	uint64_t const *reg;
+	uint32_t const *irq;
+	unsigned int size;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io/wdt", &entry) != kSuccess ||
+	    SecureDTGetProperty(entry, "reg", (void const **)&reg, &size) != kSuccess ||
+	    size < 2 * sizeof(uint64_t)) {
+		return;
+	}
+	if (SecureDTGetProperty(entry, "pd,bark-intid", (void const **)&irq, &size) == kSuccess &&
+	    size == sizeof(uint32_t) && *irq >= 32 && *irq < GIC_SPURIOUS_IRQ) {
+		pd_sun50i_wdt_bark_intid = *irq;
+	}
+	pd_sun50i_wdt = ml_io_map(pe_arm_get_soc_base_phys() + reg[0], reg[1]);
+
+	volatile uint32_t *w = (volatile uint32_t *)pd_sun50i_wdt;
+	w[PD_WDT_EN / 4] = 0;
+	w[PD_WDT_RST / 4] = 1;
+	w[PD_WDT_BARK_TIME / 4] = PD_WDT_BARK_SECS * PD_WDT_TICKS_PER_SEC;
+	w[PD_WDT_BITE_TIME / 4] = PD_WDT_BITE_SECS * PD_WDT_TICKS_PER_SEC;
+	if (pd_sun50i_wdt_bark_intid != GIC_SPURIOUS_IRQ) {
+		uint32_t n = pd_sun50i_wdt_bark_intid;
+		((volatile uint8_t *)d)[SUN50I_GICD_IPRIORITYR + n] = 0x80;
+		((volatile uint8_t *)d)[SUN50I_GICD_ITARGETSR + n] = 0x01;   // cpu0
+		d[SUN50I_GICD_ICPENDR0 / 4 + n / 32] = 1u << (n % 32);
+		d[SUN50I_GICD_ISENABLER0 / 4 + n / 32] = 1u << (n % 32);
+		w[PD_WDT_EN / 4] = PD_WDT_EN_ENABLE | PD_WDT_EN_BARK_IRQ;
+	} else {
+		w[PD_WDT_EN / 4] = PD_WDT_EN_ENABLE;
+	}
+	__builtin_arm_dsb(DSB_SY);
+}
+
+static void
+pd_sun50i_gic_startup(void)
+{
+	uint64_t gicd_phys, gicc_phys;
+
+	pd_sun50i_gic_locate(&gicd_phys, &gicc_phys);
+	pd_sun50i_gicd = ml_io_map(gicd_phys, SUN50I_GICD_SIZE);
+	pd_sun50i_gicc = ml_io_map(gicc_phys, SUN50I_GICC_SIZE);
+
+	volatile uint32_t *d = (volatile uint32_t *)pd_sun50i_gicd;
+	volatile uint32_t *c = (volatile uint32_t *)pd_sun50i_gicc;
+
+	// the vendor u-boot leaves its own lines (USB for fastboot) enabled: disable and clear every line
+	uint32_t lines = ((d[1] & 0x1f) + 1) * 32;
+	for (uint32_t i = 0; i < lines / 32; i++) {
+		d[SUN50I_GICD_ICENABLER0 / 4 + i] = 0xffffffffu;
+		d[SUN50I_GICD_ICPENDR0 / 4 + i] = 0xffffffffu;
+		d[SUN50I_GICD_ICACTIVER0 / 4 + i] = 0xffffffffu;
+	}
+	((volatile uint8_t *)pd_sun50i_gicd)[SUN50I_GICD_IPRIORITYR + pd_sun50i_timer_intid] = 0x80;
+	d[SUN50I_GICD_ISENABLER0 / 4] = 1u << pd_sun50i_timer_intid;
+	pd_sun50i_wdt_startup(d);
+	d[0] = 1;       // GICD_CTLR, non-secure view: EnableGrp1
+	c[SUN50I_GICC_PMR / 4] = 0xf0;
+	c[SUN50I_GICC_CTLR / 4] = 1;
+	printf("PD-GIC: gicd 0x%llx gicc 0x%llx, timer INTID %u, watchdog %s (bark INTID %u)\n",
+	    gicd_phys, gicc_phys, pd_sun50i_timer_intid, pd_sun50i_wdt ? "armed" : "absent",
+	    pd_sun50i_wdt_bark_intid);
+}
+STARTUP(KMEM, STARTUP_RANK_LAST, pd_sun50i_gic_startup);
+
+#endif /* SUN50I */
+
+#if HAS_GICV3_FIQ
+#include <pexpert/device_tree.h>
+static vm_offset_t pd_gicv2_cpuif;
+#define PD_GICV2_GICC_AIAR  0x020
+#define PD_GICV2_GICC_AEOIR 0x024
+// the gicv3 distributor, for masking spis nobody services
+static vm_offset_t pd_gicd;
+#define PD_GICD_TYPER       0x0004
+#define PD_GICD_ICENABLER   0x0180
+#endif
+
+// the spi each cpu's sleh_irq is servicing, for the gic interrupt controller in iokit (0: none)
+static uint32_t pd_gic_spi[MAX_CPUS];
+
+uint32_t pd_gic_current_spi(void);
+uint32_t
+pd_gic_current_spi(void)
+{
+	return pd_gic_spi[cpu_number()];
+}
+
+void
+sleh_irq(arm_saved_state_t *state)
+{
+	cpu_data_t * cdp __unused             = getCpuDatap();
+#if HAS_GICV3_FIQ
+	uint64_t spi_iar = 0;
+#endif
+#if MACH_ASSERT
+	int preemption_level = sleh_get_preemption_level();
+#endif
+
+#if HAS_GICV3_FIQ
+	// KVM's GICv3 has no Group 0, so there the timer and the IPI SGI arrive here as Group 1
+	if (!pd_gicv2_cpuif) {
+		uint64_t iar = __builtin_arm_rsr64("ICC_IAR1_EL1");
+		uint64_t intid = iar & 0x3ffULL;
+
+		// EOI before the handler, so an IPI raised while it runs is taken again rather than lost
+		if (intid == QEMUVIRT_IPI_SGI) {
+			sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+			__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+			__builtin_arm_isb(ISB_SY);
+			cpu_signal_handler();
+			sleh_interrupt_handler_epilogue();
+			return;
+		}
+		if (intid == QEMUVIRT_TIMER_PPI_VIRT) {
+			sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
+			cdp->cpu_decrementer = -1;
+			ml_interrupt_masked_debug_start(rtclock_intr, DBG_INTR_TYPE_TIMER);
+			rtclock_intr(TRUE);
+			ml_interrupt_masked_debug_end();
+			__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+			__builtin_arm_isb(ISB_SY);
+			sleh_interrupt_handler_epilogue();
+			return;
+		}
+		// a level spi with no handler would fire again on every eoi
+		if (intid >= 32 && intid < GIC_SPURIOUS_IRQ && pd_gicd && cdp->interrupt_handler == NULL)
+			*(volatile uint32_t *)(pd_gicd + PD_GICD_ICENABLER + (intid / 32) * 4) = 1u << (intid % 32);
+		// a serviced spi ends after its handler, once the device has dropped the line
+		if (intid >= 32 && intid < GIC_SPURIOUS_IRQ && cdp->interrupt_handler != NULL) {
+			spi_iar = iar;
+			pd_gic_spi[cdp->cpu_number] = (uint32_t)intid;
+		} else if (intid != GIC_SPURIOUS_IRQ) {
+			__builtin_arm_wsr64("ICC_EOIR1_EL1", iar);
+			__builtin_arm_isb(ISB_SY);
+		}
+	} else {
+		// GICv2: spis are Group 1 irqs, acknowledged and ended through the aliased registers
+		uint32_t iar = *(volatile uint32_t *)(pd_gicv2_cpuif + PD_GICV2_GICC_AIAR);
+		uint32_t intid = iar & 0x3ff;
+
+		if (intid >= 32 && intid < GIC_SPURIOUS_IRQ && cdp->interrupt_handler != NULL) {
+			spi_iar = iar;
+			pd_gic_spi[cdp->cpu_number] = intid;
+		} else if (intid < GIC_SPURIOUS_IRQ) {
+			*(volatile uint32_t *)(pd_gicv2_cpuif + PD_GICV2_GICC_AEOIR) = iar;
+		}
+	}
+#endif /* HAS_GICV3_FIQ */
+
+#if defined(SUN50I)
+	uint32_t iar = pd_sun50i_gicc ? *(volatile uint32_t *)(pd_sun50i_gicc + SUN50I_GICC_IAR) : GIC_SPURIOUS_IRQ;
+	uint32_t intid = iar & 0x3ff;
+
+	// SGI 0 is the scheduler IPI (PDArmGIC sends it through GICD_SGIR): EOI first, so an IPI
+	// raised while the handler runs is taken again rather than lost
+	if (intid == 0) {
+		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_IPI);
+		*(volatile uint32_t *)(pd_sun50i_gicc + SUN50I_GICC_EOIR) = iar;
+		cpu_signal_handler();
+		sleh_interrupt_handler_epilogue();
+		return;
+	}
+	if (intid == pd_sun50i_timer_intid) {
+		pd_sun50i_wdt_pet();
+		// bring-up heartbeat: one line a second for the first minute, so a log read after
+		// a reset shows whether timer interrupts were still arriving when it stopped
+		static uint64_t pd_beat_next;
+		static uint32_t pd_beats;
+		if (__improbable(pd_beats < 60 && mach_absolute_time() >= pd_beat_next)) {
+			uint64_t second;
+			nanoseconds_to_absolutetime(NSEC_PER_SEC, &second);
+			pd_beat_next = mach_absolute_time() + second;
+			printf("PD-TICK %u cpu %d\n", pd_beats++, cpu_number());
+		}
+		if (__improbable(pd_panic_after != 0 && !pd_panic_after_fired)) {
+			if (pd_panic_after_deadline == 0) {
+				nanoseconds_to_absolutetime((uint64_t)pd_panic_after * NSEC_PER_SEC, &pd_panic_after_deadline);
+			} else if (mach_absolute_time() > pd_panic_after_deadline) {
+				pd_panic_after_fired = true;
+				*(volatile uint32_t *)(pd_sun50i_gicc + SUN50I_GICC_EOIR) = iar;
+				panic("pd_panic_after: %u s since boot, resetting to read the log", pd_panic_after);
+			}
+		}
+		sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_TIMER);
+		cdp->cpu_decrementer = -1;
+		ml_interrupt_masked_debug_start(rtclock_intr, DBG_INTR_TYPE_TIMER);
+		rtclock_intr(TRUE);
+		ml_interrupt_masked_debug_end();
+		*(volatile uint32_t *)(pd_sun50i_gicc + SUN50I_GICC_EOIR) = iar;
+		sleh_interrupt_handler_epilogue();
+		return;
+	}
+	if (intid == pd_sun50i_wdt_bark_intid && pd_sun50i_wdt) {
+		*(volatile uint32_t *)(pd_sun50i_gicc + SUN50I_GICC_EOIR) = iar;
+		panic("watchdog bark: no timer interrupt or idle loop on any cpu for %u s", PD_WDT_BARK_SECS);
+	}
+#endif /* SUN50I */
+
+	sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+
+#if USE_APPLEARMSMP
+	PE_handle_ext_interrupt();
+#elif defined(SUN50I)
+	if (intid < GIC_SPURIOUS_IRQ && cdp->interrupt_handler != NULL) {
+		// the iokit gic controller reads the spi being serviced from here
+		pd_gic_spi[cdp->cpu_number] = intid >= 32 ? intid : 0;
+		cdp->interrupt_handler(cdp->interrupt_target,
+		    cdp->interrupt_refCon,
+		    cdp->interrupt_nub,
+		    cdp->interrupt_source);
+		pd_gic_spi[cdp->cpu_number] = 0;
+	} else if (intid < GIC_SPURIOUS_IRQ) {
+		// nobody to service a level interrupt: mask it rather than take it forever
+		*(volatile uint32_t *)(pd_sun50i_gicd + SUN50I_GICD_ICENABLER0 + (intid / 32) * 4) = 1u << (intid % 32);
+	}
+	if (intid < GIC_SPURIOUS_IRQ) {
+		*(volatile uint32_t *)(pd_sun50i_gicc + SUN50I_GICC_EOIR) = iar;
+	}
+#else
+	/* Run the registered interrupt handler. */
+	// an interrupt firmware left enabled can arrive before IOKit installs one
+	if (cdp->interrupt_handler != NULL) {
+		cdp->interrupt_handler(cdp->interrupt_target,
+		    cdp->interrupt_refCon,
+		    cdp->interrupt_nub,
+		    cdp->interrupt_source);
+	}
+#if HAS_GICV3_FIQ
+	if (spi_iar != 0) {
+		pd_gic_spi[cdp->cpu_number] = 0;
+		if (pd_gicv2_cpuif) {
+			*(volatile uint32_t *)(pd_gicv2_cpuif + PD_GICV2_GICC_AEOIR) = (uint32_t)spi_iar;
+		} else {
+			__builtin_arm_wsr64("ICC_EOIR1_EL1", spi_iar);
+			__builtin_arm_isb(ISB_SY);
+		}
+	}
+#endif
+#endif
+
+	entropy_collect();
+
+
+	sleh_interrupt_handler_epilogue();
+#if MACH_ASSERT
+	if (preemption_level != sleh_get_preemption_level()) {
+		panic("irq handler %p changed preemption level from %d to %d", cdp->interrupt_handler, preemption_level, sleh_get_preemption_level());
+	}
+#endif
+}
+
+#if HAS_GICV3_FIQ
+// QEMU virt under KVM on a GICv2 host (Pi 5): no ICC_* system registers, so the
+// Group 0 acknowledge/EOI goes through the memory-mapped CPU interface instead
+#define PD_GICV2_GICC_PHYS  0x08010000ULL
+#define PD_GICV2_GICC_IAR   0x00C
+#define PD_GICV2_GICC_EOIR  0x010
+
+static void
+pd_gicv2_startup(void)
+{
+	DTEntry gic;
+	char const *compat;
+	unsigned int size;
+
+	// HVF emulates a GICv3 but reports ID_AA64PFR0_EL1.GIC = 0: the tree's gic-v3 wins
+	if (SecureDTLookupEntry(NULL, "/arm-io/gic", &gic) == kSuccess &&
+	    SecureDTGetProperty(gic, "compatible", (void const **)&compat, &size) == kSuccess &&
+	    size >= 10 && strncmp(compat, "arm,gic-v3", 10) == 0) {
+		return;
+	}
+	// ID_AA64PFR0_EL1.GIC: 0 means no GICv3 system register interface
+	if (((__builtin_arm_rsr64("ID_AA64PFR0_EL1") >> 24) & 0xf) == 0) {
+		pd_gicv2_cpuif = ml_io_map(PD_GICV2_GICC_PHYS, 0x2000);
+	}
+}
+STARTUP(KMEM, STARTUP_RANK_LAST, pd_gicv2_startup);
+
+// pd never enables an spi, so any the firmware left on would reach sleh_irq before iokit
+// installs a handler: mask them all before interrupts are first enabled
+static void
+pd_gicd_startup(void)
+{
+	DTEntry armio, gic;
+	void const *prop;
+	unsigned int size;
+	uint64_t base, lines;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io", &armio) != kSuccess ||
+	    SecureDTLookupEntry(NULL, "/arm-io/gic", &gic) != kSuccess)
+		return;
+	if (SecureDTGetProperty(gic, "compatible", &prop, &size) != kSuccess || size < 10 ||
+	    strncmp(prop, "arm,gic-v3", 10) != 0)
+		return;
+	if (SecureDTGetProperty(armio, "ranges", &prop, &size) != kSuccess || size < 16)
+		return;
+	base = ((const uint64_t *)prop)[1];
+	if (SecureDTGetProperty(gic, "reg", &prop, &size) != kSuccess || size < 8)
+		return;
+
+	pd_gicd = ml_io_map(base + ((const uint64_t *)prop)[0], 0x10000);
+	lines = (*(volatile uint32_t *)(pd_gicd + PD_GICD_TYPER) & 0x1f) + 1;
+	for (uint64_t n = 1; n < lines; n++) {
+		*(volatile uint32_t *)(pd_gicd + PD_GICD_ICENABLER + n * 4) = 0xffffffffu;
+	}
+}
+STARTUP(KMEM, STARTUP_RANK_LAST, pd_gicd_startup);
+
+static inline uint64_t
+pd_gic_ack0(void)
+{
+	if (pd_gicv2_cpuif) {
+		return *(volatile uint32_t *)(pd_gicv2_cpuif + PD_GICV2_GICC_IAR);
+	}
+	return __builtin_arm_rsr64("ICC_IAR0_EL1");
+}
+
+static inline void
+pd_gic_eoi0(uint64_t iar)
+{
+	if (pd_gicv2_cpuif) {
+		*(volatile uint32_t *)(pd_gicv2_cpuif + PD_GICV2_GICC_EOIR) = (uint32_t)iar;
+		return;
+	}
+	__builtin_arm_wsr64("ICC_EOIR0_EL1", iar);
+	__builtin_arm_isb(ISB_SY);
+}
+#endif /* HAS_GICV3_FIQ */
+
+void
+sleh_fiq(arm_saved_state_t *state)
+{
+	unsigned int type   = DBG_INTR_TYPE_UNKNOWN;
+#if HAS_GICV3_FIQ
+	// The GIC is the only Group 0 source here, so acknowledge first and classify from the INTID:
+	// the SGI is a scheduler IPI, rest is the timer
+	uint64_t iar = pd_gic_ack0();
+
+	if ((iar & 0x3ffULL) == QEMUVIRT_IPI_SGI) {
+		type = DBG_INTR_TYPE_IPI;
+	}
+#endif /* HAS_GICV3_FIQ */
+#if MACH_ASSERT
+	int preemption_level = sleh_get_preemption_level();
+#endif
+
+#if CONFIG_CPU_COUNTERS && !CPMU_AIC_PMI
+#define FIQ_PMI 1
+	uint64_t pmcr0 = 0, upmsr = 0;
+#endif /* CONFIG_CPU_COUNTERS && !CPMU_AIC_PMI */
+
+#if defined(HAS_IPI)
+	boolean_t    is_ipi = FALSE;
+	uint64_t     ipi_sr = 0;
+
+	if (gFastIPI) {
+		MRS(ipi_sr, "S3_5_C15_C1_1");
+
+		if (ipi_sr & ARM64_IPISR_IPI_PENDING) {
+			is_ipi = TRUE;
+		}
+	}
+
+	if (is_ipi) {
+		type = DBG_INTR_TYPE_IPI;
+	} else
+#endif /* defined(HAS_IPI) */
+	if (ml_get_timer_pending()) {
+		type = DBG_INTR_TYPE_TIMER;
+	}
+#if FIQ_PMI
+	/* Consult the PMI sysregs after IPI/timer classification.
+	 */
+	else if (cpc_pmi_pending(&pmcr0, &upmsr)) {
+		type = DBG_INTR_TYPE_PMI;
+	}
+#endif /* FIQ_PMI */
+
+	sleh_interrupt_handler_prologue(state, type);
+
+#if APPLEVIRTUALPLATFORM && !HAS_GICV3_FIQ
+	uint64_t iar = __builtin_arm_rsr64("ICC_IAR0_EL1");
+#endif
+
+#if defined(HAS_IPI)
+	if (type == DBG_INTR_TYPE_IPI) {
+		/*
+		 * Order is important here: we must ack the IPI by writing IPI_SR
+		 * before we call cpu_signal_handler().  Otherwise, there will be
+		 * a window between the completion of pending-signal processing in
+		 * cpu_signal_handler() and the ack during which a newly-issued
+		 * IPI to this CPU may be lost.  ISB is required to ensure the msr
+		 * is retired before execution of cpu_signal_handler().
+		 */
+		MSR("S3_5_C15_C1_1", ARM64_IPISR_IPI_PENDING);
+		__builtin_arm_isb(ISB_SY);
+		cpu_signal_handler();
+	} else
+#endif /* defined(HAS_IPI) */
+#if HAS_GICV3_FIQ
+	if (type == DBG_INTR_TYPE_IPI) {
+		cpu_signal_handler();
+	} else
+#endif /* HAS_GICV3_FIQ */
+#if FIQ_PMI
+	if (type == DBG_INTR_TYPE_PMI) {
+		ml_interrupt_masked_debug_start(cpc_fiq, DBG_INTR_TYPE_PMI);
+		cpc_fiq(getCpuDatap(), pmcr0, upmsr);
+		ml_interrupt_masked_debug_end();
+	} else
+#endif /* FIQ_PMI */
+	{
+		/*
+		 * We don't know that this is a timer, but we don't have insight into
+		 * the other interrupts that go down this path.
+		 */
+
+		cpu_data_t *cdp = getCpuDatap();
+
+		cdp->cpu_decrementer = -1; /* Large */
+
+		/*
+		 * ARM64_TODO: whether we're coming from userland is ignored right now.
+		 * We can easily thread it through, but not bothering for the
+		 * moment (AArch32 doesn't either).
+		 */
+		ml_interrupt_masked_debug_start(rtclock_intr, DBG_INTR_TYPE_TIMER);
+		rtclock_intr(TRUE);
+		ml_interrupt_masked_debug_end();
+	}
+
+#if HAS_GICV3_FIQ
+	if ((iar & 0x3ffULL) != GIC_SPURIOUS_IRQ) {
+		pd_gic_eoi0(iar);
+	}
+#elif APPLEVIRTUALPLATFORM
+	if (iar != GIC_SPURIOUS_IRQ) {
+		__builtin_arm_wsr64("ICC_EOIR0_EL1", iar);
+		__builtin_arm_isb(ISB_SY);
+	}
+#endif
+
+	sleh_interrupt_handler_epilogue();
+#if MACH_ASSERT
+	if (preemption_level != sleh_get_preemption_level()) {
+		panic("fiq type %u changed preemption level from %d to %d", type, preemption_level, sleh_get_preemption_level());
+	}
+#endif
+}
+
+void
+sleh_serror(arm_context_t *context, uint64_t esr, vm_offset_t far)
+{
+	task_vtimer_check(current_thread());
+
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCP_SERR_ARM, 0) | DBG_FUNC_START,
+	    esr, VM_KERNEL_ADDRHIDE(far));
+	arm_saved_state_t *state = &context->ss;
+#if MACH_ASSERT
+	int preemption_level = sleh_get_preemption_level();
+#endif
+
+	if (PSR64_IS_USER(get_saved_state_cpsr(state))) {
+		/* Sanitize FAR (only if we came from userspace) */
+		saved_state64(state)->far = 0;
+	}
+
+	ASSERT_CONTEXT_SANITY(context);
+	arm64_platform_error(state, esr, far, PLAT_ERR_SRC_ASYNC);
+#if MACH_ASSERT
+	if (preemption_level != sleh_get_preemption_level()) {
+		panic("serror changed preemption level from %d to %d", preemption_level, sleh_get_preemption_level());
+	}
+#endif
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCP_SERR_ARM, 0) | DBG_FUNC_END,
+	    esr, VM_KERNEL_ADDRHIDE(far));
+}
+
+void
+mach_syscall_trace_exit(unsigned int retval,
+    unsigned int call_number)
+{
+	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
+	    MACHDBG_CODE(DBG_MACH_EXCP_SC, (call_number)) |
+	    DBG_FUNC_END, retval, 0, 0, 0, 0);
+}
+
+__attribute__((noreturn))
+void
+thread_syscall_return(kern_return_t error)
+{
+	thread_t thread;
+	struct arm_saved_state *state;
+
+	thread = current_thread();
+	state = get_user_regs(thread);
+
+	assert(is_saved_state64(state));
+	saved_state64(state)->x[0] = error;
+
+#if MACH_ASSERT
+	kern_allocation_name_t
+	prior __assert_only = thread_get_kernel_state(thread)->allocation_name;
+	assertf(prior == NULL, "thread_set_allocation_name(\"%s\") not cleared", kern_allocation_get_name(prior));
+#endif /* MACH_ASSERT */
+
+	if (kdebug_enable) {
+		/* Invert syscall number (negative for a mach syscall) */
+		mach_syscall_trace_exit(error, (-1) * get_saved_state_svc_number(state));
+	}
+
+	thread_exception_return();
+}
+
+void
+syscall_trace(
+	struct arm_saved_state * regs __unused)
+{
+	/* kprintf("syscall: %d\n", saved_state64(regs)->x[16]);  */
+}
+
+static void
+sleh_interrupt_handler_prologue(arm_saved_state_t *state, unsigned int type)
+{
+	const bool is_user = PSR64_IS_USER(get_saved_state_cpsr(state));
+
+	if (is_user == true) {
+		/* Sanitize FAR (only if the interrupt occurred while the CPU was in usermode) */
+		saved_state64(state)->far = 0;
+	}
+
+	recount_enter_interrupt();
+
+	task_vtimer_check(current_thread());
+
+	uint64_t pc = is_user ? get_saved_state_pc(state) :
+	    VM_KERNEL_UNSLIDE(get_saved_state_pc(state));
+
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCP_INTR, 0) | DBG_FUNC_START,
+	    0, pc, is_user, type);
+}
+
+static void
+sleh_interrupt_handler_epilogue(void)
+{
+#if KPERF
+	kperf_interrupt();
+#endif /* KPERF */
+	KDBG_RELEASE(MACHDBG_CODE(DBG_MACH_EXCP_INTR, 0) | DBG_FUNC_END);
+	recount_leave_interrupt();
+}
+
+void
+sleh_invalid_stack(arm_context_t *context, uint64_t esr __unused, vm_offset_t far __unused)
+{
+	thread_t thread = current_thread();
+	vm_offset_t kernel_stack_bottom, sp;
+
+	sp = get_saved_state_sp(&context->ss);
+	vm_offset_t kstackptr = (vm_offset_t)thread->machine.kstackptr;
+	kernel_stack_bottom = round_page(kstackptr) - KERNEL_STACK_SIZE;
+
+	if ((sp < kernel_stack_bottom) && (sp >= (kernel_stack_bottom - PAGE_SIZE))) {
+		panic_with_thread_kernel_state("Invalid kernel stack pointer (probable overflow).", &context->ss);
+	}
+
+	panic_with_thread_kernel_state("Invalid kernel stack pointer (probable corruption or early boot).", &context->ss);
+}
+
+
+#if MACH_ASSERT
+static int trap_handled;
+static const char *
+handle_recoverable_kernel_trap(
+	__unused void     *tstate,
+	uint16_t          comment)
+{
+	assert(comment == TEST_RECOVERABLE_SOFT_TRAP);
+
+	printf("Recoverable trap handled.\n");
+	trap_handled = 1;
+
+	return NULL;
+}
+
+KERNEL_BRK_DESCRIPTOR_DEFINE(test_desc,
+    .type                = TRAP_TELEMETRY_TYPE_KERNEL_BRK_TEST,
+    .base                = TEST_RECOVERABLE_SOFT_TRAP,
+    .max                 = TEST_RECOVERABLE_SOFT_TRAP,
+    .options             = BRK_TELEMETRY_OPTIONS_RECOVERABLE_DEFAULT(
+	    /* enable_telemetry */ false),
+    .handle_breakpoint   = handle_recoverable_kernel_trap);
+
+static int
+recoverable_kernel_trap_test(__unused int64_t in, int64_t *out)
+{
+	ml_recoverable_trap(TEST_RECOVERABLE_SOFT_TRAP);
+
+	*out = trap_handled;
+	return 0;
+}
+
+SYSCTL_TEST_REGISTER(recoverable_kernel_trap, recoverable_kernel_trap_test);
+
+#endif
+
+#if CONFIG_SPTM
+/**
+ * Evaluate the panic lockdown policy for a synchronous EL1 SP0 exception
+ *
+ * Returns true if panic lockdown should be initiated (but does not itself do
+ * so)
+ */
+__SECURITY_STACK_DISALLOWED_PUSH
+bool
+sleh_panic_lockdown_should_initiate_el1_sp0_sync(uint64_t esr, uint64_t elr,
+    uint64_t far, uint64_t spsr)
+{
+	const esr_exception_class_t class = ESR_EC(esr);
+	const bool any_exceptions_masked = spsr & DAIF_STANDARD_DISABLE;
+
+	switch (class) {
+	case ESR_EC_PC_ALIGN:   /* PC misaligned (should never happen) */
+	case ESR_EC_IABORT_EL1: /* Potential iPAC failure (poisoned PC) */
+	case ESR_EC_PAC_FAIL: { /* FPAC fail */
+		return true;
+	}
+
+	case ESR_EC_BRK_AARCH64: {
+		/*
+		 * Breakpoints are used on non-FPAC systems to signal some PAC failures
+		 */
+#if HAS_TELEMETRY_KERNEL_BRK
+		const struct kernel_brk_descriptor *desc;
+		desc = find_kernel_brk_descriptor_by_comment(ISS_BRK_COMMENT(esr));
+		if (desc && desc->options.recoverable) {
+			/*
+			 * We matched a breakpoint and it's recoverable, skip lockdown.
+			 */
+			return false;
+		}
+#endif /* HAS_TELEMETRY_KERNEL_BRK */
+
+		/*
+		 * If we don't support telemetry breakpoints and/or didn't match a
+		 * recoverable breakpoint, the exception is fatal.
+		 */
+		return true;
+	}
+
+	case ESR_EC_DABORT_EL1: {
+		const struct copyio_recovery_entry *cre =
+		    find_copyio_recovery_entry(elr);
+		if (cre) {
+#if HAS_MTE
+			/*
+			 * Tag check faults are fatal in copyio when they impact a kernel
+			 * address and the copyio function is not permitted to recover from
+			 * a tag check fault on a kernel address.
+			 *
+			 * We can determine if we faulted on a kernel address by checking
+			 * any of the cannonical address bits. This works since
+			 * copy_validate will reject user addresses with any of these
+			 * cannonical bits set before reaching the underlying copyio
+			 * functions, and so bits set here means this is actually a kernel
+			 * address.
+			 */
+			const bool is_kernel_far = far & TTBR_SELECTOR;
+			if (is_kernel_far &&
+			    is_tag_check_fault(ISS_DA_FSC(ESR_ISS(esr))) &&
+			    !cre->recover_from_kernel_read_tag_check_fault &&
+			    !cre->recover_from_kernel_write_tag_check_fault) {
+				return true;
+			}
+#endif /* HAS_MTE */
+
+			/*
+			 * copyio faults are recoverable regardless of whether or not
+			 * exceptions are masked.
+			 */
+			return false;
+		}
+
+#if HAS_MTE
+		/*
+		 * Kernel tag check faults are always fatal outside of copyio.
+		 */
+		if (is_tag_check_fault(ISS_DA_FSC(ESR_ISS(esr)))) {
+			return true;
+		}
+#endif /* HAS_MTE */
+
+
+		/*
+		 * Heuristic: if FAR != XPAC(FAR), the pointer was likely corrupted
+		 * due to PAC.
+		 */
+		const uint64_t far_stripped =
+		    (uint64_t)ptrauth_strip((void *)far, ptrauth_key_asda);
+
+		if (far != far_stripped) {
+			/* potential dPAC failure (poisoined address) */
+			return true;
+		}
+
+		if (any_exceptions_masked && startup_phase >= STARTUP_SUB_LOCKDOWN) {
+			/*
+			 * Any data abort taken with exceptions masked is fatal if we're
+			 * past early boot.
+			 */
+			return true;
+		}
+
+		return false;
+	}
+
+	case ESR_EC_UNCATEGORIZED: {
+		/* Undefined instruction (GDBTRAP for stackshots, etc.) */
+		return false;
+	}
+
+	case ESR_EC_BTI_FAIL: {
+		/* Kernel BTI exceptions are always fatal */
+		return true;
+	}
+
+	default: {
+		if (!any_exceptions_masked) {
+			/*
+			 * When exceptions are not masked, we default-allow exceptions.
+			 */
+			return false;
+		}
+
+		if (startup_phase < STARTUP_SUB_LOCKDOWN) {
+			/*
+			 * Ignore early boot exceptions even if exceptions are masked.
+			 */
+			return false;
+		}
+
+		/* Default-deny all others when exceptions are masked */
+		return true;
+	}
+	}
+}
+__SECURITY_STACK_DISALLOWED_POP
+#endif /* CONFIG_SPTM */

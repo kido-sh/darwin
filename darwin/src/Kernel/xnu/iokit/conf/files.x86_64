@@ -1,0 +1,16 @@
+
+# Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+# libIOKit
+
+iokit/Kernel/IOSyncer.cpp				optional iokitcpp
+
+# an x86 platform expert can back IODTNVRAM with a controller, as arm64 does
+iokit/Families/IONVRAM/IONVRAMController.cpp				optional iokitcpp
+
+iokit/Kernel/x86_64/IOAsmSupport.s                            standard
+
+# Power Domains
+iokit/Kernel/IOPMrootDomain.cpp    			    optional iokitcpp
+
+# Key Store helper
+iokit/Kernel/i386/IOKeyStoreHelper.cpp			    standard

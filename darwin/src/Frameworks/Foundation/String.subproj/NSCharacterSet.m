@@ -1,0 +1,220 @@
+/*
+ * Copyright (C) 2026, PureDarwin Project.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#import <Foundation/NSCharacterSet.h>
+#include <CoreFoundation/CFCharacterSet.h>
+#include <CoreFoundation/ForFoundationOnly.h>
+
+extern Boolean _CFIsObjC(CFTypeID typeID, void *obj);
+
+// a class constructor hands back an autoreleased object, CF creates are owned and may be NULL
+static inline id __NSAutoreleaseCF(CFTypeRef cf) {
+    return cf != NULL ? (id)CFAutorelease(cf) : nil;
+}
+
+extern Boolean _CFCharacterSetIsLongCharacterMember(CFCharacterSetRef set,
+                                                     UTF32Char character);
+
+/* Bridged straight onto CFCharacterSet, the same way NSArray is onto CFArray. */
+
+@implementation NSCharacterSet
+
+/* NSMutableCharacterSet is a subclass, so retaining self could hand back a
+ * mutable object; CFCharacterSetCreateCopy always yields an immutable one. */
+- (id)copyWithZone:(NSZone *)zone {
+    return (id)CFCharacterSetCreateCopy(kCFAllocatorDefault,
+                                        (CFCharacterSetRef)self);
+}
+
+- (id)mutableCopyWithZone:(NSZone *)zone {
+    return (id)CFCharacterSetCreateMutableCopy(kCFAllocatorDefault,
+                                               (CFCharacterSetRef)self);
+}
+
+static NSCharacterSet *_predefined(CFCharacterSetPredefinedSet which) {
+    return (NSCharacterSet *)CFCharacterSetCreateCopy(kCFAllocatorDefault,
+                                                      CFCharacterSetGetPredefined(which));
+}
+
++ (NSCharacterSet *)alphanumericCharacterSet {
+    return _predefined(kCFCharacterSetAlphaNumeric);
+}
+
++ (NSCharacterSet *)controlCharacterSet {
+    return _predefined(kCFCharacterSetControl);
+}
+
++ (NSCharacterSet *)decimalDigitCharacterSet {
+    return _predefined(kCFCharacterSetDecimalDigit);
+}
+
++ (NSCharacterSet *)letterCharacterSet {
+    return _predefined(kCFCharacterSetLetter);
+}
+
++ (NSCharacterSet *)lowercaseLetterCharacterSet {
+    return _predefined(kCFCharacterSetLowercaseLetter);
+}
+
++ (NSCharacterSet *)newlineCharacterSet {
+    return _predefined(kCFCharacterSetNewline);
+}
+
++ (NSCharacterSet *)punctuationCharacterSet {
+    return _predefined(kCFCharacterSetPunctuation);
+}
+
++ (NSCharacterSet *)uppercaseLetterCharacterSet {
+    return _predefined(kCFCharacterSetUppercaseLetter);
+}
+
++ (NSCharacterSet *)whitespaceAndNewlineCharacterSet {
+    return _predefined(kCFCharacterSetWhitespaceAndNewline);
+}
+
++ (NSCharacterSet *)whitespaceCharacterSet {
+    return _predefined(kCFCharacterSetWhitespace);
+}
+
+// RFC 3986 component sets, ASCII letters and digits plus each component's allowed punctuation
+static NSCharacterSet *_urlComponentSet(CFStringRef punctuation) {
+    CFMutableStringRef characters = CFStringCreateMutable(kCFAllocatorDefault, 0);
+
+    CFStringAppend(characters, CFSTR("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"));
+    CFStringAppend(characters, punctuation);
+    CFCharacterSetRef set = CFCharacterSetCreateWithCharactersInString(kCFAllocatorDefault, characters);
+    CFRelease(characters);
+    return (NSCharacterSet *)CFAutorelease(set);
+}
+
++ (NSCharacterSet *)URLFragmentAllowedCharacterSet {
+    return _urlComponentSet(CFSTR("!$&'()*+,-./:;=?@_~"));
+}
+
++ (NSCharacterSet *)URLHostAllowedCharacterSet {
+    return _urlComponentSet(CFSTR("!$&'()*+,-.:;=[]_~"));
+}
+
++ (NSCharacterSet *)URLPasswordAllowedCharacterSet {
+    return _urlComponentSet(CFSTR("!$&'()*+,-.;=_~"));
+}
+
++ (NSCharacterSet *)URLPathAllowedCharacterSet {
+    return _urlComponentSet(CFSTR("!$&'()*+,-./:=@_~"));
+}
+
++ (NSCharacterSet *)URLQueryAllowedCharacterSet {
+    return _urlComponentSet(CFSTR("!$&'()*+,-./:;=?@_~"));
+}
+
++ (NSCharacterSet *)URLUserAllowedCharacterSet {
+    return _urlComponentSet(CFSTR("!$&'()*+,-.;=_~"));
+}
+
++ (NSCharacterSet *)characterSetWithCharactersInString:(NSString *)string {
+    return (NSCharacterSet *)__NSAutoreleaseCF(CFCharacterSetCreateWithCharactersInString(
+        kCFAllocatorDefault, (CFStringRef)string));
+}
+
++ (NSCharacterSet *)characterSetWithRange:(NSRange)range {
+    return (NSCharacterSet *)__NSAutoreleaseCF(CFCharacterSetCreateWithCharactersInRange(
+        kCFAllocatorDefault, CFRangeMake((CFIndex)range.location, (CFIndex)range.length)));
+}
+
+- (BOOL)characterIsMember:(unichar)character {
+    return _CFCharacterSetIsLongCharacterMember((CFCharacterSetRef)self,
+                                                (UTF32Char)character) ? YES : NO;
+}
+
+- (BOOL)longCharacterIsMember:(UTF32Char)character {
+    return _CFCharacterSetIsLongCharacterMember((CFCharacterSetRef)self,
+                                                character) ? YES : NO;
+}
+
+- (NSCharacterSet *)invertedSet {
+    return (NSCharacterSet *)__NSAutoreleaseCF(CFCharacterSetCreateInvertedSet(kCFAllocatorDefault,
+                                                             (CFCharacterSetRef)self));
+}
+
+/* CoreFoundation uses one runtime class for mutable and immutable sets. */
+- (void)addCharactersInRange:(NSRange)range {
+    CFCharacterSetAddCharactersInRange((CFMutableCharacterSetRef)self,
+                                       CFRangeMake((CFIndex)range.location,
+                                                   (CFIndex)range.length));
+}
+
+- (void)addCharactersInString:(NSString *)string {
+    CFCharacterSetAddCharactersInString((CFMutableCharacterSetRef)self,
+                                        (CFStringRef)string);
+}
+
+- (void)removeCharactersInRange:(NSRange)range {
+    CFCharacterSetRemoveCharactersInRange((CFMutableCharacterSetRef)self,
+                                          CFRangeMake((CFIndex)range.location,
+                                                      (CFIndex)range.length));
+}
+
+- (void)removeCharactersInString:(NSString *)string {
+    CFCharacterSetRemoveCharactersInString((CFMutableCharacterSetRef)self,
+                                           (CFStringRef)string);
+}
+
+- (void)invert {
+    CFCharacterSetInvert((CFMutableCharacterSetRef)self);
+}
+
+
+// CF owns the count of objects CF made, NSObject's would let CFRelease free them under a retainer.
+// Instances of ObjC subclasses keep NSObject's count
+- (id)retain {
+    if (_CFIsObjC(CFCharacterSetGetTypeID(), (void *)self))
+        return [super retain];
+    CFRetain((CFTypeRef)self);
+    return self;
+}
+
+- (oneway void)release {
+    if (_CFIsObjC(CFCharacterSetGetTypeID(), (void *)self)) {
+        [super release];
+        return;
+    }
+    CFRelease((CFTypeRef)self);
+}
+
+- (NSUInteger)retainCount {
+    if (_CFIsObjC(CFCharacterSetGetTypeID(), (void *)self))
+        return [super retainCount];
+    return (NSUInteger)CFGetRetainCount((CFTypeRef)self);
+}
+@end
+
+#if DEPLOYMENT_RUNTIME_OBJC
+__attribute__((constructor))
+static void __NSCharacterSetBridgeInit(void) {
+    _CFRuntimeBridgeClasses(CFCharacterSetGetTypeID(), "NSCharacterSet");
+}
+#endif
+
+@implementation NSMutableCharacterSet
+
++ (instancetype)new {
+    return (id)CFCharacterSetCreateMutable(kCFAllocatorDefault);
+}
+
+- (instancetype)init {
+    return (id)CFCharacterSetCreateMutable(kCFAllocatorDefault);
+}
+
++ (NSMutableCharacterSet *)characterSetWithRange:(NSRange)range {
+    CFMutableCharacterSetRef set = CFCharacterSetCreateMutable(kCFAllocatorDefault);
+    CFCharacterSetAddCharactersInRange(set, CFRangeMake((CFIndex)range.location,
+                                                        (CFIndex)range.length));
+    return (NSMutableCharacterSet *)__NSAutoreleaseCF(set);
+}
+
+@end

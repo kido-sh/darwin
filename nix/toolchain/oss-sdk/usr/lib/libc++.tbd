@@ -1,0 +1,7 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ arm64-macos ]
+install-name:    '/usr/lib/libc++.1.dylib'
+current-version: 1
+compatibility-version: 1
+...

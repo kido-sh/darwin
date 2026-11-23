@@ -1,0 +1,79 @@
+/*
+ * Copyright (C) 2026, Samuel Zormeister.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#ifndef NSDictionary_h
+#define NSDictionary_h
+
+#import <Foundation/NSObject.h>
+#import <Foundation/NSEnumerator.h>
+#import <Foundation/NSObjCRuntime.h>
+#import <Foundation/NSArray.h>
+
+@class NSURL, NSError, NSString;
+
+@interface NSDictionary<__covariant KeyType, __covariant ObjectType> : NSObject
+
+- (instancetype)initWithDictionary:(NSDictionary *)dictionary;
+- (instancetype)initWithObjectsAndKeys:(id)firstObject, ...;
+- (instancetype)initWithObjects:(NSArray *)objects forKeys:(NSArray *)keys;
+
++ (instancetype)dictionary;
++ (instancetype)dictionaryWithObject:(ObjectType)object forKey:(KeyType)key;
++ (instancetype)dictionaryWithObjectsAndKeys:(nullable ObjectType)firstObject, ...;
++ (instancetype)dictionaryWithObjects:(NSArray<ObjectType> *)objects
+                               forKeys:(NSArray<KeyType> *)keys;
++ (instancetype)dictionaryWithDictionary:(NSDictionary<KeyType, ObjectType> *)dictionary;
+/* The compiler emits +dictionaryWithObjects:forKeys:count: for a @{...}
+ * literal, so it is API rather than convenience. */
++ (instancetype)dictionaryWithObjects:(const ObjectType _Nonnull [_Nullable])objects
+                              forKeys:(const KeyType _Nonnull [_Nullable])keys
+                                count:(NSUInteger)count;
+
+/* The plist readers. -contentsOfURL: is what NSProcessInfo-free code uses to
+ * read SystemVersion.plist and friends; both go through CFPropertyList. */
++ (nullable instancetype)dictionaryWithContentsOfURL:(NSURL *)url;
++ (nullable instancetype)dictionaryWithContentsOfURL:(NSURL *)url
+                                               error:(NSError **)error;
++ (nullable instancetype)dictionaryWithContentsOfFile:(NSString *)path;
+
+- (NSUInteger)count;
+- (nullable id)objectForKey:(id)key;
+- (nullable id)objectForKeyedSubscript:(id)key;
+- (NSUInteger)countByEnumeratingWithState:(NSFastEnumerationState *)state
+                                  objects:(id __unsafe_unretained [])buffer
+                                    count:(NSUInteger)length;
+- (NSArray<KeyType> *)allKeys;
+- (BOOL)isEqualToDictionary:(NSDictionary *)other;
+- (NSArray<ObjectType> *)allValues;
+- (BOOL)writeToFile:(NSString *)path atomically:(BOOL)atomically;
+- (BOOL)writeToURL:(NSURL *)url error:(NSError **)error;
+- (NSArray<KeyType> *)keysSortedByValueUsingSelector:(SEL)comparator;
+- (id)valueForKey:(NSString *)key;
+- (NSEnumerator *)keyEnumerator;
+- (NSEnumerator *)objectEnumerator;
+- (void)enumerateKeysAndObjectsUsingBlock:(void (^)(KeyType key, ObjectType obj, BOOL *stop))block;
+
+- (NSArray *)allKeysForObject:(id)object;
+@end
+
+@interface NSMutableDictionary<KeyType, ObjectType> : NSDictionary<KeyType, ObjectType>
+
++ (instancetype)dictionaryWithCapacity:(NSUInteger)capacity;
+- (instancetype)initWithCapacity:(NSUInteger)capacity;
+
+- (void)setObject:(id)object forKey:(id)key;
+- (void)setObject:(id)object forKeyedSubscript:(id)key;
+- (void)removeObjectForKey:(id)key;
+- (void)addEntriesFromDictionary:(NSDictionary *)dictionary;
+- (void)removeAllObjects;
+- (void)removeObjectsForKeys:(NSArray *)keys;
+- (void)setDictionary:(NSDictionary *)dictionary;
+
+@end
+
+#endif /* NSDictionary_h */

@@ -1,0 +1,56 @@
+/*
+ * Copyright (C) 2026, Samuel Zormeister.
+ *
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/.
+ */
+
+#include "ccpost_internal.h"
+
+#if !CC_PLATFORM_WINDOWS
+#define CCPOST_RUN_FUNCTION(x) ({            \
+        cc_post_log(#x " BEGIN");            \
+        uint64_t start = cc_absolute_time(); \
+        cc_error_t err = x();               \
+        uint64_t end = cc_absolute_time(); \
+        if (err) {                          \
+            cc_post_log(#x " FAIL");         \
+            return err;                     \
+        } else {                            \
+            cc_post_log(#x " PASS (in %llu ms)", cc_absolute_time_msec(end - start));         \
+        }                                   \
+        err;                                \
+    })
+#else
+#define CCPOST_RUN_FUNCTION(x)             \
+        cc_post_log(#x " BEGIN");           \
+        err = x();                          \
+        if (err) {                          \
+            cc_post_log(#x " FAIL");         \
+            return err;                     \
+        } else {                            \
+            cc_post_log(#x " PASS");         \
+        }                                   \
+        err;                                
+#endif
+
+#include "ccpost_internal.h"
+
+cc_error_t ccpost_validate(void)
+{
+    cc_error_t err = CCERR_OK;
+    cc_post_log("BEGINNING PREFLIGHT TESTS.");
+
+    err |= CCPOST_RUN_FUNCTION(ccpost_aes_ecb_validate);
+    err |= CCPOST_RUN_FUNCTION(ccpost_aes_cbc_validate);
+    err |= CCPOST_RUN_FUNCTION(ccpost_aes_ctr_validate);
+    err |= CCPOST_RUN_FUNCTION(ccpost_ctr_drbg_validate);
+    err |= CCPOST_RUN_FUNCTION(ccpost_rsa_verify_validate);
+
+    if (err == CCERR_OK) {
+        cc_post_log("ALL TESTS PASS");
+    }
+
+    return err;
+}
