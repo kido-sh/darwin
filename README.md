@@ -27,7 +27,7 @@ The image is about 40 MB to download. A `kido run` of one command takes about ha
 ## Run your own tools
 
 macOS arm64 command-line tools run unchanged, as long as KidoDarwin has the functions and
-libraries they use. Apple's own binaries do not run: they are built for arm64e.
+libraries they use. Apple's own binaries do not run, because they are built for arm64e.
 [kido's README](https://github.com/kido-sh/kido#examples) shows how to build an image with your
 own tool in it.
 
@@ -42,15 +42,15 @@ tar -C result -cf darwin.tar .
 kido load -i darwin.tar          # on the Mac: loads it as darwin:latest
 ```
 
-`.#image` builds the same image as a plain directory (`kernel`, `initrd.cpio`, `disk.img`,
-`image.json`), which `kido image import` reads.
+`.#image` builds the same image as a plain directory with `kernel`, `initrd.cpio`, `disk.img` and
+`image.json`. `kido image import` reads that directory.
 
 ## What's where
 
 | Path | What it holds |
 |---|---|
 | `darwin/` | The system's source: XNU, libSystem, launchd, dyld and the rest |
-| `loader/` | The loader that QEMU and Virtualization.framework boot like a Linux kernel; it starts XNU |
+| `loader/` | The loader. QEMU and Virtualization.framework boot it like a Linux kernel, and it starts XNU |
 | `kc-tools/`, `iig-tools/` | Tools that build the kernel collection and the IOKit interfaces |
 | `nix/` | The build |
 | `LICENSING.md`, `LICENSES/`, `NOTICE` | Which license covers which files, and the license texts |
@@ -72,6 +72,6 @@ KidoDarwin is an independent project. It is not affiliated with Apple, PureDarwi
 
 ## License
 
-Every file keeps the license it came with: mostly the Apple Public Source License 2.0 for Apple's
-code, BSD licenses for PureDarwin and xnu-loader, and MPL-2.0 for corecrypto. kido's own files are
-under the Apache License 2.0. [LICENSING.md](LICENSING.md) says which license covers which files.
+Every file keeps the license it came with. Most of Apple's code is under the Apple Public Source
+License 2.0. PureDarwin and xnu-loader use BSD licenses, and corecrypto uses MPL-2.0. kido's own
+files are under the Apache License 2.0. [LICENSING.md](LICENSING.md) says which license covers which files.
