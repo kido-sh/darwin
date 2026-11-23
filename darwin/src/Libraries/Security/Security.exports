@@ -1115,6 +1115,8 @@ _SecKeySignDigest
 _SecKeyVerifyDigest
 _SecKeyVerifySignature
 _SecKeychainAddGenericPassword
+_SecKeychainCopyDefault
+_SecKeychainCopyDomainDefault
 _SecKeychainCreate
 _SecKeychainDelete
 _SecKeychainFindGenericPassword
@@ -1122,6 +1124,7 @@ _SecKeychainGetUserInteractionAllowed
 _SecKeychainItemCopyAttributesAndData
 _SecKeychainItemDelete
 _SecKeychainItemFreeAttributesAndData
+_SecKeychainItemFreeContent
 _SecKeychainItemModifyAttributesAndData
 _SecKeychainSearchCopyNext
 _SecKeychainSearchCreateFromAttributes

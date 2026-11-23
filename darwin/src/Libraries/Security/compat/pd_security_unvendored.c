@@ -128,6 +128,39 @@ SecKeychainFindGenericPassword(CFTypeRef keychainOrArray,
     return errSecItemNotFound;
 }
 
+// a container has no login keychain, so there is no default one in any domain, as on a Mac without one
+OSStatus
+SecKeychainCopyDefault(SecKeychainRef *keychain)
+{
+    if ( keychain == NULL )  return errSecParam;
+    *keychain = NULL;
+    return errSecNoDefaultKeychain;
+}
+
+OSStatus
+SecKeychainCopyDomainDefault(SecPreferencesDomain domain, SecKeychainRef *keychain)
+{
+    if ( keychain == NULL )  return errSecParam;
+    *keychain = NULL;
+    if ( domain == kSecPreferencesDomainDynamic )  return errSecInvalidPrefsDomain;
+    return errSecNoDefaultKeychain;
+}
+
+// what SecKeychainItemCopyContent and SecKeychainFindGenericPassword hand out is malloc'd: the data and
+// each attribute's data. The attribute list and its array stay the caller's.
+OSStatus
+SecKeychainItemFreeContent(SecKeychainAttributeList *attrList, void *data)
+{
+    if ( attrList != NULL ) {
+        for ( UInt32 i = 0; i < attrList->count; i++ ) {
+            free(attrList->attr[i].data);
+            attrList->attr[i].data = NULL;
+        }
+    }
+    free(data);
+    return errSecSuccess;
+}
+
 OSStatus
 SecKeychainGetUserInteractionAllowed(Boolean *state)
 {
