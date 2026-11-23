@@ -5,7 +5,6 @@ virtual machine and runs macOS command-line tools. [kido](https://github.com/kid
 as the system inside every container.
 
 ```console
-$ kido pull ghcr.io/kido-sh/darwin
 $ kido run --rm ghcr.io/kido-sh/darwin sw_vers
 ProductName:	KidoDarwin
 ProductVersion:	26.5
