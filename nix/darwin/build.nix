@@ -103,7 +103,7 @@ stdenv.mkDerivation ({
     export HOST_GM4=${m4}/bin/m4
   '' + lib.optionalString (installKernel || installKexts) ''
     # keep the build directory out of kernel and kext binaries
-    prefixMap="-ffile-prefix-map=$NIX_BUILD_TOP=/puredarwin -fdebug-prefix-map=$NIX_BUILD_TOP=/puredarwin"
+    prefixMap="-ffile-prefix-map=$NIX_BUILD_TOP=/kido -fdebug-prefix-map=$NIX_BUILD_TOP=/kido"
     export CFLAGS="$prefixMap" CXXFLAGS="$prefixMap" OBJCFLAGS="$prefixMap" ASMFLAGS="$prefixMap"
     # xnu's MakeInc.def tests RC_NONARCH_CFLAGS but reads the misspelt RC_NONARCH_CLFAGS
     export RC_NONARCH_CFLAGS="$prefixMap" RC_NONARCH_CLFAGS="$prefixMap"
