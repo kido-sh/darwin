@@ -40,6 +40,7 @@ the release a directory came from and the other licenses its files carry.
 | `LICENSING.md`, `NOTICE`, `README.md`, `docs/**`, `scripts/**`, `test/**`, `flake.nix`, `flake.lock`, `.gitignore`, `.github/**` | `Apache-2.0` | kido |
 | `LICENSES/**` | | The license texts themselves |
 | `nix/**` | `BSD-2-Clause` | PureDarwin's Nix code as reorganized by kido. kido's new files carry an `Apache-2.0` SPDX line |
+| `nix/darwin/third-party/ncurses-dylib/**` | `Apache-2.0` | kido's recipe for macOS's ncurses, its export lists, taken from the macOS 26.5 SDK's .tbd files, and its ABI glue |
 | `patches/xnu-loader-no-logo.patch` | `BSD-3-Clause` | kido's change to xnu-loader |
 | `patches/libtapi-riscv.patch` | `Apache-2.0 WITH LLVM-exception` | PureDarwin's change to LLVM's libtapi |
 | `loader/**` | `BSD-3-Clause` | xnu-loader by Vali0004. Its include/boot.h is xnu's pexpert/i386/boot.h as xnu-loader changed it, `APSL-2.0` |
@@ -135,7 +136,7 @@ this repository.
 | OpenSSL | 3.6.3 | `Apache-2.0` | Linked into Security.framework |
 | SQLite | 3.51.2 | `blessing` | Linked into Security.framework |
 | zsh | 5.9.1 | `LicenseRef-zsh` | /bin/zsh. The GPL-2.0 completion functions are removed |
-| ncurses | 6.6 | `X11-distribute-modifications-variant` | Linked into zsh |
+| ncurses | 6.6 | `X11-distribute-modifications-variant` | /usr/lib/libncurses.5.4.dylib, libpanel.5.4, libmenu.5.4 and libform.5.4; the terminfo database in /usr/share/terminfo, compiled from its terminfo.src; and linked into zsh |
 | GNU libiconv | 1.19 | `LGPL-2.1-or-later` | /usr/lib/libiconv.2.dylib, libcharset.1.dylib. The GPL-3.0 iconv program is not installed |
 | ICU | 76.1 | `LicenseRef-ICU` | /usr/lib/libicucore.A.dylib and the libicu* libraries |
 | zlib | 1.3.2 | `Zlib` | /usr/lib/libz.1.dylib, and linked into toybox |

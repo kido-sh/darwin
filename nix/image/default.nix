@@ -12,6 +12,7 @@ let
     kextsArm64Build
     libiconvArm64Build
     libzDylibArm64Build
+    ncursesDylibArm64Build
     securityArm64Build
     splitBaseSystemArm64VirtMinimalRelease
     systemConfigurationArm64Build
@@ -67,7 +68,7 @@ let
     extraPackages = [
       zshArm64Build libiconvArm64Build toyboxArm64Build
       securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build
-      libzDylibArm64Build certificatesBundleBuild containerLaunchdSettings
+      libzDylibArm64Build ncursesDylibArm64Build certificatesBundleBuild containerLaunchdSettings
       agent.root
     ];
     inherit notices;

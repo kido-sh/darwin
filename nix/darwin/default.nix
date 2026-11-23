@@ -369,6 +369,7 @@ let
   };
   libiconvArm64Build = mkArm64Build ./third-party/libiconv.nix { libiconvReal = pkgs.libiconvReal; };
   ncursesArm64Build = mkArm64Build ./third-party/ncurses.nix { ncurses = pkgs.ncurses; };
+  ncursesDylibArm64Build = mkArm64Build ./third-party/ncurses-dylib { ncurses = pkgs.ncurses; };
   zshArm64Build = mkArm64Build ./third-party/zsh.nix {
     zsh = pkgs.zsh;
     ncurses = ncursesArm64Build;
@@ -489,6 +490,7 @@ in
     kextsArm64Build
     libiconvArm64Build
     libzDylibArm64Build
+    ncursesDylibArm64Build
     securityArm64Build
     splitBaseSystemArm64VirtMinimalRelease
     systemConfigurationArm64Build
