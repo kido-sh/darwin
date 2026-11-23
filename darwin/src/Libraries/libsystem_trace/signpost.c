@@ -28,34 +28,39 @@
  * THE SOFTWARE.
  */
 
-/* NOTE! This is all placeholder for now */
-
 #include "signpost.h"
 
-void __os_signpost_emit_impl(os_log_t log,
+// Nothing records signposts here, so as on macOS then: os_signpost_enabled() is false, ids are null, emits do nothing.
+
+void _os_signpost_emit_impl(void *dso,
+    os_log_t log,
     os_signpost_type_t type,
     os_signpost_id_t spid,
-    const char *name,
     const char *format,
-    ...)
+    uint8_t *buf,
+    uint32_t size)
 {
 }
 
-void __os_signpost_emit_with_name_impl(os_log_t log,
+void _os_signpost_emit_with_name_impl(void *dso,
+    os_log_t log,
     os_signpost_type_t type,
     os_signpost_id_t spid,
     const char *name,
     const char *format,
-    ...)
+    uint8_t *buf,
+    uint32_t size)
 {
 }
 
-void __os_signpost_emit_unreliably_impl(os_log_t log,
+void _os_signpost_emit_unreliably_with_name_impl(void *dso,
+    os_log_t log,
     os_signpost_type_t type,
     os_signpost_id_t spid,
     const char *name,
     const char *format,
-    ...)
+    uint8_t *buf,
+    uint32_t size)
 {
 }
 
@@ -66,33 +71,11 @@ bool os_signpost_enabled(os_log_t log)
 
 os_signpost_id_t os_signpost_id_generate(os_log_t log)
 {
+    return OS_SIGNPOST_ID_NULL;
 }
 
 os_signpost_id_t os_signpost_id_make_with_pointer(os_log_t log,
                                                   const void *ptr)
 {
-}
-
-void os_signpost_interval_begin(os_log_t log,
-    os_signpost_id_t spid,
-    const char *name,
-    const char *format,
-    ...)
-{
-}
-
-void os_signpost_interval_end(os_log_t log,
-    os_signpost_id_t spid,
-    const char *name,
-    const char *format,
-    ...)
-{
-}
-
-void os_signpost_event_emit(os_log_t log,
-    os_signpost_id_t spid,
-    const char *name,
-    const char *format,
-    ...)
-{
+    return OS_SIGNPOST_ID_NULL;
 }

@@ -2610,3 +2610,9 @@ _pwritev
 # libsystem_trace and libc: what Apple's git imports
 __os_log_send_and_compose_impl
 __os_crash_msg
+# libsystem_trace: signposts (node imports the named emit)
+__os_signpost_emit_impl
+__os_signpost_emit_with_name_impl
+__os_signpost_emit_unreliably_with_name_impl
+_os_signpost_id_generate
+_os_signpost_id_make_with_pointer

@@ -28,60 +28,46 @@
  * THE SOFTWARE.
  */
 
-/* NOTE! This is all placeholder for now */
-
 #ifndef SIGNPOST_H_
 #define SIGNPOST_H_
 
 #include <Availability.h>
 #include <os/log.h>
 
-typedef uint8_t os_signpost_type_t; // FIXME: probably wrong
-typedef uint8_t os_signpost_id_t;   // FIXME: probably wrong
+typedef uint8_t os_signpost_type_t;
+typedef uint64_t os_signpost_id_t;
 
-void __os_signpost_emit_impl(os_log_t log,
+#define OS_SIGNPOST_ID_NULL ((os_signpost_id_t)0)
+
+void _os_signpost_emit_impl(void *dso,
+    os_log_t log,
+    os_signpost_type_t type,
+    os_signpost_id_t spid,
+    const char *format,
+    uint8_t *buf,
+    uint32_t size);
+
+void _os_signpost_emit_with_name_impl(void *dso,
+    os_log_t log,
     os_signpost_type_t type,
     os_signpost_id_t spid,
     const char *name,
     const char *format,
-    ...);
+    uint8_t *buf,
+    uint32_t size);
 
-void __os_signpost_emit_with_name_impl(os_log_t log,
+void _os_signpost_emit_unreliably_with_name_impl(void *dso,
+    os_log_t log,
     os_signpost_type_t type,
     os_signpost_id_t spid,
     const char *name,
     const char *format,
-    ...);
-
-void __os_signpost_emit_unreliably_impl(os_log_t log,
-    os_signpost_type_t type,
-    os_signpost_id_t spid,
-    const char *name,
-    const char *format,
-    ...);
+    uint8_t *buf,
+    uint32_t size);
 
 bool os_signpost_enabled(os_log_t log);
 os_signpost_id_t os_signpost_id_generate(os_log_t log);
 os_signpost_id_t os_signpost_id_make_with_pointer(os_log_t log,
     const void *ptr);
-
-void os_signpost_interval_begin(os_log_t log,
-    os_signpost_id_t spid,
-    const char *name,
-    const char *format,
-    ...);
-
-void os_signpost_interval_end(os_log_t log,
-    os_signpost_id_t spid,
-    const char *name,
-    const char *format,
-    ...);
-
-void os_signpost_event_emit(os_log_t log,
-    os_signpost_id_t spid,
-    const char *name,
-    const char *format,
-    ...);
-
 
 #endif // SIGNPOST_H_
