@@ -86,7 +86,11 @@ if(PUREDARWIN_ARM64 OR PUREDARWIN_ARM32 OR PUREDARWIN_RISCV64)
     #   fe*except      - openlibm's fenv is the x86 SSE/x87 implementation
     #   *context       - libplatform builds ucontext for x86_64 only so far
     list(FILTER _libsystem_export_lines EXCLUDE REGEX
-        "^_(i386_set_ldt|i386_get_ldt|nexttoward|nexttowardf|scalbnl|roundl|lroundl|llroundl|floorl|frexpl|getfsstat)$")
+        "^_(i386_set_ldt|i386_get_ldt|scalbnl|roundl|lroundl|llroundl|floorl|frexpl|getfsstat)$")
+    # arm64 has nexttoward and nexttowardf over double, in pd_arm64.c
+    if(NOT PUREDARWIN_ARM64)
+        list(FILTER _libsystem_export_lines EXCLUDE REGEX "^_(nexttoward|nexttowardf)$")
+    endif()
     # riscv64 builds the ucontext family, arm does not yet
     if(NOT PUREDARWIN_RISCV64)
         list(FILTER _libsystem_export_lines EXCLUDE REGEX
@@ -97,8 +101,9 @@ if(PUREDARWIN_ARM64 OR PUREDARWIN_ARM32 OR PUREDARWIN_RISCV64)
         "^_(acoshl|acosl|asinhl|asinl|atan2l|atanhl|atanl|cbrtl|ceill|copysignl|coshl|cosl|erfcl|erfl|exp2l|expl|expm1l|fabsl|fmal|fmaxl|fminl|fmodl|hypotl|ilogbl|lgammal|lgammal_r|llrintl|log10l|log1pl|log2l|logbl|logl|lrintl|modfl|nearbyintl|nextafterl|nexttowardl|powl|remainderl|remquol|rintl|scalblnl|sinhl|sinl|sqrtl|tanhl|tanl|tgammal|truncl)$")
     list(FILTER _libsystem_export_lines EXCLUDE REGEX
         "^_(cabsl|cacoshl|cacosl|cargl|casinhl|casinl|catanhl|catanl|ccoshl|ccosl|cexpl|cimagl|clogl|conjl|cpowl|cprojl|creall|csinhl|csinl|csqrtl|ctanhl|ctanl)$")
-    # openlibm's fenv is the x86 SSE/x87 one, riscv64 has its own fcsr fenv
-    if(NOT PUREDARWIN_RISCV64)
+    # openlibm's fenv is the x86 SSE/x87 one, riscv64 has its own fcsr fenv and
+    # arm64 the macOS one in kido_fenv_arm64.c
+    if(NOT PUREDARWIN_RISCV64 AND NOT PUREDARWIN_ARM64)
         list(FILTER _libsystem_export_lines EXCLUDE REGEX
             "^_(feclearexcept|fetestexcept|feholdexcept|fesetexceptflag|fesetenv|fegetenv|feraiseexcept|feupdateenv)$")
     endif()
@@ -130,6 +135,10 @@ if(PUREDARWIN_ARM64 OR PUREDARWIN_ARM32 OR PUREDARWIN_RISCV64)
     if(PUREDARWIN_ARM64 OR PUREDARWIN_RISCV64)
         list(APPEND _libsystem_export_lines ___clear_cache
             _sys_icache_invalidate _sys_dcache_flush)
+    endif()
+    if(PUREDARWIN_ARM64)
+        list(APPEND _libsystem_export_lines
+            _fegetexceptflag _fesetround __FE_DFL_ENV __FE_DFL_DISABLE_DENORMS_ENV)
     endif()
     set(_libsystem_exports_for_link ${CMAKE_CURRENT_BINARY_DIR}/libSystem.arm64.exports)
     file(WRITE ${_libsystem_exports_for_link} "")

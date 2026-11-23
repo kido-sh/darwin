@@ -8,6 +8,7 @@ add_darwin_static_library(openlibm_static)
 
 target_sources(openlibm_static PRIVATE
     $<$<BOOL:${PUREDARWIN_ARM64}>:src/pd_arm64.c>
+    $<$<BOOL:${PUREDARWIN_ARM64}>:src/kido_fenv_arm64.c>
     # long double is double on riscv64 too, the fenv is the fcsr one
     $<$<BOOL:${PUREDARWIN_RISCV64}>:src/pd_riscv64.c>
     $<$<BOOL:${PUREDARWIN_RISCV64}>:riscv64/fenv.c>
@@ -114,6 +115,8 @@ target_sources(openlibm_static PRIVATE
 )
 
 set(_openlibm_long_double_sources
+    # takes a long double and reads it as the 80- or 128-bit layout, pd_arm64.c has arm64's
+    src/s_nexttowardf.c
     src/s_copysignl.c src/s_fabsl.c src/s_llrintl.c src/s_lrintl.c src/s_modfl.c
     src/e_acosl.c src/e_asinl.c src/e_atan2l.c src/e_fmodl.c
     src/s_fmaxl.c src/s_fminl.c src/s_ilogbl.c
@@ -138,8 +141,7 @@ set(_openlibm_long_double_sources
 if(PUREDARWIN_ARCH STREQUAL "arm64" OR PUREDARWIN_ARM32 OR PUREDARWIN_RISCV64)
     set_source_files_properties(${_openlibm_long_double_sources}
         PROPERTIES HEADER_FILE_ONLY TRUE)
-    # The ARM fenv implementation is provided by the public compiler/runtime
-    # ABI; openlibm has no separate ARM source file in this tree.
+    # arm64's fenv is src/kido_fenv_arm64.c, with the macOS ABI.
     set_source_files_properties(amd64/fenv.c PROPERTIES HEADER_FILE_ONLY TRUE)
 endif()
 
