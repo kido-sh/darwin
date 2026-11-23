@@ -82,7 +82,7 @@ Other code in the tree, each under the license its files state:
 Third-party components built into the image
 -------------------------------------------
 
-OpenSSL 3.6.3, linked into Security.framework
+OpenSSL 3.6.3, linked into Security.framework and libcurl
   Copyright (c) 1998-2025 The OpenSSL Project Authors. Apache License 2.0.
   https://www.openssl.org
 
@@ -99,6 +99,10 @@ the terminfo database in /usr/share/terminfo, and linked into zsh
   Copyright 2018-2024,2025 Thomas E. Dickey.
   Copyright 1998-2017,2018 Free Software Foundation, Inc.
   https://invisible-island.net/ncurses/
+
+curl 8.21.0, /usr/lib/libcurl.4.dylib
+  Copyright (c) 1996 - 2026, Daniel Stenberg, <daniel@haxx.se>, and many
+  contributors. curl License (LICENSES/curl.txt). https://curl.se
 
 libedit 20251016-3.1, /usr/lib/libedit.3.dylib
   Copyright (c) 1989, 1992, 1993 The Regents of the University of California.

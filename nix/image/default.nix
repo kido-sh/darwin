@@ -8,6 +8,7 @@ let
     kernelSource
     certificatesBundleBuild
     coreServicesArm64Build
+    curlArm64Build
     kernelArm64VirtBuild
     kextsArm64Build
     libeditArm64Build
@@ -69,7 +70,7 @@ let
     extraPackages = [
       zshArm64Build libiconvArm64Build toyboxArm64Build
       securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build
-      libzDylibArm64Build ncursesDylibArm64Build libeditArm64Build
+      libzDylibArm64Build ncursesDylibArm64Build libeditArm64Build curlArm64Build
       certificatesBundleBuild containerLaunchdSettings
       agent.root
     ];

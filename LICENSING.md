@@ -40,7 +40,7 @@ the release a directory came from and the other licenses its files carry.
 | `LICENSING.md`, `NOTICE`, `README.md`, `docs/**`, `scripts/**`, `test/**`, `flake.nix`, `flake.lock`, `.gitignore`, `.github/**` | `Apache-2.0` | kido |
 | `LICENSES/**` | | The license texts themselves |
 | `nix/**` | `BSD-2-Clause` | PureDarwin's Nix code as reorganized by kido. kido's new files carry an `Apache-2.0` SPDX line |
-| `nix/darwin/third-party/{libedit,ncurses-dylib}/**` | `Apache-2.0` | kido's recipes for macOS's libedit and ncurses, their export lists, taken from the macOS 26.5 SDK's .tbd files, and the ncurses ABI glue |
+| `nix/darwin/third-party/{curl,libedit,ncurses-dylib}/**` | `Apache-2.0` | kido's recipes for macOS's libcurl, libedit and ncurses, their export lists, taken from the macOS 26.5 SDK's .tbd files, and the ncurses ABI glue |
 | `patches/xnu-loader-no-logo.patch` | `BSD-3-Clause` | kido's change to xnu-loader |
 | `patches/libtapi-riscv.patch` | `Apache-2.0 WITH LLVM-exception` | PureDarwin's change to LLVM's libtapi |
 | `loader/**` | `BSD-3-Clause` | xnu-loader by Vali0004. Its include/boot.h is xnu's pexpert/i386/boot.h as xnu-loader changed it, `APSL-2.0` |
@@ -107,7 +107,7 @@ Source means this repository; binaries means a built image or any file from one.
 | `GPL-1.0-or-later`, `GPL-2.0-or-later`, `LGPL-2.1-only` | Keep the notices; changed files carry a notice and the date | None: these are build-only tools that do not ship |
 | `GPL-2.0-or-later WITH Bison-exception-2.2` | Keep the notices | None: the exception lets the Bison-generated parsers ship under their surrounding license |
 | `BSD-4-Clause`, `BSD-4-Clause-UC`, `OpenSSL`, `SSLeay-standalone` | Keep the notices | Reproduce the notices, and print the acknowledgements in NOTICE wherever the software is advertised. The University of California withdrew its advertising clause in 1999 |
-| `BSD-2-Clause`, `BSD-2-Clause-FreeBSD`, `BSD-2-Clause-Patent`, `BSD-3-Clause`, `0BSD`, `MIT`, `ISC`, `HPND`, `CMU-Mach`, `dtoa`, `NCSA`, `Zlib`, `Brian-Gladman-3-Clause`, `Unicode-3.0`, `X11-distribute-modifications-variant`, `LicenseRef-zsh`, `LicenseRef-ICU`, `LicenseRef-gnu-efi-efilib` | Keep the notices | Reproduce the copyright notices and license texts in the documentation (LICENSES/ and NOTICE) |
+| `BSD-2-Clause`, `BSD-2-Clause-FreeBSD`, `BSD-2-Clause-Patent`, `BSD-3-Clause`, `0BSD`, `MIT`, `ISC`, `HPND`, `CMU-Mach`, `dtoa`, `NCSA`, `Zlib`, `Brian-Gladman-3-Clause`, `Unicode-3.0`, `X11-distribute-modifications-variant`, `curl`, `LicenseRef-zsh`, `LicenseRef-ICU`, `LicenseRef-gnu-efi-efilib` | Keep the notices | Reproduce the copyright notices and license texts in the documentation (LICENSES/ and NOTICE) |
 | `LGPL-3.0-or-later`, `GPL-3.0-or-later` | Nothing: no source here is under them | gnu-efi's inc/subst/elf.h, LGPL-2.1-or-later, reaches the EFI loader under section 3 of LGPL 3.0: ship both texts with it |
 | `blessing`, `LicenseRef-Public-Domain` | Nothing | Nothing |
 
@@ -133,10 +133,11 @@ this repository.
 
 | Component | Version | License | Where |
 |---|---|---|---|
-| OpenSSL | 3.6.3 | `Apache-2.0` | Linked into Security.framework |
+| OpenSSL | 3.6.3 | `Apache-2.0` | Linked into Security.framework and /usr/lib/libcurl.4.dylib |
 | SQLite | 3.51.2 | `blessing` | Linked into Security.framework |
 | zsh | 5.9.1 | `LicenseRef-zsh` | /bin/zsh. The GPL-2.0 completion functions are removed |
 | ncurses | 6.6 | `X11-distribute-modifications-variant` | /usr/lib/libncurses.5.4.dylib, libpanel.5.4, libmenu.5.4 and libform.5.4; the terminfo database in /usr/share/terminfo, compiled from its terminfo.src; and linked into zsh |
+| curl | 8.21.0 | `curl` | /usr/lib/libcurl.4.dylib |
 | libedit | 20251016-3.1 | `BSD-3-Clause`, `BSD-2-Clause` | /usr/lib/libedit.3.dylib |
 | GNU libiconv | 1.19 | `LGPL-2.1-or-later` | /usr/lib/libiconv.2.dylib, libcharset.1.dylib. The GPL-3.0 iconv program is not installed |
 | ICU | 76.1 | `LicenseRef-ICU` | /usr/lib/libicucore.A.dylib and the libicu* libraries |

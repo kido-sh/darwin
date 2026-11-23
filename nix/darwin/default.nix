@@ -336,6 +336,11 @@ let
         runHook postInstall
       '';
     });
+  curlArm64Build = mkArm64Build ./third-party/curl {
+    inherit (pkgs) curl;
+    openssl = opensslThreadsArm64Build;
+    systemConfiguration = systemConfigurationArm64Build;
+  };
   certificatesBundleBuild =
     pkgs.callPackage ./apple/certificates-bundle.nix {
       src = ../../darwin/src/Libraries/Security/certificates;
@@ -490,6 +495,7 @@ in
     kernelSource
     certificatesBundleBuild
     coreServicesArm64Build
+    curlArm64Build
     kernelArm64VirtBuild
     kextsArm64Build
     libeditArm64Build
