@@ -91,25 +91,25 @@ In this repository:
   syslog(3) messages recorded by PureDarwin's logd in /var/log/system.log; tests in test/libsystem.
 - macOS's libcurl, libedit and ncurses in /usr/lib: libcurl.4, libedit.3, libncurses.5.4,
   libpanel.5.4, libmenu.5.4 and libform.5.4 with macOS's install names, versions and exports, built
-  from nixpkgs' curl 8.21.0 over the image's LibreSSL and /etc/ssl/cert.pem, libedit 20251016-3.1
-  and ncurses 6.6; ncurses keeps both of macOS's cchar_t layouts (the plain names and the $NCURSES60
-  ones), exports the four ncurses 6.0 internals that later releases dropped or made static, and
-  installs its terminfo database; tests in test/syslibs.
+  from curl over the image's LibreSSL and /etc/ssl/cert.pem, libedit 20251016-3.1 and ncurses 6.6.
+  ncurses keeps both of macOS's cchar_t layouts, under the plain names and under the $NCURSES60
+  names. It exports the four ncurses 6.0 internals that later releases dropped or made static, and
+  it installs its terminfo database. test/syslibs runs their tests.
 - Pointer authentication as macOS has it. dyld, libSystem, libobjc, libc++, libc++abi, libz.1, and
   libncurses.5.4 with libpanel, libmenu and libform are arm64e only. So are three new libraries with
   macOS's install names, versions and exports: libutil, libbz2.1.0 built from bzip2 1.0.8, and
-  liblzma.5 built from xz 5.8.3. libutil's humanize_number comes from NetBSD and the rest of libutil
-  is new code. Every exec of an arm64e program gets its own IA, IB, DA, DB and GA keys, and a forked
-  child keeps the keys of its parent. An arm64 process runs with pointer authentication off, so arm64
-  programs work on the arm64e libraries. The kernel loads the keys on the way back to user space. PAC
-  instructions run natively on a CPU with FEAT_PAuth instead of being rewritten at page-in, and a
-  failed authentication raises EXC_BAD_ACCESS. When the guest starts at EL2, the loader and the
-  secondary CPUs let the kernel and user space use pointer authentication. dyld loads any arm64e
-  image, and the Blocks runtime signs blocks as the compiler does. libobjc is built with LLVM's
-  clang, which does not define __PTRAUTH_INTRINSICS__ the way Apple's clang does, so the build
-  defines it by hand. <ptrauth.h> has the names of Apple's arm64e ABI that Darwin's sources use.
-  libSystem exports Libc's getbsize and strtonum and macOS's typed allocation calls, which Apple's ls
-  and grep import. The tests are in test/arm64e, test/syslibs and test/libsystem.
+  liblzma.5 built from xz 5.8.3. Every exec of an arm64e program gets its own IA, IB, DA, DB and GA
+  keys, and a forked child keeps the keys of its parent. An arm64 process runs with pointer
+  authentication off, so arm64 programs work on the arm64e libraries. The kernel loads the keys on
+  the way back to user space. PAC instructions run natively on a CPU with FEAT_PAuth instead of
+  being rewritten at page-in, and a failed authentication raises EXC_BAD_ACCESS. When the guest
+  starts at EL2, the loader and the secondary CPUs let the kernel and user space use pointer
+  authentication. dyld loads any arm64e image, and the Blocks runtime signs blocks as the compiler
+  does. libobjc is built with LLVM's clang, which does not define __PTRAUTH_INTRINSICS__ the way
+  Apple's clang does, so the build defines it by hand. <ptrauth.h> has the names of Apple's arm64e
+  ABI that Darwin's sources use. libSystem exports Libc's getbsize and strtonum and macOS's typed
+  allocation calls, which Apple's ls and grep import. The tests are in test/arm64e, test/syslibs and
+  test/libsystem.
 - The end of the physical aperture on VIRT (arm_vm_init.c): with ARM_LARGE_MEMORY and no PPL,
   physmap_end and the L1 entries the aperture takes below the kernel's address range leave room
   for the block alignment of its segments, as XNU without ARM_LARGE_MEMORY does, so copies through
@@ -128,20 +128,27 @@ In this repository:
   cipher list and error codes, as macOS's does. The tests are in test/ssl and test/security, which
   also runs its programs against macOS's own frameworks and compares the results. The build
   host's xar, inside ld64 and otool, links nixpkgs' LibreSSL as well.
-- More of macOS's libraries in /usr/lib, each with macOS's install name, versions and exports and each
-  pinned in its own directory under nix/darwin/third-party with the hash of its source, its export
-  lists, its tests and a flake output. scripts/tbd-exports.py writes the export lists from the macOS
-  SDK, and scripts/bump-lib.sh moves a library to a new release. libexpat.1 is Expat 2.11.0.
-  libsqlite3 is SQLite 3.54.1 with macOS's compile options, and Security.framework links it as
-  macOS's does. libapple_nghttp2 is nghttp2 1.71.0, and libcurl, now curl 8.23.0, links it for
-  HTTP/2 as macOS's does. macOS's iconv replaces GNU libiconv: Apple's libiconv-115.120.2, the Citrus
-  iconv of FreeBSD and NetBSD, with libcharset, the converters in /usr/lib/i18n, the tables in
-  /usr/share/i18n and /usr/bin/iconv. libutil is now Apple's libutil-73. A few of macOS's exports
-  are Apple's own additions, which Apple does not publish, and the recipes leave them out by name.
-  Security.framework also exports SecCertificateCopyPublicKey_ios, SecCertificateCopySerialNumber_ios
-  and the two-argument SecCertificateCopyPublicKey and SecCertificateCopySerialNumber of macOS
-  under their $LEGACYMAC names. The tests are in the libraries' directories, test/syslibs and
-  test/security, and run their programs against macOS's own libraries too.
+- More of macOS's libraries in /usr/lib, each with macOS's install name, versions and exports and
+  each pinned in its own directory under nix/darwin/third-party with the hash of its source, its
+  export lists, its tests and a flake output. scripts/tbd-exports.py writes the export lists from
+  the macOS SDK, and scripts/bump-lib.sh moves a library to a new release. libexpat.1 is Expat
+  2.11.0. libsqlite3 is SQLite 3.54.1 with macOS's compile options, and Security.framework links it
+  as macOS's does. Like macOS's, it keeps fts3_tokenizer from taking a pointer from SQL text in
+  programs built with the macOS 10.14 SDK or later and in xctest. It turns on defensive mode in
+  programs built with the 10.16 SDK or later, except in sqlite3 and testfixture, and always in
+  xctest. It has the uuid and ieee754 SQL functions. libapple_nghttp2 is nghttp2 1.71.0, and
+  libcurl, now curl 8.23.0, links it for HTTP/2 as macOS's does. macOS's iconv replaces GNU
+  libiconv: Apple's libiconv-115.120.2, the Citrus iconv of FreeBSD and NetBSD, with libcharset, the
+  converters in /usr/lib/i18n, the tables in /usr/share/i18n and /usr/bin/iconv. libcharset and the
+  converters are built with Apple's compiler settings, and the ISO-2022 converter has room for an
+  escape sequence, a shift and a character, as macOS 27's has, so it converts Korean and Chinese
+  text as macOS does. libutil is now Apple's libutil-73. A few of macOS's exports are Apple's own
+  additions, which Apple does not publish, and the recipes leave them out by name.
+  Security.framework also exports SecCertificateCopyPublicKey_ios,
+  SecCertificateCopySerialNumber_ios and the two-argument SecCertificateCopyPublicKey and
+  SecCertificateCopySerialNumber of macOS under their $LEGACYMAC names. The tests are in the
+  libraries' directories, test/syslibs and test/security, and run their programs against macOS's own
+  libraries too.
 - An APSL header on Ext4FileSystemDriver.cpp, which is derived from Apple's AppleFileSystemDriver.
 - The Nix code reorganized under nix/ and the tree pruned to what the container builds.
 - The licensing files and the change notices.
