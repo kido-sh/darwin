@@ -36,6 +36,7 @@ private:
     void drainLocked(unsigned q);
     void failLocked(bool broken);
     void pauseLocked(void *event);
+    void spinLocked(VirtioFSSlot *slot, uint32_t datalen);
     VirtioFSSlot *takeSlotLocked();
     void putSlotLocked(VirtioFSSlot *slot);
     bool submitLocked(unsigned q, VirtioFSSlot *slot, const VirtIOChainEntry *chain, unsigned count);
@@ -58,6 +59,7 @@ private:
     bool fDead;
     bool fStarted;
     bool fLostInterrupt;
+    bool fPolling;
     int fInitError;
     struct virtiofs_session fSession;
     uint64_t fUnique;

@@ -8,6 +8,7 @@
 #include <sys/kauth.h>
 #include <sys/param.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <IOKit/IOLib.h>
 #include <libkern/libkern.h>
 #include "fuse_proto.h"
@@ -16,6 +17,12 @@
 #define VIRTIOFS_TAG_MAX 36
 
 static vfstable_t virtiofs_vfsconf;
+int virtiofs_spin_us = 50;
+
+SYSCTL_DECL(_vfs_generic);
+SYSCTL_NODE(_vfs_generic, OID_AUTO, virtiofs, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "virtio-fs");
+SYSCTL_INT(_vfs_generic_virtiofs, OID_AUTO, spin_us, CTLFLAG_RW | CTLFLAG_LOCKED, &virtiofs_spin_us, 0,
+           "how long a request waits for its reply before sleeping");
 
 int
 virtiofs_call(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_call *c)
@@ -262,7 +269,12 @@ virtiofs_vfs_register(void)
     if (virtiofs_vfsconf)
         return 0;
     strlcpy(vfe.vfe_fsname, "virtiofs", sizeof(vfe.vfe_fsname));
-    return vfs_fsadd(&vfe, &virtiofs_vfsconf);
+    int error = vfs_fsadd(&vfe, &virtiofs_vfsconf);
+    if (!error) {
+        sysctl_register_oid(&sysctl__vfs_generic_virtiofs);
+        sysctl_register_oid(&sysctl__vfs_generic_virtiofs_spin_us);
+    }
+    return error;
 }
 
 int
@@ -270,6 +282,10 @@ virtiofs_vfs_unregister(void)
 {
     if (virtiofs_vfsconf && vfs_fsremove(virtiofs_vfsconf) != 0)
         return EBUSY;
+    if (virtiofs_vfsconf) {
+        sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_spin_us);
+        sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs);
+    }
     virtiofs_vfsconf = NULL;
     return 0;
 }

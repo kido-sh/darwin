@@ -26,6 +26,8 @@ enum {
     kWaitSliceMs = 100,
 };
 
+extern "C" int virtiofs_spin_us;
+
 static const char kTagKey[] = "VirtioFSTag";
 static const uint64_t kMatchTimeoutNs = 1000 * 1000 * 1000;
 
@@ -273,6 +275,30 @@ VirtioFSDevice::pauseLocked(void *event)
     }
 }
 
+void
+VirtioFSDevice::spinLocked(VirtioFSSlot *slot, uint32_t datalen)
+{
+    VirtQueue *vq = &fQueues[kRequests];
+    volatile VRingUsedHdr *used = (volatile VRingUsedHdr *)vq->used;
+    uint64_t limit;
+
+    if (fPolling || virtiofs_spin_us <= 0)
+        return;
+    fPolling = true;
+    nanoseconds_to_absolutetime(((uint64_t)virtiofs_spin_us + datalen / 2048) * 1000, &limit);
+    limit += mach_absolute_time();
+    bool ready = true;
+    while (ready && !slot->done && !fDead) {
+        IOLockUnlock(fLock);
+        while (!(ready = used->idx != vq->lastUsedIdx) && mach_absolute_time() < limit)
+            __builtin_arm_yield();
+        IOLockLock(fLock);
+        if (ready)
+            drainLocked(kRequests);
+    }
+    fPolling = false;
+}
+
 VirtioFSSlot *
 VirtioFSDevice::takeSlotLocked()
 {
@@ -437,6 +463,8 @@ VirtioFSDevice::call(struct virtiofs_call *c, uint32_t uid, uint32_t gid, uint32
         chain[0] = { slot->inPhys, inLen, false, false };
         chain[replyAt] = { slot->outPhys, (uint32_t)(sizeof(struct fuse_out_header) + c->replylen), true, false };
         bool submitted = submitLocked(kRequests, slot, chain, count);
+        if (submitted)
+            spinLocked(slot, c->datalen);
         while (submitted && !slot->done && !fDead)
             pauseLocked(slot);
         if (slot->done)
