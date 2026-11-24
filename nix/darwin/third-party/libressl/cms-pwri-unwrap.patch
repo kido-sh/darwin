@@ -1,0 +1,56 @@
+--- a/crypto/cms/cms_pwri.c
++++ b/crypto/cms/cms_pwri.c
+@@ -224,6 +224,10 @@
+ 	size_t blocklen = EVP_CIPHER_CTX_block_size(ctx);
+ 	unsigned char *tmp;
+ 	int outl, rv = 0;
++
++	/* Ensure inlen is large enough that tmp[6] is in bounds. */
++	if (blocklen < 4)
++		return 0;
+ 
+ 	if (inlen < 2 * blocklen) {
+ 		/* too small */
+@@ -260,7 +264,7 @@
+ 		/* Check byte failure */
+ 		goto err;
+ 	}
+-	if (inlen < (size_t)(tmp[0] - 4)) {
++	if (inlen < 4 + (size_t)tmp[0]) {
+ 		/* Invalid length value */
+ 		goto err;
+ 	}
+@@ -361,13 +365,13 @@
+ 	kekcipher = EVP_get_cipherbyobj(kekalg->algorithm);
+ 	if (!kekcipher) {
+ 		CMSerror(CMS_R_UNKNOWN_CIPHER);
+-		return 0;
++		goto err;
+ 	}
+ 
+ 	kekctx = EVP_CIPHER_CTX_new();
+ 	if (kekctx == NULL) {
+ 		CMSerror(ERR_R_MALLOC_FAILURE);
+-		return 0;
++		goto err;
+ 	}
+ 	/* Fixup cipher based on AlgorithmIdentifier to set IV etc */
+ 	if (!EVP_CipherInit_ex(kekctx, kekcipher, NULL, NULL, NULL, en_de))
+@@ -379,11 +383,15 @@
+ 	}
+ 
+ 	algtmp = pwri->keyDerivationAlgorithm;
++	if (algtmp == NULL) {
++		CMSerror(CMS_R_INVALID_KEY_ENCRYPTION_PARAMETER);
++		goto err;
++	}
+ 
+ 	/* Finish password based key derivation to setup key in "ctx" */
+ 
+-	if (EVP_PBE_CipherInit(algtmp->algorithm, (char *)pwri->pass,
+-	    pwri->passlen, algtmp->parameter, kekctx, en_de) < 0) {
++	if (!EVP_PBE_CipherInit(algtmp->algorithm, (char *)pwri->pass,
++	    pwri->passlen, algtmp->parameter, kekctx, en_de)) {
+ 		CMSerror(ERR_R_EVP_LIB);
+ 		goto err;
+ 	}

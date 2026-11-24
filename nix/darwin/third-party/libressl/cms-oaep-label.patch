@@ -1,0 +1,12 @@
+--- a/crypto/rsa/rsa_ameth.c
++++ b/crypto/rsa/rsa_ameth.c
+@@ -982,7 +982,8 @@
+ 			RSAerror(RSA_R_UNSUPPORTED_LABEL_SOURCE);
+ 			goto err;
+ 		}
+-		if (plab->parameter->type != V_ASN1_OCTET_STRING) {
++		if (plab->parameter == NULL ||
++		    plab->parameter->type != V_ASN1_OCTET_STRING) {
+ 			RSAerror(RSA_R_INVALID_LABEL);
+ 			goto err;
+ 		}

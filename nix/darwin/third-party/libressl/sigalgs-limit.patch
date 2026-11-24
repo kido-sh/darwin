@@ -1,0 +1,47 @@
+--- a/ssl/ssl_tlsext.c
++++ b/ssl/ssl_tlsext.c
+@@ -26,6 +26,8 @@
+ #include "bytestring.h"
+ #include "ssl_sigalgs.h"
+ #include "ssl_tlsext.h"
++
++#define TLSEXT_MAX_SIGALGS	256
+ 
+ /*
+  * Supported Application-Layer Protocol Negotiation - RFC 7301
+@@ -578,7 +580,17 @@
+ 
+ 	if (!CBB_flush(cbb))
+ 		return 0;
++
++	return 1;
++}
+ 
++static int
++tlsext_sigalgs_check_length(CBS *cbs)
++{
++	if (CBS_len(cbs) % 2 != 0)
++		return 0;
++	if (CBS_len(cbs) / 2 > TLSEXT_MAX_SIGALGS)
++		return 0;
+ 	return 1;
+ }
+ 
+@@ -589,7 +601,7 @@
+ 
+ 	if (!CBS_get_u16_length_prefixed(cbs, &sigalgs))
+ 		return 0;
+-	if (CBS_len(&sigalgs) % 2 != 0 || CBS_len(&sigalgs) > 64)
++	if (!tlsext_sigalgs_check_length(&sigalgs))
+ 		return 0;
+ 	if (!CBS_stow(&sigalgs, &S3I(s)->hs.sigalgs, &S3I(s)->hs.sigalgs_len))
+ 		return 0;
+@@ -637,7 +649,7 @@
+ 
+ 	if (!CBS_get_u16_length_prefixed(cbs, &sigalgs))
+ 		return 0;
+-	if (CBS_len(&sigalgs) % 2 != 0 || CBS_len(&sigalgs) > 64)
++	if (!tlsext_sigalgs_check_length(&sigalgs))
+ 		return 0;
+ 	if (!CBS_stow(&sigalgs, &S3I(s)->hs.sigalgs, &S3I(s)->hs.sigalgs_len))
+ 		return 0;

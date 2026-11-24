@@ -1,0 +1,39 @@
+--- a/apps/ocspcheck/ocspcheck.c
++++ b/apps/ocspcheck/ocspcheck.c
+@@ -435,8 +435,7 @@
+ 		goto err;
+ 	}
+ 
+-	if (OCSP_basic_verify(bresp, request->fullchain, store,
+-		OCSP_TRUSTOTHER) != 1) {
++	if (OCSP_basic_verify(bresp, request->fullchain, store, 0) != 1) {
+ 		warnx("OCSP verify failed from %s", host);
+ 		goto err;
+ 	}
+--- a/tls/tls_ocsp.c
++++ b/tls/tls_ocsp.c
+@@ -202,22 +202,14 @@
+ 	STACK_OF(X509) *combined = NULL;
+ 	int response_status=0, cert_status=0, crl_reason=0;
+ 	int ret = -1;
+-	unsigned long flags;
+ 
+ 	if ((br = OCSP_response_get1_basic(resp)) == NULL) {
+ 		tls_set_errorx(ctx, "cannot load ocsp reply");
+ 		goto err;
+ 	}
+ 
+-	/*
+-	 * Skip validation of 'extra_certs' as this should be done
+-	 * already as part of main handshake.
+-	 */
+-	flags = OCSP_TRUSTOTHER;
+-
+-	/* now verify */
+-	if (OCSP_basic_verify(br, ctx->ocsp->extra_certs,
+-		SSL_CTX_get_cert_store(ctx->ssl_ctx), flags) != 1) {
++	if (OCSP_basic_verify(br, ctx->ocsp->extra_certs,
++	    SSL_CTX_get_cert_store(ctx->ssl_ctx), 0) != 1) {
+ 		tls_set_errorx(ctx, "ocsp verify failed");
+ 		goto err;
+ 	}

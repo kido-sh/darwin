@@ -1,0 +1,79 @@
+--- a/crypto/pkcs12/p12_add.c
++++ b/crypto/pkcs12/p12_add.c
+@@ -172,6 +172,8 @@
+ 		PKCS12error(PKCS12_R_CONTENT_TYPE_NOT_DATA);
+ 		return NULL;
+ 	}
++	if (p7->d.data == NULL)
++		return NULL;
+ 	return ASN1_item_unpack(p7->d.data, &PKCS12_SAFEBAGS_it);
+ }
+ 
+@@ -225,6 +227,8 @@
+ PKCS12_unpack_p7encdata(PKCS7 *p7, const char *pass, int passlen)
+ {
+ 	if (!PKCS7_type_is_encrypted(p7))
++		return NULL;
++	if (p7->d.encrypted == NULL || p7->d.encrypted->enc_data == NULL)
+ 		return NULL;
+ 	return PKCS12_item_decrypt_d2i(p7->d.encrypted->enc_data->algorithm,
+ 	    &PKCS12_SAFEBAGS_it, pass, passlen,
+@@ -253,6 +257,8 @@
+ 		PKCS12error(PKCS12_R_CONTENT_TYPE_NOT_DATA);
+ 		return NULL;
+ 	}
++	if (p12->authsafes->d.data == NULL)
++		return NULL;
+ 	return ASN1_item_unpack(p12->authsafes->d.data,
+ 	    &PKCS12_AUTHSAFES_it);
+ }
+--- a/crypto/pkcs12/p12_decr.c
++++ b/crypto/pkcs12/p12_decr.c
+@@ -128,6 +128,11 @@
+ 	void *ret;
+ 	int outlen;
+ 
++	if (oct == NULL) {
++		PKCS12error(ERR_R_PASSED_NULL_PARAMETER);
++		return NULL;
++	}
++
+ 	if (!PKCS12_pbe_crypt(algor, pass, passlen, oct->data, oct->length,
+ 	    &out, &outlen, 0)) {
+ 		PKCS12error(PKCS12_R_PKCS12_PBE_CRYPT_ERROR);
+--- a/crypto/pkcs12/p12_kiss.c
++++ b/crypto/pkcs12/p12_kiss.c
+@@ -227,11 +227,17 @@
+ 	ASN1_BMPSTRING *fname = NULL;
+ 	ASN1_OCTET_STRING *lkid = NULL;
+ 
+-	if ((attrib = PKCS12_get_attr (bag, NID_friendlyName)))
++	if ((attrib = PKCS12_get_attr (bag, NID_friendlyName))) {
++		if (attrib->type != V_ASN1_BMPSTRING)
++			return 0;
+ 		fname = attrib->value.bmpstring;
+-
+-	if ((attrib = PKCS12_get_attr (bag, NID_localKeyID)))
++	}
++
++	if ((attrib = PKCS12_get_attr (bag, NID_localKeyID))) {
++		if (attrib->type != V_ASN1_OCTET_STRING)
++			return 0;
+ 		lkid = attrib->value.octet_string;
++	}
+ 
+ 	switch (OBJ_obj2nid(bag->type)) {
+ 	case NID_keyBag:
+--- a/crypto/pkcs12/p12_mutl.c
++++ b/crypto/pkcs12/p12_mutl.c
+@@ -83,6 +83,10 @@
+ 		PKCS12error(PKCS12_R_CONTENT_TYPE_NOT_DATA);
+ 		return 0;
+ 	}
++	if (p12->authsafes->d.data == NULL) {
++		PKCS12error(PKCS12_R_DECODE_ERROR);
++		return 0;
++	}
+ 
+ 	salt = p12->mac->salt->data;
+ 	saltlen = p12->mac->salt->length;

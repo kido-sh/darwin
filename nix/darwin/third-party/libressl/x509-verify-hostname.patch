@@ -1,0 +1,15 @@
+--- a/crypto/x509/x509_verify.c
++++ b/crypto/x509/x509_verify.c
+@@ -578,8 +578,11 @@
+ 		if (ctx->xsc != NULL) {
+ 			int ret;
+ 
+-			if ((ret = x509_vfy_check_id(ctx->xsc)) == 0)
++			ret = x509_vfy_check_id(ctx->xsc);
++			if (ctx->xsc->error != X509_V_OK) {
+ 				ctx->error = ctx->xsc->error;
++				ctx->error_depth = ctx->xsc->error_depth;
++			}
+ 			return ret;
+ 		}
+ 		return 1;

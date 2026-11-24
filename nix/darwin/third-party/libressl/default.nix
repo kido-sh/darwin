@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The kido authors
 #
 # macOS's LibreSSL 3.3.6: /usr/lib/libcrypto.46.dylib, libssl.48 and libtls.20 under macOS's install
-# names, versions and exports, /usr/bin/openssl and /usr/bin/ocspcheck.
+# names, versions and exports, /usr/bin/openssl and /usr/bin/ocspcheck, with LibreSSL's later fixes.
 { stdenv
 , lib
 , fetchurl
@@ -33,6 +33,20 @@ stdenv.mkDerivation rec {
     url = "https://ftp.openbsd.org/pub/OpenBSD/LibreSSL/libressl-${version}.tar.gz";
     hash = "sha256-PyiEk2XhGQ2yuvkBT/loYBLCWxym34s6CF94niT+S5o=";
   };
+
+  patches = [
+    ./general-name-x400.patch
+    ./cms-pwri-unwrap.patch
+    ./cms-oaep-label.patch
+    ./pkcs12-null-checks.patch
+    ./x509-name-constraints.patch
+    ./x509-verify-depth.patch
+    ./x509-verify-hostname.patch
+    ./crldp-no-relative-name.patch
+    ./dtls-handshake-limits.patch
+    ./ocsp-no-trust-other.patch
+    ./sigalgs-limit.patch
+  ];
 
   outputs = [ "out" "dev" ];
 

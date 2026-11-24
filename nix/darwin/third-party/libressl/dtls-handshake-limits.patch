@@ -1,0 +1,89 @@
+--- a/ssl/d1_both.c
++++ b/ssl/d1_both.c
+@@ -449,7 +449,7 @@
+ 		return SSL_AD_ILLEGAL_PARAMETER;
+ 	}
+ 
+-	if ((frag_off + frag_len) > (unsigned long)max) {
++	if (msg_len > (unsigned long)max) {
+ 		SSLerror(s, SSL_R_EXCESSIVE_MESSAGE_SIZE);
+ 		return SSL_AD_ILLEGAL_PARAMETER;
+ 	}
+@@ -542,19 +542,21 @@
+  * but may be greater if the maximum certificate list size requires it.
+  */
+ static unsigned long
+-dtls1_max_handshake_message_len(const SSL *s)
++dtls1_max_handshake_message_len(const SSL *s, uint8_t msg_type)
+ {
+ 	unsigned long max_len;
+ 
+ 	max_len = DTLS1_HM_HEADER_LENGTH + SSL3_RT_MAX_ENCRYPTED_LENGTH;
+-	if (max_len < (unsigned long)s->internal->max_cert_list)
+-		return s->internal->max_cert_list;
++	if (msg_type == SSL3_MT_CERTIFICATE &&
++	    max_len < (unsigned long)s->internal->max_cert_list)
++		max_len = s->internal->max_cert_list;
+ 	return max_len;
+ }
+ 
+ static int
+-dtls1_reassemble_fragment(SSL *s, struct hm_header_st* msg_hdr, int *ok)
++dtls1_reassemble_fragment(SSL *s, struct hm_header_st *msg_hdr, int *ok)
+ {
++	piterator iter;
+ 	hm_fragment *frag = NULL;
+ 	pitem *item = NULL;
+ 	int i = -1, is_complete;
+@@ -562,7 +564,7 @@
+ 	unsigned long frag_len = msg_hdr->frag_len;
+ 
+ 	if ((msg_hdr->frag_off + frag_len) > msg_hdr->msg_len ||
+-	    msg_hdr->msg_len > dtls1_max_handshake_message_len(s))
++	    msg_hdr->msg_len > dtls1_max_handshake_message_len(s, msg_hdr->type))
+ 		goto err;
+ 
+ 	if (frag_len == 0) {
+@@ -577,6 +579,14 @@
+ 	item = pqueue_find(D1I(s)->buffered_messages, seq64be);
+ 
+ 	if (item == NULL) {
++		/* Ensure that we only have one of each handshake message type. */
++		iter = pqueue_iterator(D1I(s)->buffered_messages);
++		for (item = pqueue_next(&iter); item != NULL; item = pqueue_next(&iter)) {
++			frag = (hm_fragment *)item->data;
++			if (frag->msg_header.type == msg_hdr->type)
++				goto err;
++		}
++
+ 		frag = dtls1_hm_fragment_new(msg_hdr->msg_len, 1);
+ 		if (frag == NULL)
+ 			goto err;
+@@ -701,7 +711,7 @@
+ 		if (frag_len < msg_hdr->msg_len)
+ 			return dtls1_reassemble_fragment(s, msg_hdr, ok);
+ 
+-		if (frag_len > dtls1_max_handshake_message_len(s))
++		if (frag_len > dtls1_max_handshake_message_len(s, msg_hdr->type))
+ 			goto err;
+ 
+ 		frag = dtls1_hm_fragment_new(frag_len, 0);
+@@ -1032,6 +1042,7 @@
+ 	memcpy(s->internal->init_buf->data, frag->fragment,
+ 	    frag->msg_header.msg_len + header_length);
+ 	s->internal->init_num = frag->msg_header.msg_len + header_length;
++	s->internal->init_off = 0;
+ 
+ 	dtls1_set_message_header_int(s, frag->msg_header.type,
+ 	    frag->msg_header.msg_len, frag->msg_header.seq, 0,
+--- a/ssl/d1_pkt.c
++++ b/ssl/d1_pkt.c
+@@ -215,7 +215,7 @@
+ 	pitem *item;
+ 
+ 	/* Limit the size of the queue to prevent DOS attacks */
+-	if (pqueue_size(queue->q) >= 100)
++	if (pqueue_size(queue->q) >= 16)
+ 		return 0;
+ 
+ 	rdata = malloc(sizeof(DTLS1_RECORD_DATA_INTERNAL));
