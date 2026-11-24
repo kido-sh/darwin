@@ -119,12 +119,14 @@ In this repository:
   (PDArmPlatformExpert), which stops it under VZ as well as QEMU; tested in test/kernel.
 - macOS's LibreSSL: libcrypto.46, libssl.48 and libtls.20 in /usr/lib with macOS's install names,
   versions and exports, and the openssl and ocspcheck tools in /usr/bin. They are built from
-  LibreSSL 3.3.6, the release macOS ships, with backports of LibreSSL's later security fixes.
-  The libraries are arm64e, as on macOS. libcurl weak-links libssl and libcrypto as macOS's does.
+  LibreSSL 3.3.6, the release macOS ships, with backports of LibreSSL's later security fixes,
+  among them LibreSSL 4.0's RSA key exchange, which treats a bad padding like a good padding with
+  a wrong secret and checks it in constant time. The libraries are arm64e, as on macOS. libcurl weak-links libssl and libcrypto as macOS's does.
   Security.framework's corecrypto glue, its SecureTransport, PKCS #12 import and CMS decoding run on
   them too, so the image carries no OpenSSL. SecureTransport offers TLS 1.0 to 1.2 with macOS's
   cipher list and error codes, as macOS's does. The tests are in test/ssl and test/security, which
-  also runs its programs against macOS's own frameworks and compares the results.
+  also runs its programs against macOS's own frameworks and compares the results. The build
+  host's xar, inside ld64 and otool, links nixpkgs' LibreSSL as well.
 - An APSL header on Ext4FileSystemDriver.cpp, which is derived from Apple's AppleFileSystemDriver.
 - The Nix code reorganized under nix/ and the tree pruned to what the container builds.
 - The licensing files and the change notices.
