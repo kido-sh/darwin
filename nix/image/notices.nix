@@ -16,7 +16,6 @@
 , xz
 , libffiReal
 , libxml2
-, openssl
 , libressl
 , sqlite
 , agent
@@ -94,7 +93,6 @@ let
     [ "xz" xz.src "COPYING.0BSD" ]
     [ "libffi" libffiReal.src "LICENSE" ]
     [ "libxml2" libxml2.src "Copyright" ]
-    [ "openssl" openssl.src "LICENSE.txt" ]
     [ "libressl" libressl.src "COPYING" ]
     [ "sqlite" sqlite.src "LICENSE.md" ]
     [ "go" go.src "LICENSE" ]

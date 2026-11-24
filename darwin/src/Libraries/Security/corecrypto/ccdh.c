@@ -1,9 +1,8 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 
 #include <corecrypto/ccdh.h>
-#include "cc_openssl.h"
+#include "cc_libressl.h"
 
-#include <openssl/crypto.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -47,11 +46,12 @@ static int dh_draw_private(ccdh_const_gp_t gp, struct ccrng_state *rng, cc_unit 
     size_t bits = fixed_length ? l : pbits;
     size_t nbytes = (bits + 7) / 8;
     uint8_t *buf = malloc(nbytes);
-    BIGNUM *candidate = BN_secure_new();
+    BIGNUM *candidate = BN_new();
     int rv = CCERR_INTERNAL;
 
     if (buf == NULL || candidate == NULL || pbits < 3)
         goto out;
+    BN_set_flags(candidate, BN_FLG_CONSTTIME);
     for (;;) {
         if ((rv = ccrng_generate(rng, nbytes, buf)) != CCERR_OK)
             goto out;

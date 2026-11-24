@@ -4,7 +4,7 @@
 , libobjc
 , foundation
 , sqlite
-, openssl
+, libressl
 , libz
 , src
 , pname ? "kido-security"
@@ -39,7 +39,7 @@ in
     "-DPUREDARWIN_LIBOBJC_PREFIX=${libobjc}"
     "-DPUREDARWIN_FOUNDATION_PREFIX=${foundation}"
     "-DPUREDARWIN_SQLITE_PREFIX=${sqlite}"
-    "-DPUREDARWIN_OPENSSL_PREFIX=${openssl}"
+    "-DPUREDARWIN_LIBRESSL_PREFIX=${libressl.dev}"
     "-DPUREDARWIN_ZLIB_PREFIX=${libz}"
   ];
 }).overrideAttrs (old: {

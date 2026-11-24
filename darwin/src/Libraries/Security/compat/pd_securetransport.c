@@ -1,17 +1,20 @@
-// pd_securetransport.c - SecureTransport over OpenSSL
 // Copyright (c) 2026 The PureDarwin Project, SPDX-License-Identifier: MPL-2.0 OR BSD-2-Clause
 
-// the SSL context API as macOS defines it, with OpenSSL doing the TLS work through a BIO over the caller's I/O
 // SecTrust judges peer certificates, and a caller that asked to break on peer authentication is suspended there
 
 // OpenSSL first: libDER, under Security's headers, defines ASN1_* macros that clash with OpenSSL's type names
+#include <openssl/dh.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#ifndef TLS1_3_VERSION
+#define TLS1_3_VERSION 0x0304
+#endif
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreFoundation/CFRuntime.h>
 #include <Security/Security.h>
 #include "../apple/OSX/libsecurity_ssl/lib/SecureTransport.h"
+#include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +33,8 @@ struct SSLContext {
     Boolean breakOnServerAuth;
     Boolean breakOnClientAuth;
     Boolean peerAuthReported;
+    Boolean breakPending;
+    Boolean writesHeld;
     Boolean trustFailed;
     OSStatus ioError;
     CFArrayRef peerCertificates;
@@ -63,6 +68,10 @@ static int bioWrite(BIO *bio, const char *data, int length)
     OSStatus status;
 
     BIO_clear_retry_flags(bio);
+    if (context->writesHeld) {
+        BIO_set_retry_write(bio);
+        return -1;
+    }
     status = context->writeFunc(context->connection, data, &moved);
     if (status == noErr || (status == errSSLWouldBlock && moved > 0))
         return (int)moved;
@@ -182,10 +191,8 @@ static int verifyPeer(X509_STORE_CTX *store, void *argument)
         context->peerCertificates = copyPeerChain(store);
     // the caller judges the peer between the two handshake calls
     if (breakHere) {
-        if (!context->peerAuthReported) {
-            context->peerAuthReported = true;
-            SSL_set_retry_verify(ssl);
-        }
+        if (!context->peerAuthReported)
+            context->breakPending = context->writesHeld = true;
         return 1;
     }
     trust = createTrust(context);
@@ -202,8 +209,6 @@ static OSStatus statusFor(SSLContextRef context, int result)
     case SSL_ERROR_WANT_READ:
     case SSL_ERROR_WANT_WRITE:
         return errSSLWouldBlock;
-    case SSL_ERROR_WANT_RETRY_VERIFY:
-        return errSSLPeerAuthCompleted;
     case SSL_ERROR_ZERO_RETURN:
         context->state = kSSLClosed;
         return errSSLClosedGraceful;
@@ -388,27 +393,23 @@ OSStatus SSLGetSupportedCiphers(SSLContextRef context, SSLCipherSuite *ciphers, 
     if (*numCiphers < count)
         return errSSLBufferOverflow;
     for (size_t i = 0; i < count; i++)
-        ciphers[i] = SSL_CIPHER_get_protocol_id(sk_SSL_CIPHER_value(available, (int)i));
+        ciphers[i] = SSL_CIPHER_get_value(sk_SSL_CIPHER_value(available, (int)i));
     *numCiphers = count;
     return noErr;
 }
 
-// TLS 1.3 suites and the older ones are configured apart, a list left empty keeps OpenSSL's defaults
 OSStatus SSLSetEnabledCiphers(SSLContextRef context, const SSLCipherSuite *ciphers, size_t numCiphers)
 {
     size_t size = numCiphers * 64 + 1;
-    char *tls13 = calloc(1, size), *older = calloc(1, size);
+    char *list = calloc(1, size);
     OSStatus status = noErr;
 
-    if (context == NULL || (ciphers == NULL && numCiphers > 0) || tls13 == NULL || older == NULL) {
-        free(tls13);
-        free(older);
+    if (context == NULL || (ciphers == NULL && numCiphers > 0) || list == NULL) {
+        free(list);
         return errSecParam;
     }
     for (size_t i = 0; i < numCiphers; i++) {
-        unsigned char id[2] = { ciphers[i] >> 8, ciphers[i] & 0xff };
-        const SSL_CIPHER *cipher = SSL_CIPHER_find(context->ssl, id);
-        char *list = (ciphers[i] >> 8) == 0x13 ? tls13 : older;
+        const SSL_CIPHER *cipher = SSL_CIPHER_get_by_value(ciphers[i]);
 
         if (cipher == NULL)
             continue;
@@ -416,12 +417,9 @@ OSStatus SSLSetEnabledCiphers(SSLContextRef context, const SSLCipherSuite *ciphe
             strlcat(list, ":", size);
         strlcat(list, SSL_CIPHER_get_name(cipher), size);
     }
-    if (*tls13 && !SSL_set_ciphersuites(context->ssl, tls13))
+    if (*list && !SSL_set_cipher_list(context->ssl, list))
         status = errSSLBadCipherSuite;
-    if (*older && !SSL_set_cipher_list(context->ssl, older))
-        status = errSSLBadCipherSuite;
-    free(tls13);
-    free(older);
+    free(list);
     return status;
 }
 
@@ -433,7 +431,7 @@ OSStatus SSLGetNegotiatedCipher(SSLContextRef context, SSLCipherSuite *cipherSui
         return errSecParam;
     if (cipher == NULL)
         return errSSLSessionNotFound;
-    *cipherSuite = SSL_CIPHER_get_protocol_id(cipher);
+    *cipherSuite = SSL_CIPHER_get_value(cipher);
     return noErr;
 }
 
@@ -459,7 +457,6 @@ OSStatus SSLSetALPNProtocols(SSLContextRef context, CFArrayRef protocols)
         memcpy(wire + length, name, nameLength);
         length += nameLength;
     }
-    // OpenSSL answers 0 for success here
     return SSL_set_alpn_protos(context->ssl, wire, (unsigned int)length) == 0 ? noErr : errSecParam;
 }
 
@@ -497,8 +494,6 @@ static X509 *copyX509(SecCertificateRef certificate)
     return x509;
 }
 
-// the identity's key reaches OpenSSL as PKCS#1, which is what SecKey exports for RSA.
-// other key types have no such encoding here and are refused
 OSStatus SSLSetCertificate(SSLContextRef context, CFArrayRef certRefs)
 {
     SecIdentityRef identity;
@@ -569,19 +564,19 @@ OSStatus SSLSetClientSideAuthenticate(SSLContextRef context, SSLAuthenticate aut
     return noErr;
 }
 
-// DER DHparams as Apple takes them, without any OpenSSL picks a group by the key size
 OSStatus SSLSetDiffieHellmanParams(SSLContextRef context, const void *dhParams, size_t dhParamsLen)
 {
     const unsigned char *bytes = dhParams;
-    EVP_PKEY *parameters;
+    DH *parameters;
 
     if (context == NULL || context->side != kSSLServerSide)
         return errSecParam;
-    parameters = dhParams ? d2i_KeyParams(EVP_PKEY_DH, NULL, &bytes, (long)dhParamsLen) : NULL;
-    if (parameters && SSL_set0_tmp_dh_pkey(context->ssl, parameters))
+    parameters = dhParams ? d2i_DHparams(NULL, &bytes, (long)dhParamsLen) : NULL;
+    if (parameters && SSL_set_tmp_dh(context->ssl, parameters)) {
+        DH_free(parameters);
         return noErr;
-    if (parameters)
-        EVP_PKEY_free(parameters);
+    }
+    DH_free(parameters);
     SSL_set_dh_auto(context->ssl, 1);
     return noErr;
 }
@@ -598,7 +593,16 @@ OSStatus SSLHandshake(SSLContextRef context)
         return errSSLClosedAbort;
     context->state = kSSLHandshake;
     context->ioError = noErr;
+    if (context->peerAuthReported)
+        context->writesHeld = false;
     result = SSL_do_handshake(context->ssl);
+    if (context->breakPending && (result == 1 || SSL_get_error(context->ssl, result) == SSL_ERROR_WANT_WRITE)) {
+        context->breakPending = false;
+        context->peerAuthReported = true;
+        if (result == 1)
+            context->state = kSSLConnected;
+        return errSSLPeerAuthCompleted;
+    }
     if (result == 1) {
         context->state = kSSLConnected;
         return noErr;
@@ -616,7 +620,6 @@ OSStatus SSLCopyPeerTrust(SSLContextRef context, SecTrustRef *trust)
 
 OSStatus SSLRead(SSLContextRef context, void *data, size_t dataLength, size_t *processed)
 {
-    size_t moved = 0;
     int result;
 
     if (processed)
@@ -628,9 +631,9 @@ OSStatus SSLRead(SSLContextRef context, void *data, size_t dataLength, size_t *p
     if (dataLength == 0)
         return noErr;
     context->ioError = noErr;
-    result = SSL_read_ex(context->ssl, data, dataLength, &moved);
-    if (result == 1) {
-        *processed = moved;
+    result = SSL_read(context->ssl, data, dataLength > INT_MAX ? INT_MAX : (int)dataLength);
+    if (result > 0) {
+        *processed = (size_t)result;
         return noErr;
     }
     return statusFor(context, result);
@@ -638,7 +641,6 @@ OSStatus SSLRead(SSLContextRef context, void *data, size_t dataLength, size_t *p
 
 OSStatus SSLWrite(SSLContextRef context, const void *data, size_t dataLength, size_t *processed)
 {
-    size_t moved = 0;
     int result;
 
     if (processed)
@@ -650,9 +652,9 @@ OSStatus SSLWrite(SSLContextRef context, const void *data, size_t dataLength, si
     if (dataLength == 0)
         return noErr;
     context->ioError = noErr;
-    result = SSL_write_ex(context->ssl, data, dataLength, &moved);
-    if (result == 1) {
-        *processed = moved;
+    result = SSL_write(context->ssl, data, dataLength > INT_MAX ? INT_MAX : (int)dataLength);
+    if (result > 0) {
+        *processed = (size_t)result;
         return noErr;
     }
     return statusFor(context, result);

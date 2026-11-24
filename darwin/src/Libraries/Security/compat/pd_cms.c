@@ -1,8 +1,4 @@
-// pd_cms.c - CMS signed-message decoding over OpenSSL
 // Copyright (c) 2026 The PureDarwin Project, SPDX-License-Identifier: MPL-2.0 OR BSD-2-Clause
-
-// OpenSSL parses the message and checks each signature, SecTrust judges the signer with the caller's policy
-// certificates-only PKCS#7 bundles, as CA issuer URLs serve, are read the same way
 
 // OpenSSL first: libDER, under Security's headers, defines ASN1_* macros that clash with OpenSSL's type names
 #include <openssl/cms.h>
@@ -158,7 +154,6 @@ OSStatus CMSDecoderCopyAllCerts(CMSDecoderRef cmsDecoder, CFArrayRef *certsOut)
     return errSecSuccess;
 }
 
-// the signature is OpenSSL's to check, the signer's certificate SecTrust's under the caller's policy
 OSStatus CMSDecoderCopySignerStatus(CMSDecoderRef cmsDecoder, size_t signerIndex, CFTypeRef policyOrArray,
     Boolean evaluateSecTrust, CMSSignerStatus *signerStatusOut, SecTrustRef *secTrustOut,
     OSStatus *certVerifyResultCodeOut)

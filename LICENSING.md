@@ -136,7 +136,6 @@ this repository.
 
 | Component | Version | License | Where |
 |---|---|---|---|
-| OpenSSL | 3.6.3 | `Apache-2.0` | Linked into Security.framework and /usr/lib/libcurl.4.dylib |
 | LibreSSL | 3.3.6 | `OpenSSL`, `SSLeay-standalone`, `ISC`, `BSD-3-Clause`, `LicenseRef-Public-Domain` | /usr/lib/libcrypto.46.dylib, libssl.48.dylib and libtls.20.dylib, /usr/bin/openssl, /usr/bin/ocspcheck, and /etc/ssl/openssl.cnf and x509v3.cnf |
 | SQLite | 3.51.2 | `blessing` | Linked into Security.framework |
 | zsh | 5.9.1 | `LicenseRef-zsh` | /bin/zsh. The GPL-2.0 completion functions are removed |
@@ -167,7 +166,7 @@ These were in the PureDarwin tree and are not in this repository:
 
 - Darling's GPL-3.0 code: libxpc's xpc_error.c (replaced by kido's xpc_errors.c and clean-room
   helpers and headers), the corecrypto Security.framework built on (replaced by the MPL-2.0
-  corecrypto plus kido's glue over OpenSSL), and cmake/circular.cmake.
+  corecrypto plus kido's glue over LibreSSL), and cmake/circular.cmake.
 - xnu's built-in corecrypto under Apple's Internal Use License, which forbids redistribution: 89
   files in osfmk/corecrypto, osfmk/arm64/corecrypto and EXTERNAL_HEADERS/corecrypto. The kernel
   builds the same functions from darwin/external/corecrypto plus kido's HMAC_DRBG.

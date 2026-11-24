@@ -232,8 +232,6 @@ let
     src = coreServicesSource;
     corefoundation = coreFoundationArm64Build;
   };
-  opensslArm64Build = mkArm64Build ./third-party/openssl.nix { };
-  opensslThreadsArm64Build = opensslArm64Build.override { withThreads = true; };
   securityArm64Build = mkArm64Build ./apple/security.nix {
     pname = "kido-security-arm64";
     inherit mkPureDarwinBuild;
@@ -242,7 +240,7 @@ let
     foundation = foundationArm64Build;
     sqlite = sqliteArm64Build;
     src = securitySource;
-    openssl = opensslThreadsArm64Build;
+    libressl = libresslArm64eBuild;
     libz = libzDylibArm64Build;
   };
   # Apple's SymptomReporter is a private framework with no source and

@@ -3,16 +3,10 @@
 #include <corecrypto/ccrsa.h>
 #include <corecrypto/ccder.h>
 #include <corecrypto/cczp_priv.h>
-#include "cc_openssl.h"
+#include "cc_libressl.h"
 
-#include <openssl/core_names.h>
-#include <openssl/crypto.h>
-#include <openssl/evp.h>
-#include <openssl/param_build.h>
-#include <openssl/params.h>
+#include <limits.h>
 #include <openssl/rsa.h>
-#include <stdlib.h>
-#include <string.h>
 
 enum { RSA_D, RSA_P, RSA_Q, RSA_DP, RSA_DQ, RSA_QINV, RSA_NPRIV };
 
@@ -39,15 +33,6 @@ static void rsa_set_prime_headers(ccrsa_full_ctx_t key)
     }
 }
 
-static const char *const rsa_priv_params[RSA_NPRIV] = {
-    OSSL_PKEY_PARAM_RSA_D,
-    OSSL_PKEY_PARAM_RSA_FACTOR1,
-    OSSL_PKEY_PARAM_RSA_FACTOR2,
-    OSSL_PKEY_PARAM_RSA_EXPONENT1,
-    OSSL_PKEY_PARAM_RSA_EXPONENT2,
-    OSSL_PKEY_PARAM_RSA_COEFFICIENT1,
-};
-
 static const uint8_t rsa_encryption_oid[] = {
     0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01
 };
@@ -72,40 +57,38 @@ int ccrsa_pub_crypt(ccrsa_pub_ctx_t key, cc_unit *out, const cc_unit *in)
     return CCERR_OK;
 }
 
-static EVP_PKEY *rsa_pkey_from_full(ccrsa_full_ctx_t key)
+static RSA *rsa_from_full(ccrsa_full_ctx_t key)
 {
     cc_size n = ccrsa_ctx_n(key);
     BIGNUM *pub[2] = { cc_bn_from_ccn(n, ccrsa_ctx_m(key)), cc_bn_from_ccn(n, ccrsa_ctx_e(key)) };
     BIGNUM *priv[RSA_NPRIV] = { NULL };
-    OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
-    OSSL_PARAM *params = NULL;
-    EVP_PKEY_CTX *ctx = NULL;
-    EVP_PKEY *pkey = NULL;
-    int ok = bld != NULL && pub[0] != NULL && pub[1] != NULL
-        && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_N, pub[0])
-        && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_RSA_E, pub[1]);
+    RSA *rsa = RSA_new();
+    bool ok = rsa != NULL && pub[0] != NULL && pub[1] != NULL;
 
-    for (int i = 0; ok && i < RSA_NPRIV; i++) {
-        priv[i] = cc_bn_from_secret_ccn(n, RSA_PRIV(key, i));
-        ok = priv[i] != NULL && OSSL_PARAM_BLD_push_BN(bld, rsa_priv_params[i], priv[i]);
-    }
-    ok = ok && (params = OSSL_PARAM_BLD_to_param(bld)) != NULL
-        && (ctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL)) != NULL
-        && EVP_PKEY_fromdata_init(ctx) > 0
-        && EVP_PKEY_fromdata(ctx, &pkey, EVP_PKEY_KEYPAIR, params) > 0;
-    if (!ok) {
-        EVP_PKEY_free(pkey);
-        pkey = NULL;
-    }
+    for (int i = 0; ok && i < RSA_NPRIV; i++)
+        ok = (priv[i] = cc_bn_from_secret_ccn(n, RSA_PRIV(key, i))) != NULL;
+    if (ok && RSA_set0_key(rsa, pub[0], pub[1], priv[RSA_D]))
+        pub[0] = pub[1] = priv[RSA_D] = NULL;
+    else
+        ok = false;
+    if (ok && RSA_set0_factors(rsa, priv[RSA_P], priv[RSA_Q]))
+        priv[RSA_P] = priv[RSA_Q] = NULL;
+    else
+        ok = false;
+    if (ok && RSA_set0_crt_params(rsa, priv[RSA_DP], priv[RSA_DQ], priv[RSA_QINV]))
+        priv[RSA_DP] = priv[RSA_DQ] = priv[RSA_QINV] = NULL;
+    else
+        ok = false;
 
-    EVP_PKEY_CTX_free(ctx);
-    OSSL_PARAM_free(params);
-    OSSL_PARAM_BLD_free(bld);
     BN_free(pub[0]);
     BN_free(pub[1]);
     for (int i = 0; i < RSA_NPRIV; i++)
         BN_clear_free(priv[i]);
-    return pkey;
+    if (!ok) {
+        RSA_free(rsa);
+        return NULL;
+    }
+    return rsa;
 }
 
 int ccrsa_priv_crypt(ccrsa_full_ctx_t key, cc_unit *out, const cc_unit *in)
@@ -118,24 +101,20 @@ int ccrsa_priv_crypt(ccrsa_full_ctx_t key, cc_unit *out, const cc_unit *in)
         return CCERR_PARAMETER;
 
     uint8_t *buf = malloc(2 * k);
-    EVP_PKEY *pkey = rsa_pkey_from_full(key);
-    EVP_PKEY_CTX *ctx = pkey != NULL ? EVP_PKEY_CTX_new_from_pkey(NULL, pkey, NULL) : NULL;
-    size_t outlen = k;
+    RSA *rsa = rsa_from_full(key);
+    int outlen;
 
-    if (buf != NULL && ctx != NULL
+    if (buf != NULL && rsa != NULL && k <= INT_MAX && (size_t)RSA_size(rsa) == k
         && ccn_write_uint_padded(n, in, k, buf) == CCERR_OK
-        && EVP_PKEY_decrypt_init(ctx) > 0
-        && EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_NO_PADDING) > 0
-        && EVP_PKEY_decrypt(ctx, buf + k, &outlen, buf, k) > 0
-        && ccn_read_uint(n, out, outlen, buf + k) == CCERR_OK)
+        && (outlen = RSA_private_decrypt((int)k, buf, buf + k, rsa, RSA_NO_PADDING)) > 0
+        && ccn_read_uint(n, out, (size_t)outlen, buf + k) == CCERR_OK)
         rv = CCERR_OK;
 
     if (buf != NULL) {
         OPENSSL_cleanse(buf, 2 * k);
         free(buf);
     }
-    EVP_PKEY_CTX_free(ctx);
-    EVP_PKEY_free(pkey);
+    RSA_free(rsa);
     return rv;
 }
 
@@ -360,33 +339,31 @@ int ccrsa_generate_fips186_key(size_t nbits, ccrsa_full_ctx_t key,
 {
     (void)rng1;
     (void)rng2;
-    EVP_PKEY_CTX *ctx = NULL;
-    EVP_PKEY *pkey = NULL;
+    RSA *rsa = NULL;
     BIGNUM *bn_e = NULL;
     BIGNUM *v[RSA_NBN] = { NULL };
+    const BIGNUM *got[RSA_NBN] = { NULL };
     int rv = CCERR_PARAMETER;
 
     if (nbits < 512 || nbits > 16384 || ccn_nof(nbits) > ccrsa_ctx_n(key) || e == NULL || e_size == 0)
         return CCERR_PARAMETER;
     if ((bn_e = BN_bin2bn(e, (int)e_size, NULL)) == NULL
-        || (ctx = EVP_PKEY_CTX_new_from_name(NULL, "RSA", NULL)) == NULL
-        || EVP_PKEY_keygen_init(ctx) <= 0
-        || EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, (int)nbits) <= 0
-        || EVP_PKEY_CTX_set1_rsa_keygen_pubexp(ctx, bn_e) <= 0
-        || EVP_PKEY_generate(ctx, &pkey) <= 0)
+        || (rsa = RSA_new()) == NULL
+        || RSA_generate_key_ex(rsa, (int)nbits, bn_e, NULL) != 1)
         goto out;
 
-    rv = EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_N, &v[RSA_BN_N]) > 0
-        && EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_RSA_E, &v[RSA_BN_E]) > 0 ? CCERR_OK : CCERR_INTERNAL;
-    for (int i = 0; rv == CCERR_OK && i < RSA_NPRIV; i++)
-        rv = EVP_PKEY_get_bn_param(pkey, rsa_priv_params[i], &v[RSA_BN_PRIV + i]) > 0 ? CCERR_OK : CCERR_INTERNAL;
+    RSA_get0_key(rsa, &got[RSA_BN_N], &got[RSA_BN_E], &got[RSA_BN_PRIV + RSA_D]);
+    RSA_get0_factors(rsa, &got[RSA_BN_PRIV + RSA_P], &got[RSA_BN_PRIV + RSA_Q]);
+    RSA_get0_crt_params(rsa, &got[RSA_BN_PRIV + RSA_DP], &got[RSA_BN_PRIV + RSA_DQ], &got[RSA_BN_PRIV + RSA_QINV]);
+    rv = CCERR_OK;
+    for (int i = 0; rv == CCERR_OK && i < RSA_NBN; i++)
+        rv = got[i] != NULL && (v[i] = BN_dup(got[i])) != NULL ? CCERR_OK : CCERR_INTERNAL;
     if (rv == CCERR_OK)
         rv = rsa_set_full(key, v);
 
 out:
     rsa_free_bns(v);
-    EVP_PKEY_free(pkey);
-    EVP_PKEY_CTX_free(ctx);
+    RSA_free(rsa);
     BN_free(bn_e);
     return rv;
 }
@@ -396,14 +373,14 @@ int ccrsa_make_priv(ccrsa_full_ctx_t key, size_t e_size, const uint8_t *e,
                     size_t p_size, const uint8_t *p, size_t q_size, const uint8_t *q)
 {
     BIGNUM *v[RSA_NBN] = { NULL };
-    BIGNUM *p1 = BN_secure_new(), *q1 = BN_secure_new(), *g = BN_secure_new(), *lambda = BN_secure_new();
-    BN_CTX *ctx = BN_CTX_secure_new();
+    BIGNUM *p1 = BN_new(), *q1 = BN_new(), *g = BN_new(), *lambda = BN_new();
+    BN_CTX *ctx = BN_CTX_new();
     bool ok = p1 != NULL && q1 != NULL && g != NULL && lambda != NULL && ctx != NULL;
 
     v[RSA_BN_N] = BN_new();
     v[RSA_BN_E] = e != NULL ? BN_bin2bn(e, (int)e_size, NULL) : NULL;
     for (int i = RSA_BN_PRIV; i < RSA_NBN; i++) {
-        if ((v[i] = BN_secure_new()) != NULL)
+        if ((v[i] = BN_new()) != NULL)
             BN_set_flags(v[i], BN_FLG_CONSTTIME);
         ok = ok && v[i] != NULL;
     }

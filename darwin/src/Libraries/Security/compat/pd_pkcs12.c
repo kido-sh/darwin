@@ -1,11 +1,8 @@
-// pd_pkcs12.c - SecPKCS12Import over OpenSSL
 // Copyright (c) 2026 The PureDarwin Project, SPDX-License-Identifier: MPL-2.0 OR BSD-2-Clause
-
-// OpenSSL decodes the file, each key and its certificate come back as a SecIdentity with the rest of the chain
 
 // OpenSSL first: libDER, under Security's headers, defines ASN1_* macros that clash with OpenSSL's type names
 #include <openssl/bn.h>
-#include <openssl/core_names.h>
+#include <openssl/ec.h>
 #include <openssl/evp.h>
 #include <openssl/pkcs12.h>
 #include <openssl/x509.h>
@@ -42,7 +39,7 @@ static SecCertificateRef createCertificate(X509 *x509)
 // SecKey takes RSA keys as PKCS#1 and EC keys as 04 || X || Y || K, as SecKeyCopyExternalRepresentation gives them
 static CFDataRef copyKeyData(EVP_PKEY *pkey, CFStringRef *keyType)
 {
-    if (EVP_PKEY_is_a(pkey, "RSA")) {
+    if (EVP_PKEY_base_id(pkey) == EVP_PKEY_RSA) {
         unsigned char *der = NULL;
         int length = i2d_PrivateKey(pkey, &der);
         CFDataRef data = length > 0 ? CFDataCreate(kCFAllocatorDefault, der, length) : NULL;
@@ -51,21 +48,25 @@ static CFDataRef copyKeyData(EVP_PKEY *pkey, CFStringRef *keyType)
         *keyType = kSecAttrKeyTypeRSA;
         return data;
     }
-    if (EVP_PKEY_is_a(pkey, "EC")) {
+    if (EVP_PKEY_base_id(pkey) == EVP_PKEY_EC) {
+        EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
+        const EC_GROUP *group = ec ? EC_KEY_get0_group(ec) : NULL;
+        const EC_POINT *pub = ec ? EC_KEY_get0_public_key(ec) : NULL;
+        const BIGNUM *secret = ec ? EC_KEY_get0_private_key(ec) : NULL;
         unsigned char point[133];
         size_t pointLength = 0;
-        BIGNUM *secret = NULL;
         CFMutableDataRef data = NULL;
-        int fieldBytes = (EVP_PKEY_get_bits(pkey) + 7) / 8;
+        int fieldBytes = group ? (EC_GROUP_get_degree(group) + 7) / 8 : 0;
+        int secretBytes = secret ? BN_num_bytes(secret) : 0;
 
-        if (EVP_PKEY_get_octet_string_param(pkey, OSSL_PKEY_PARAM_PUB_KEY, point, sizeof(point), &pointLength) &&
-            EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_PRIV_KEY, &secret) && point[0] == 0x04) {
+        if (pub)
+            pointLength = EC_POINT_point2oct(group, pub, POINT_CONVERSION_UNCOMPRESSED, point, sizeof(point), NULL);
+        if (pointLength > 0 && secret && point[0] == 0x04 && secretBytes <= fieldBytes) {
             data = CFDataCreateMutable(kCFAllocatorDefault, 0);
             CFDataAppendBytes(data, point, pointLength);
             CFDataIncreaseLength(data, fieldBytes);
-            BN_bn2binpad(secret, CFDataGetMutableBytePtr(data) + pointLength, fieldBytes);
+            BN_bn2bin(secret, CFDataGetMutableBytePtr(data) + pointLength + fieldBytes - secretBytes);
         }
-        BN_clear_free(secret);
         *keyType = kSecAttrKeyTypeECSECPrimeRandom;
         return data;
     }

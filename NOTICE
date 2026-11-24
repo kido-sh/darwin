@@ -82,10 +82,6 @@ Other code in the tree, each under the license its files state:
 Third-party components built into the image
 -------------------------------------------
 
-OpenSSL 3.6.3, linked into Security.framework and libcurl
-  Copyright (c) 1998-2025 The OpenSSL Project Authors. Apache License 2.0.
-  https://www.openssl.org
-
 LibreSSL 3.3.6 with fixes from its later releases: /usr/lib/libcrypto.46.dylib,
 libssl.48 and libtls.20, /usr/bin/openssl and /usr/bin/ocspcheck
   Copyright (c) 1998-2011 The OpenSSL Project. Copyright (C) 1995-1998 Eric

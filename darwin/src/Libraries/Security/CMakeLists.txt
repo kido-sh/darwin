@@ -144,7 +144,7 @@ target_include_directories(Security PRIVATE
     ${CMAKE_SOURCE_DIR}/src/Libraries/IOKit/iokituser/include
     ${PUREDARWIN_COREFOUNDATION_PREFIX}/include
     ${PUREDARWIN_SQLITE_PREFIX}/include
-    ${PUREDARWIN_OPENSSL_PREFIX}/include
+    ${PUREDARWIN_LIBRESSL_PREFIX}/include
     ${PUREDARWIN_LIBOBJC_PREFIX}/usr/include
     ${PUREDARWIN_FOUNDATION_PREFIX}/usr/include
     # before the external tree: some of these headers extend its own with #include_next
@@ -214,14 +214,11 @@ target_link_options(Security PRIVATE
     -lFoundation
     -Wl,-L,${PUREDARWIN_SQLITE_PREFIX}/lib
     -lsqlite3
-    # SecureTransport's TLS, kept out of the framework's exports
-    -Wl,-L,${PUREDARWIN_OPENSSL_PREFIX}/lib
-    -Wl,-hidden-lssl
-    -Wl,-hidden-lcrypto
+    -Wl,-L,${PUREDARWIN_LIBRESSL_PREFIX}/lib
+    -lssl
+    -lcrypto
     -lSystem)
 
-# corecrypto: the external tree's primitives, plus its RSA public-key code and the Montgomery
-# arithmetic under it, and corecrypto/ for the rest (DER, RSA private keys, EC and DH) over OpenSSL
 pd_corecrypto_sources(_sec_cc_external ${PD_CORECRYPTO_COMPONENTS} ccrsa cczp)
 add_library(security_corecrypto_external OBJECT ${_sec_cc_external})
 target_include_directories(security_corecrypto_external PRIVATE ${PD_CORECRYPTO_INCLUDE_DIRS})

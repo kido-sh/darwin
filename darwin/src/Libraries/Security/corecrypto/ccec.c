@@ -2,17 +2,14 @@
 
 #include <corecrypto/ccec.h>
 #include <corecrypto/ccder.h>
-#include "cc_openssl.h"
+#include "cc_libressl.h"
 
-#include <openssl/core_names.h>
-#include <openssl/crypto.h>
+#include <limits.h>
 #include <openssl/ec.h>
-#include <openssl/evp.h>
+#include <openssl/ecdh.h>
+#include <openssl/ecdsa.h>
 #include <openssl/obj_mac.h>
-#include <openssl/param_build.h>
-#include <openssl/params.h>
 #include <stdarg.h>
-#include <string.h>
 
 #define EC_MAX_PRIME_SIZE 66
 #define EC_MAX_POINT_SIZE (1 + 2 * EC_MAX_PRIME_SIZE)
@@ -98,38 +95,32 @@ void ccec_export_pub(ccec_pub_ctx_t key, void *out)
     ccn_write_uint_padded(ccec_ctx_n(key), ccec_ctx_y(key), size, o + 1 + size);
 }
 
-static EVP_PKEY *ec_pkey(ccec_const_cp_t cp, const uint8_t *point, size_t point_len, const cc_unit *k)
+static EC_KEY *ec_key(ccec_const_cp_t cp, const uint8_t *point, size_t point_len, const cc_unit *k)
 {
-    OSSL_PARAM_BLD *bld = OSSL_PARAM_BLD_new();
+    EC_KEY *eckey = EC_KEY_new_by_curve_name(cp->nid);
+    const EC_GROUP *group = eckey != NULL ? EC_KEY_get0_group(eckey) : NULL;
+    EC_POINT *pub = group != NULL ? EC_POINT_new(group) : NULL;
     BIGNUM *priv = NULL;
-    OSSL_PARAM *params = NULL;
-    EVP_PKEY_CTX *ctx = NULL;
-    EVP_PKEY *pkey = NULL;
-    int ok = bld != NULL
-        && OSSL_PARAM_BLD_push_utf8_string(bld, OSSL_PKEY_PARAM_GROUP_NAME, cp->name, 0)
-        && OSSL_PARAM_BLD_push_octet_string(bld, OSSL_PKEY_PARAM_PUB_KEY, point, point_len);
+    int ok = pub != NULL
+        && EC_POINT_oct2point(group, pub, point, point_len, NULL)
+        && EC_POINT_is_on_curve(group, pub, NULL) == 1
+        && !EC_POINT_is_at_infinity(group, pub)
+        && EC_KEY_set_public_key(eckey, pub);
 
     if (ok && k != NULL) {
         ok = (priv = cc_bn_from_secret_ccn(ccec_cp_n(cp), k)) != NULL
-            && OSSL_PARAM_BLD_push_BN(bld, OSSL_PKEY_PARAM_PRIV_KEY, priv);
+            && EC_KEY_set_private_key(eckey, priv);
     }
-    ok = ok && (params = OSSL_PARAM_BLD_to_param(bld)) != NULL
-        && (ctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL)) != NULL
-        && EVP_PKEY_fromdata_init(ctx) > 0
-        && EVP_PKEY_fromdata(ctx, &pkey, k != NULL ? EVP_PKEY_KEYPAIR : EVP_PKEY_PUBLIC_KEY, params) > 0;
-    if (!ok) {
-        EVP_PKEY_free(pkey);
-        pkey = NULL;
-    }
-
-    EVP_PKEY_CTX_free(ctx);
-    OSSL_PARAM_free(params);
-    OSSL_PARAM_BLD_free(bld);
+    EC_POINT_free(pub);
     BN_clear_free(priv);
-    return pkey;
+    if (!ok) {
+        EC_KEY_free(eckey);
+        return NULL;
+    }
+    return eckey;
 }
 
-static EVP_PKEY *ec_pkey_from_key(ccec_pub_ctx_t key, const cc_unit *k)
+static EC_KEY *ec_key_from_key(ccec_pub_ctx_t key, const cc_unit *k)
 {
     uint8_t point[EC_MAX_POINT_SIZE];
     size_t len;
@@ -137,7 +128,7 @@ static EVP_PKEY *ec_pkey_from_key(ccec_pub_ctx_t key, const cc_unit *k)
     if (ccec_ctx_cp(key) == NULL || (len = ccec_export_pub_size(key)) > sizeof(point))
         return NULL;
     ccec_export_pub(key, point);
-    return ec_pkey(ccec_ctx_cp(key), point, len, k);
+    return ec_key(ccec_ctx_cp(key), point, len, k);
 }
 
 int ccec_import_pub(ccec_const_cp_t cp, size_t in_len, const uint8_t *in, ccec_pub_ctx_t key)
@@ -148,10 +139,10 @@ int ccec_import_pub(ccec_const_cp_t cp, size_t in_len, const uint8_t *in, ccec_p
     if (in_len != 1 + 2 * size || in[0] != 0x04)
         return CCERR_PARAMETER;
 
-    EVP_PKEY *pkey = ec_pkey(cp, in, in_len, NULL);
-    if (pkey == NULL)
+    EC_KEY *eckey = ec_key(cp, in, in_len, NULL);
+    if (eckey == NULL)
         return CCERR_PARAMETER;
-    EVP_PKEY_free(pkey);
+    EC_KEY_free(eckey);
 
     ccec_ctx_init(cp, key);
     if (ccn_read_uint(ccec_cp_n(cp), ccec_ctx_x(key), size, in + 1) != CCERR_OK
@@ -165,18 +156,20 @@ static int ec_set_public(const EC_GROUP *group, ccec_full_ctx_t key)
 {
     cc_size n = ccec_ctx_n(key);
     BIGNUM *k = cc_bn_from_secret_ccn(n, ccec_ctx_k(key));
-    BIGNUM *x = BN_new(), *y = BN_new();
+    BIGNUM *x = BN_new(), *y = BN_new(), *order = BN_new();
     EC_POINT *point = EC_POINT_new(group);
     BN_CTX *bnctx = BN_CTX_new();
-    int ok = k != NULL && x != NULL && y != NULL && point != NULL && bnctx != NULL
-        && !BN_is_zero(k) && BN_cmp(k, EC_GROUP_get0_order(group)) < 0
+    int ok = k != NULL && x != NULL && y != NULL && order != NULL && point != NULL && bnctx != NULL
+        && EC_GROUP_get_order(group, order, bnctx)
+        && !BN_is_zero(k) && BN_cmp(k, order) < 0
         && EC_POINT_mul(group, point, k, NULL, NULL, bnctx)
-        && EC_POINT_get_affine_coordinates(group, point, x, y, bnctx)
+        && EC_POINT_get_affine_coordinates_GFp(group, point, x, y, bnctx)
         && cc_bn_to_ccn(x, n, ccec_ctx_x(key)) == CCERR_OK
         && cc_bn_to_ccn(y, n, ccec_ctx_y(key)) == CCERR_OK;
 
     BN_CTX_free(bnctx);
     EC_POINT_clear_free(point);
+    BN_free(order);
     BN_free(x);
     BN_free(y);
     BN_clear_free(k);
@@ -186,13 +179,12 @@ static int ec_set_public(const EC_GROUP *group, ccec_full_ctx_t key)
 int ccec_generate_key_fips(ccec_const_cp_t cp, struct ccrng_state *rng, ccec_full_ctx_t key)
 {
     EC_GROUP *group = cp != NULL ? EC_GROUP_new_by_curve_name(cp->nid) : NULL;
-    BIGNUM *k = BN_secure_new();
+    BIGNUM *k = BN_new(), *order = BN_new();
     uint8_t buf[EC_MAX_PRIME_SIZE];
     int rv = CCERR_INTERNAL;
 
-    if (group == NULL || k == NULL)
+    if (group == NULL || k == NULL || order == NULL || !EC_GROUP_get_order(group, order, NULL))
         goto out;
-    const BIGNUM *order = EC_GROUP_get0_order(group);
     int bits = BN_num_bits(order);
     size_t nbytes = (size_t)(bits + 7) / 8;
     if (nbytes > sizeof(buf))
@@ -220,6 +212,7 @@ int ccec_generate_key_fips(ccec_const_cp_t cp, struct ccrng_state *rng, ccec_ful
 out:
     OPENSSL_cleanse(buf, sizeof(buf));
     BN_clear_free(k);
+    BN_free(order);
     EC_GROUP_free(group);
     return rv;
 }
@@ -318,17 +311,19 @@ int ccec_sign(ccec_full_ctx_t key, size_t digest_len, const uint8_t *digest,
               size_t *sig_len, uint8_t *sig, struct ccrng_state *rng)
 {
     (void)rng;
-    EVP_PKEY *pkey = ec_pkey_from_key(ccec_ctx_pub(key), ccec_ctx_k(key));
-    EVP_PKEY_CTX *ctx = pkey != NULL ? EVP_PKEY_CTX_new_from_pkey(NULL, pkey, NULL) : NULL;
-    size_t len = *sig_len;
-    int rv = (ctx != NULL
-              && EVP_PKEY_sign_init(ctx) > 0
-              && EVP_PKEY_sign(ctx, sig, &len, digest, digest_len) > 0) ? CCERR_OK : CCERR_INTERNAL;
+    EC_KEY *eckey = ec_key_from_key(ccec_ctx_pub(key), ccec_ctx_k(key));
+    uint8_t der[2 * (EC_MAX_PRIME_SIZE + 4) + 8];
+    unsigned int len = 0;
+    int rv = (eckey != NULL && digest_len <= INT_MAX && (size_t)ECDSA_size(eckey) <= sizeof(der)
+              && ECDSA_sign(0, digest, (int)digest_len, der, &len, eckey) == 1) ? CCERR_OK : CCERR_INTERNAL;
 
-    if (rv == CCERR_OK)
+    if (rv == CCERR_OK && len > *sig_len)
+        rv = CCERR_PARAMETER;
+    if (rv == CCERR_OK) {
+        memcpy(sig, der, len);
         *sig_len = len;
-    EVP_PKEY_CTX_free(ctx);
-    EVP_PKEY_free(pkey);
+    }
+    EC_KEY_free(eckey);
     return rv;
 }
 
@@ -336,19 +331,17 @@ int ccec_verify(ccec_pub_ctx_t key, size_t digest_len, const uint8_t *digest,
                 size_t sig_len, const uint8_t *sig, bool *valid)
 {
     *valid = false;
-    EVP_PKEY *pkey = ec_pkey_from_key(key, NULL);
-    EVP_PKEY_CTX *ctx = pkey != NULL ? EVP_PKEY_CTX_new_from_pkey(NULL, pkey, NULL) : NULL;
+    EC_KEY *eckey = ec_key_from_key(key, NULL);
     int rv = CCERR_PARAMETER;
 
-    if (ctx != NULL && EVP_PKEY_verify_init(ctx) > 0) {
-        int result = EVP_PKEY_verify(ctx, sig, sig_len, digest, digest_len);
+    if (eckey != NULL && digest_len <= INT_MAX && sig_len <= INT_MAX) {
+        int result = ECDSA_verify(0, digest, (int)digest_len, sig, (int)sig_len, eckey);
         if (result >= 0) {
             *valid = result == 1;
             rv = CCERR_OK;
         }
     }
-    EVP_PKEY_CTX_free(ctx);
-    EVP_PKEY_free(pkey);
+    EC_KEY_free(eckey);
     return rv;
 }
 
@@ -362,20 +355,18 @@ int ccecdh_compute_shared_secret(ccec_full_ctx_t private_key, ccec_pub_ctx_t pub
     if (cp == NULL || ccec_ctx_cp(public_key) != cp || *computed_shared_secret_len < ccec_cp_prime_size(cp))
         return CCERR_PARAMETER;
 
-    EVP_PKEY *mine = ec_pkey_from_key(ccec_ctx_pub(private_key), ccec_ctx_k(private_key));
-    EVP_PKEY *peer = ec_pkey_from_key(public_key, NULL);
-    EVP_PKEY_CTX *ctx = mine != NULL ? EVP_PKEY_CTX_new_from_pkey(NULL, mine, NULL) : NULL;
-    size_t len = *computed_shared_secret_len;
-    int rv = (ctx != NULL && peer != NULL
-              && EVP_PKEY_derive_init(ctx) > 0
-              && EVP_PKEY_derive_set_peer(ctx, peer) > 0
-              && EVP_PKEY_derive(ctx, computed_shared_secret, &len) > 0
-              && len == ccec_cp_prime_size(cp)) ? CCERR_OK : CCERR_INTERNAL;
+    EC_KEY *mine = ec_key_from_key(ccec_ctx_pub(private_key), ccec_ctx_k(private_key));
+    EC_KEY *peer = ec_key_from_key(public_key, NULL);
+    size_t len = ccec_cp_prime_size(cp);
+    int rv = (mine != NULL && peer != NULL
+              && ECDH_compute_key(computed_shared_secret, len, EC_KEY_get0_public_key(peer), mine, NULL) == (int)len)
+        ? CCERR_OK : CCERR_INTERNAL;
 
     if (rv == CCERR_OK)
         *computed_shared_secret_len = len;
-    EVP_PKEY_CTX_free(ctx);
-    EVP_PKEY_free(peer);
-    EVP_PKEY_free(mine);
+    else
+        cc_clear(len, computed_shared_secret);
+    EC_KEY_free(peer);
+    EC_KEY_free(mine);
     return rv;
 }
