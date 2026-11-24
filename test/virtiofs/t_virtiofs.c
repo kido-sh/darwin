@@ -548,6 +548,19 @@ bench(const char *path)
     return 0;
 }
 
+static double
+lstat_round(const char *dir, char **names, size_t n)
+{
+    struct stat st;
+    char path[2048];
+    double t0 = now();
+    for (size_t i = 0; i < n; i++) {
+        snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+        lstat(path, &st);
+    }
+    return (now() - t0) / (double)n * 1e6;
+}
+
 static int
 bench_meta(const char *dir, int rounds)
 {
@@ -566,27 +579,23 @@ bench_meta(const char *dir, int rounds)
     closedir(d);
     double listed = now() - t0;
 
-    struct stat st;
-    char path[2048];
+    double cold = lstat_round(dir, names, n), warm = 0;
     t0 = now();
     double c0 = cpu();
-    for (int r = 0; r < rounds; r++) {
-        for (size_t i = 0; i < n; i++) {
-            snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
-            lstat(path, &st);
-        }
-    }
-    double statted = now() - t0, statcpu = cpu() - c0;
+    for (int r = 1; r < rounds; r++)
+        warm += lstat_round(dir, names, n) / (rounds - 1);
+    double busy = (cpu() - c0) / (now() - t0);
     t0 = now();
+    char path[2048];
     for (size_t i = 0; i < n; i++) {
         snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
         int fd = open(path, O_RDONLY);
         if (fd >= 0)
             close(fd);
     }
-    double opened = now() - t0;
-    printf("%s: readdir of %zu entries %.2f ms, lstat %.1f us each at %.2f CPUs busy, open+close %.1f us each\n",
-           dir, n, listed * 1e3, statted / (rounds * (double)n) * 1e6, statcpu / statted, opened / (double)n * 1e6);
+    double opened = (now() - t0) / (double)n * 1e6;
+    printf("%s: readdir of %zu entries %.2f ms, lstat %.1f us each first, then %.1f us at %.2f CPUs busy, "
+           "open+close %.1f us each\n", dir, n, listed * 1e3, cold, warm, busy, opened);
     return 0;
 }
 
