@@ -86,6 +86,8 @@ public:
     // word for our purposes, so a single 32-bit call is enough here.
     bool negotiateFeatures(uint32_t driverFeatureBitsLow);
     uint32_t deviceFeaturesLow();
+    uint32_t deviceFeatures(uint32_t word);
+    uint16_t numQueues();
     void setDriverOk();
     bool isDeviceOk(); // DRIVER_OK still set, DEVICE_NEEDS_RESET not set
 

@@ -39,6 +39,7 @@ enum {
     kCommonDriverFeatureSelect = 8,
     kCommonDriverFeature       = 12,
     kCommonMsixConfig          = 16,
+    kCommonNumQueues           = 18,
     kCommonDeviceStatus        = 20,
     kCommonQueueSelect         = 22,
     kCommonQueueSize           = 24,
@@ -241,6 +242,19 @@ IOVirtIOTransport::deviceFeaturesLow()
 {
     w32(fCommonCfg + kCommonDeviceFeatureSelect, 0);
     return r32(fCommonCfg + kCommonDeviceFeature);
+}
+
+uint32_t
+IOVirtIOTransport::deviceFeatures(uint32_t word)
+{
+    w32(fCommonCfg + kCommonDeviceFeatureSelect, word);
+    return r32(fCommonCfg + kCommonDeviceFeature);
+}
+
+uint16_t
+IOVirtIOTransport::numQueues()
+{
+    return r16(fCommonCfg + kCommonNumQueues);
 }
 
 bool
