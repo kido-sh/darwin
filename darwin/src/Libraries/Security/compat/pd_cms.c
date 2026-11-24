@@ -154,6 +154,29 @@ OSStatus CMSDecoderCopyAllCerts(CMSDecoderRef cmsDecoder, CFArrayRef *certsOut)
     return errSecSuccess;
 }
 
+static bool contentMatches(CMSDecoderRef decoder, CMS_SignerInfo *signer)
+{
+    BIO *content = NULL, *chain;
+    char buffer[4096];
+    bool matches;
+
+    if (decoder->detachedContent) {
+        content = BIO_new_mem_buf(CFDataGetBytePtr(decoder->detachedContent), (int)CFDataGetLength(decoder->detachedContent));
+        if (content == NULL)
+            return false;
+    }
+    chain = CMS_dataInit(decoder->cms, content);
+    if (chain == NULL) {
+        BIO_free(content);
+        return false;
+    }
+    while (BIO_read(chain, buffer, sizeof(buffer)) > 0)
+        ;
+    matches = CMS_SignerInfo_verify_content(signer, chain) > 0;
+    BIO_free_all(chain);
+    return matches;
+}
+
 OSStatus CMSDecoderCopySignerStatus(CMSDecoderRef cmsDecoder, size_t signerIndex, CFTypeRef policyOrArray,
     Boolean evaluateSecTrust, CMSSignerStatus *signerStatusOut, SecTrustRef *secTrustOut,
     OSStatus *certVerifyResultCodeOut)
@@ -161,7 +184,6 @@ OSStatus CMSDecoderCopySignerStatus(CMSDecoderRef cmsDecoder, size_t signerIndex
     STACK_OF(CMS_SignerInfo) *signers;
     CMS_SignerInfo *signer;
     X509 *signerX509 = NULL;
-    BIO *content = NULL;
     CMSSignerStatus status = kCMSSignerUnsigned;
     OSStatus certResult = errSecSuccess;
     SecTrustRef trust = NULL;
@@ -194,13 +216,8 @@ OSStatus CMSDecoderCopySignerStatus(CMSDecoderRef cmsDecoder, size_t signerIndex
         status = kCMSSignerInvalidCert;
         goto out;
     }
-    if (cmsDecoder->detachedContent)
-        content = BIO_new_mem_buf(CFDataGetBytePtr(cmsDecoder->detachedContent),
-            (int)CFDataGetLength(cmsDecoder->detachedContent));
-    // the signed attributes hold the content digest, checking them checks the content
-    if (content && CMS_SignerInfo_verify_content(signer, content) <= 0)
-        status = kCMSSignerInvalidSignature;
-    else if (CMS_SignerInfo_verify(signer) <= 0)
+    if ((CMS_signed_get_attr_count(signer) >= 0 && CMS_SignerInfo_verify(signer) <= 0) ||
+        !contentMatches(cmsDecoder, signer))
         status = kCMSSignerInvalidSignature;
     else
         status = kCMSSignerValid;
@@ -230,8 +247,6 @@ OSStatus CMSDecoderCopySignerStatus(CMSDecoderRef cmsDecoder, size_t signerIndex
         }
     }
 out:
-    if (content)
-        BIO_free(content);
     if (signerStatusOut)
         *signerStatusOut = status;
     if (certVerifyResultCodeOut)
