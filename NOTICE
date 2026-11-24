@@ -140,6 +140,13 @@ the converters in /usr/lib/i18n, /usr/bin/iconv and the tables in
   in any form for internal or external distribution as long as this notice
   remains attached."
 
+Apple's libutil-73, /usr/lib/libutil.dylib
+  Copyright Apple Inc., Copyright (c) 1994 The Regents of the University of
+  California, Copyright (c) 2005 Pawel Jakub Dawidek, Copyright (c) 1999 and
+  2001 Brian Somers, and the holders named in each file. Apple Public Source
+  License 2.0, BSD 2-Clause, FreeBSD's BSD 2-Clause and BSD 3-Clause
+  licenses. https://github.com/apple-oss-distributions/libutil
+
 ICU 76.1
   Copyright (c) 2016-2024 Unicode, Inc. Copyright (c) 1995-2016 International
   Business Machines Corporation and others. License and third-party notices:

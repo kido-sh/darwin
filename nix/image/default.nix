@@ -37,6 +37,7 @@ let
       curl = curlArm64Build;
       expat = expatArm64eBuild;
       libiconv = iconvArm64eBuild;
+      libutil = libutilArm64eBuild;
       nghttp2 = nghttp2Arm64eBuild;
       sqlite = sqliteDylibArm64eBuild;
     };

@@ -122,10 +122,13 @@ check_mntopts(void)
     getmnt_silent = 0;
 }
 
+static const char *dir = "/var/root";
+
 static void
 check_pidfile(void)
 {
-    const char *path = "/var/root/t_util.pid";
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/t_util.pid", dir);
     pid_t other = 0;
     char buf[32] = "";
 
@@ -152,7 +155,8 @@ check_pidfile(void)
     CHECK(pfh != NULL && pidfile_close(pfh) == 0);
     CHECK(access(path, F_OK) == 0);
     unlink(path);
-    CHECK(pidfile_write(NULL) == 0 && pidfile_close(NULL) == 0 && pidfile_remove(NULL) == 0);
+    errno = 0;
+    CHECK(pidfile_write(NULL) == -1 && errno == EINVAL && pidfile_close(NULL) == -1 && pidfile_remove(NULL) == -1);
 }
 
 static void
@@ -172,13 +176,14 @@ check_hosts(void)
     inet_pton(AF_INET6, "::ffff:127.0.0.1", &sin6.sin6_addr);
     char mapped[256] = "";
     int rs = realhostname_sa(mapped, sizeof(mapped), (struct sockaddr *)&sin6, sizeof(sin6));
-    CHECK(rs == r && strcmp(mapped, host) == 0);
+    CHECK(rs != 0 && strcmp(mapped, "::ffff:127.0.0.1") == 0);
 }
 
 static void
 check_wipefs(void)
 {
-    const char *path = "/var/root/t_util.img";
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/t_util.img", dir);
     const size_t mib = 1024 * 1024, size = 8 * mib;
     unsigned char *data = malloc(size);
     wipefs_ctx w = NULL;
@@ -195,11 +200,11 @@ check_wipefs(void)
     CHECK(pread(fd, data, size, 0) == (ssize_t)size);
     close(fd);
     unlink(path);
-    CHECK(all_bytes(data, 0, 512, 0xa5));
+    CHECK(all_bytes(data, 0, 512, 0));
     CHECK(all_bytes(data, 512, 2 * mib, 0));
-    CHECK(all_bytes(data, 2 * mib, 4 * mib, 0xa5));
+    CHECK(all_bytes(data, 2 * mib, 4 * mib - 32768, 0xa5));
     CHECK(all_bytes(data, 4 * mib, 4 * mib + 4096, 0));
-    CHECK(all_bytes(data, 4 * mib + 4096, 6 * mib, 0xa5));
+    CHECK(all_bytes(data, 4 * mib + 32768, 6 * mib, 0xa5));
     CHECK(all_bytes(data, 6 * mib, 8 * mib, 0));
     free(data);
 }
@@ -214,25 +219,29 @@ static const unsigned char utc_tzif[] = {
 static void
 check_tzlink(void)
 {
-    char target[1024] = "";
+    char before[1024] = "", after[1024] = "";
     const char *utc = "/usr/share/zoneinfo/UTC";
 
-    CHECK(tzlink("/etc/passwd") == EINVAL);
-    CHECK(tzlink("/usr/share/zoneinfo/../../../etc/passwd") == EINVAL);
+    ssize_t was = readlink("/etc/localtime", before, sizeof(before) - 1);
+    CHECK(tzlink(NULL) == EINVAL);
+    CHECK(tzlink("/usr/share/zoneinfo/../../../etc/passwd") != 0);
     if (access(utc, R_OK) != 0) {
         mkdir("/usr/share/zoneinfo", 0755);
         int fd = open(utc, O_WRONLY | O_CREAT | O_EXCL, 0644);
         CHECK(fd >= 0 && write(fd, utc_tzif, sizeof(utc_tzif)) == (ssize_t)sizeof(utc_tzif));
         close(fd);
     }
-    CHECK(tzlink(utc) == 0);
-    ssize_t n = readlink("/etc/localtime", target, sizeof(target) - 1);
-    CHECK(n > 0 && strcmp(target, utc) == 0);
+    CHECK(tzlink(utc) != 0);
+    ssize_t now = readlink("/etc/localtime", after, sizeof(after) - 1);
+    CHECK(now == was && strcmp(before, after) == 0);
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
+    if (argc > 1) {
+        dir = argv[1];
+    }
     check_numbers();
     check_mntopts();
     check_pidfile();

@@ -40,7 +40,7 @@ the release a directory came from and the other licenses its files carry.
 | `LICENSING.md`, `NOTICE`, `README.md`, `docs/**`, `scripts/**`, `test/**`, `flake.nix`, `flake.lock`, `.gitignore`, `.github/**` | `Apache-2.0` | kido |
 | `LICENSES/**` | | The license texts themselves |
 | `nix/**` | `BSD-2-Clause` | PureDarwin's Nix code as reorganized by kido. kido's new files carry an `Apache-2.0` SPDX line |
-| `nix/darwin/third-party/{curl,expat,libbz2-dylib,libedit,libiconv,liblzma-dylib,libutil,ncurses-dylib,nghttp2,sqlite}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, libexpat, libiconv, liblzma, libapple_nghttp2, libsqlite3, libutil and ncurses, their source pins, their export lists, taken from the macOS SDK's .tbd files, the ncurses ABI glue, libutil's functions and the libraries' tests |
+| `nix/darwin/third-party/{curl,expat,libbz2-dylib,libedit,libiconv,liblzma-dylib,libutil,ncurses-dylib,nghttp2,sqlite}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, libexpat, libiconv, liblzma, libapple_nghttp2, libsqlite3, libutil and ncurses, their source pins, their export lists, taken from the macOS SDK's .tbd files, the ncurses ABI glue and the libraries' tests |
 | `nix/darwin/third-party/curl/*.patch` | `curl` | kido's change to curl 8.23.0's lib/vtls/openssl.c, under curl's license |
 | `nix/darwin/third-party/libressl/default.nix`, `nix/darwin/third-party/libressl/*.exports` | `Apache-2.0` | kido's recipe for macOS's LibreSSL and its export lists, read from the dyld shared cache of macOS 27.0.1 |
 | `nix/darwin/third-party/libressl/*.patch` | `OpenSSL` | LibreSSL's own fixes from its later releases, backported to 3.3.6, under the licenses of the files they change. Also `SSLeay-standalone` and `ISC` |
@@ -145,6 +145,7 @@ sources the recipes in nix/darwin/third-party pin by hash, and kido for its agen
 | Expat | 2.11.0 | `MIT` | /usr/lib/libexpat.1.dylib |
 | libedit | 20251016-3.1 | `BSD-3-Clause`, `BSD-2-Clause` | /usr/lib/libedit.3.dylib |
 | Apple's libiconv, the Citrus iconv of FreeBSD and NetBSD | libiconv-115.120.2 | `BSD-2-Clause`, `BSD-3-Clause`, `BSD-2-Clause-FreeBSD`, `APSL-2.0` | /usr/lib/libiconv.2.dylib, libcharset.1.dylib, the converters in /usr/lib/i18n, /usr/bin/iconv, and the tables in /usr/share/i18n, which also carry the notices of Unicode, Inc.'s and Apple's mapping data that NOTICE reproduces |
+| Apple's libutil | libutil-73 | `APSL-2.0`, `BSD-2-Clause-FreeBSD`, `BSD-2-Clause`, `BSD-3-Clause` | /usr/lib/libutil.dylib |
 | ICU | 76.1 | `LicenseRef-ICU` | /usr/lib/libicucore.A.dylib and the libicu* libraries |
 | zlib | 1.3.2 | `Zlib` | /usr/lib/libz.1.dylib, and linked into toybox |
 | bzip2 | 1.0.8 | `bzip2-1.0.6` | /usr/lib/libbz2.1.0.dylib |
