@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2007-2023 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -426,6 +426,81 @@ machine_switch_cpu_data(thread_t old, thread_t new)
 	__builtin_arm_wsr64("TPIDR_EL0", new_tpidr);
 }
 
+#if HAS_USER_PAC
+#define APIAKEYLO_EL1 "S3_0_C2_C1_0"
+#define APIAKEYHI_EL1 "S3_0_C2_C1_1"
+#define APIBKEYLO_EL1 "S3_0_C2_C1_2"
+#define APIBKEYHI_EL1 "S3_0_C2_C1_3"
+#define APDAKEYLO_EL1 "S3_0_C2_C2_0"
+#define APDAKEYHI_EL1 "S3_0_C2_C2_1"
+#define APDBKEYLO_EL1 "S3_0_C2_C2_2"
+#define APDBKEYHI_EL1 "S3_0_C2_C2_3"
+#define APGAKEYLO_EL1 "S3_0_C2_C3_0"
+#define APGAKEYHI_EL1 "S3_0_C2_C3_1"
+
+static int8_t user_pac_present = -1;
+
+static inline uint64_t
+user_pac_key_half(uint64_t pid, uint64_t salt)
+{
+	uint64_t x = pid ^ (salt * 0x9e3779b97f4a7c15ULL);
+
+	x ^= x >> 31;
+	x *= 0x7fb5d329728ea185ULL;
+	x ^= x >> 27;
+	x *= 0x81dadef4bc2dd44dULL;
+	return x ^ (x >> 33);
+}
+
+void user_pac_return_to_user(void);
+
+void
+user_pac_return_to_user(void)
+{
+	if (__improbable(user_pac_present < 0)) {
+		user_pac_present = arm64_pac_supported() ? 1 : 0;
+	}
+	if (!user_pac_present) {
+		return;
+	}
+
+	thread_t thread = current_thread();
+	cpu_data_t *cdp = getCpuDatap();
+	uint64_t rop = thread->machine.rop_pid, jop = thread->machine.jop_pid;
+	bool jop_on = !(thread->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP);
+	bool sync = false;
+
+	if (cdp->rop_key != rop) {
+		__builtin_arm_wsr64(APIBKEYLO_EL1, user_pac_key_half(rop, 5));
+		__builtin_arm_wsr64(APIBKEYHI_EL1, user_pac_key_half(rop, 6));
+		__builtin_arm_wsr64(APDBKEYLO_EL1, user_pac_key_half(rop, 7));
+		__builtin_arm_wsr64(APDBKEYHI_EL1, user_pac_key_half(rop, 8));
+		__builtin_arm_wsr64(APGAKEYLO_EL1, user_pac_key_half(rop, 9));
+		__builtin_arm_wsr64(APGAKEYHI_EL1, user_pac_key_half(rop, 10));
+		cdp->rop_key = rop;
+		sync = true;
+	}
+	if (jop_on && cdp->jop_key != jop) {
+		__builtin_arm_wsr64(APIAKEYLO_EL1, user_pac_key_half(jop, 1));
+		__builtin_arm_wsr64(APIAKEYHI_EL1, user_pac_key_half(jop, 2));
+		__builtin_arm_wsr64(APDAKEYLO_EL1, user_pac_key_half(jop, 3));
+		__builtin_arm_wsr64(APDAKEYHI_EL1, user_pac_key_half(jop, 4));
+		cdp->jop_key = jop;
+		sync = true;
+	}
+
+	uint64_t sctlr = __builtin_arm_rsr64("SCTLR_EL1");
+	uint64_t want = jop_on ? (sctlr | SCTLR_PAC_KEYS_ENABLED) : (sctlr & ~SCTLR_PAC_KEYS_ENABLED);
+	if (want != sctlr) {
+		__builtin_arm_wsr64("SCTLR_EL1", want);
+		sync = true;
+	}
+	if (sync) {
+		__builtin_arm_isb(ISB_SY);
+	}
+}
+#endif /* HAS_USER_PAC */
+
 /**
  * routine: machine_switch_pmap_and_extended_context
  *
@@ -590,7 +665,7 @@ machine_thread_create(thread_t thread, task_t task, bool first_thread)
 	thread->machine.cthread_self = 0;
 	thread->machine.kpcb = NULL;
 	thread->machine.exception_trace_code = 0;
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 	thread->machine.rop_pid = task->rop_pid;
 	thread->machine.jop_pid = task->jop_pid;
 	if (task->disable_user_jop) {

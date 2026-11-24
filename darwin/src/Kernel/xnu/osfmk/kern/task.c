@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1230,7 +1230,7 @@ task_init(void)
 
 	ipc_task_enable(kernel_task);
 
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 	kernel_task->rop_pid = ml_default_rop_pid();
 	kernel_task->jop_pid = ml_default_jop_pid();
 	// kernel_task never runs at EL0, but machine_thread_state_convert_from/to_user() relies on
@@ -1405,7 +1405,7 @@ task_create_internal(
 
 	counter_alloc(&(new_task->faults));
 
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 	const uint8_t disable_user_jop = inherit_memory ? parent_task->disable_user_jop : FALSE;
 	ml_task_set_rop_pid(new_task, parent_task, inherit_memory);
 	ml_task_set_jop_pid(new_task, parent_task, inherit_memory, disable_user_jop);

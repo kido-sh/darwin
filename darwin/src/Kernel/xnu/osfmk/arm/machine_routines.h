@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
+ * Modified by the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1313,7 +1314,7 @@ uint64_t perfcontrol_callout_stat_avg(perfcontrol_callout_type_t type,
 uint32_t ml_update_cluster_wfe_recommendation(uint32_t wfe_cluster_id, uint64_t wfe_timeout_abstime_interval, uint64_t wfe_hint_flags);
 #endif /* __arm64__ */
 
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 #define ONES(x) (BIT((x))-1)
 #define PTR_MASK ONES(64-T1SZ_BOOT)
 #define PAC_MASK ~PTR_MASK

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2007-2023 Apple Inc. All rights reserved.
+ * Modified by the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -247,10 +248,13 @@ typedef struct cpu_data {
 		CPU_HALTED,
 		CPU_HALTED_WITH_STATE
 	}                               halt_status;
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 	uint64_t                        rop_key;
 	uint64_t                        jop_key;
 #endif /* defined(HAS_APPLE_PAC) */
+#if HAS_USER_PAC
+#define CPU_USER_PAC_NO_KEY             UINT64_MAX
+#endif
 
 #if CONFIG_CPU_COUNTERS
 	struct cpc_cpu                  cpu_cpc;

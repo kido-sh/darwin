@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -811,6 +811,20 @@ machine_thread_state_convert_to_user(
 	}
 
 	return KERN_SUCCESS;
+#elif HAS_USER_PAC
+	arm_thread_state64_t *ts64 = NULL;
+
+	(void)thread; (void)tssf_flags;
+	if (flavor == ARM_THREAD_STATE64 && *count >= ARM_THREAD_STATE64_COUNT) {
+		ts64 = (arm_thread_state64_t *)tstate;
+	} else if (flavor == ARM_THREAD_STATE && *count >= ARM_UNIFIED_THREAD_STATE_COUNT &&
+	    is_thread_state64((arm_unified_thread_state_t *)tstate)) {
+		ts64 = thread_state64((arm_unified_thread_state_t *)tstate);
+	}
+	if (ts64 != NULL) {
+		ts64->flags = __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH;
+	}
+	return KERN_SUCCESS;
 #else
 	// No conversion to userspace representation on this platform
 	(void)thread; (void)flavor; (void)tstate; (void)count; (void)tssf_flags;
@@ -1105,7 +1119,7 @@ machine_thread_state_convert_from_user(
 		if (ts64->pc) {
 			ts64->pc = PD_STRIP(ts64->pc);
 		}
-		if (ts64->lr) {
+		if (ts64->lr && !(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH)) {
 			ts64->lr = PD_STRIP(ts64->lr);
 		}
 #undef PD_STRIP

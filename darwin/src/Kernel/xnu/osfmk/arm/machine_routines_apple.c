@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2020 Apple Inc. All rights reserved.
+ * Modified by the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -266,6 +267,24 @@ ml_non_arm64e_user_jop_pid(void)
 #else
 	return 0;
 #endif /* HAS_PARAVIRTUALIZED_PAC */
+}
+#elif HAS_USER_PAC
+uint64_t
+ml_default_rop_pid(void)
+{
+	return 0;
+}
+
+uint64_t
+ml_default_jop_pid(void)
+{
+	return 0;
+}
+
+uint64_t
+ml_non_arm64e_user_jop_pid(void)
+{
+	return 0;
 }
 #endif /* HAS_APPLE_PAC */
 

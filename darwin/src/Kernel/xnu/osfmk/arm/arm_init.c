@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -880,6 +880,11 @@ arm_init_idle_cpu(
 #endif
 
 	machine_set_current_thread(cpu_data_ptr->cpu_active_thread);
+
+#if HAS_USER_PAC
+	cpu_data_ptr->rop_key = CPU_USER_PAC_NO_KEY;
+	cpu_data_ptr->jop_key = CPU_USER_PAC_NO_KEY;
+#endif
 
 #if __arm64__
 	wfe_timeout_init();

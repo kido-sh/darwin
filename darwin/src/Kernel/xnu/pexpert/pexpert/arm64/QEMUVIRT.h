@@ -10,6 +10,8 @@
 #define QEMUVIRT_BRINGUP
 #define ARM_ARCH_TIMER
 
+#define HAS_USER_PAC              1
+
 /* VIRT4K: 4KB pages on a Cortex-A53 model, the SUN50I geometry under QEMU */
 #ifndef PD_VIRT_4K
 #define __ARM_16K_PG__            1

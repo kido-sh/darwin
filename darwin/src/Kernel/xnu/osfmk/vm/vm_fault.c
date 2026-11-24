@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -128,6 +128,7 @@
 
 #if defined(__arm64__) && !__has_feature(ptrauth_calls)
 #include <arm/caches_internal.h>
+#include <arm/cpuid.h>
 #endif
 
 #define VM_FAULT_CLASSIFY       0
@@ -2786,6 +2787,7 @@ static void vm_page_validate_cs_internal(vm_page_t page, vm_map_size_t fault_pag
     vm_map_offset_t fault_phys_offset, bool pac_lower);
 #if defined(__arm64__) && !__has_feature(ptrauth_calls)
 static void pd_pac_lower_page(uint32_t *words, size_t nwords);
+static bool pd_pac_lower_enabled(void);
 #endif
 
 /*
@@ -5484,7 +5486,7 @@ upgrade_lock_and_retry:
 			}
 #if defined(__arm64__) && !__has_feature(ptrauth_calls)
 			// execute faults on a file's page take a private copy to lower, when the mapping can hold one
-			if (!need_copy &&
+			if (!need_copy && pd_pac_lower_enabled() &&
 			    (fault_type & VM_PROT_EXECUTE) &&
 			    !cur_object->internal &&
 			    pd_own_map && (cur_object != object || pd_entry_cow)) {
@@ -6964,7 +6966,7 @@ handle_copy_delay:
 		need_copy_on_read = TRUE;
 		need_copy = TRUE;
 #if defined(__arm64__) && !__has_feature(ptrauth_calls)
-	} else if (!need_copy &&
+	} else if (!need_copy && pd_pac_lower_enabled() &&
 	    m != VM_PAGE_NULL &&
 	    (fault_type & VM_PROT_EXECUTE) &&
 	    !VM_PAGE_OBJECT(m)->internal &&
@@ -8966,9 +8968,16 @@ vm_page_validate_cs_fast(
 
 #if defined(__arm64__) && !__has_feature(ptrauth_calls)
 
-/* Forced on while the runtime path is being proven: no boot-arg escape, so a
- * failed boot cannot be blamed on the knob being off. */
-#define pd_pac_lower_enabled true
+static bool
+pd_pac_lower_enabled(void)
+{
+	static int8_t lower = -1;
+
+	if (__improbable(lower < 0)) {
+		lower = arm64_pac_supported() ? 0 : 1;
+	}
+	return lower;
+}
 
 
 /*
@@ -9121,7 +9130,7 @@ vm_page_validate_cs_mapped_slow_internal(
 	 * busy so nothing can execute it yet. Only for a fault into an executable
 	 * mapping: data can match a PAC encoding, and sleh.c emulates what is missed.
 	 */
-	if (pac_lower && nx == 0 && pd_pac_lower_enabled) {
+	if (pac_lower && nx == 0 && pd_pac_lower_enabled()) {
 		pd_pac_lower_page(__DECONST(uint32_t *, kaddr), PAGE_SIZE / 4);
 	}
 #endif /* __arm64__ && !ptrauth_calls */

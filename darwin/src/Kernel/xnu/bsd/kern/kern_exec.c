@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -2032,7 +2032,7 @@ grade:
 		goto bad;
 	}
 
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 	assert(mach_header->cputype == CPU_TYPE_ARM64
 	    );
 
@@ -5065,7 +5065,7 @@ do_fork1:
 	 * as 0 and pretends the call succeeded.
 	 */
 	error = exec_activate_image(imgp);
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 	const uint8_t disable_user_jop = imgp->ip_flags & IMGPF_NOJOP ? TRUE : FALSE;
 	ml_task_set_jop_pid_from_shared_region(new_task, disable_user_jop);
 	ml_task_set_disable_user_jop(new_task, disable_user_jop);
@@ -6139,7 +6139,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 		 * for vfexec.
 		 */
 		new_task = get_threadtask(imgp->ip_new_thread);
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 		ml_task_set_disable_user_jop(new_task, imgp->ip_flags & IMGPF_NOJOP ? TRUE : FALSE);
 		ml_thread_set_disable_user_jop(imgp->ip_new_thread, imgp->ip_flags & IMGPF_NOJOP ? TRUE : FALSE);
 #endif
@@ -6194,7 +6194,7 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 	}
 
 
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 	if (imgp->ip_new_thread && !error) {
 		ml_task_set_jop_pid_from_shared_region(new_task, imgp->ip_flags & IMGPF_NOJOP);
 		ml_thread_set_jop_pid(imgp->ip_new_thread, new_task);

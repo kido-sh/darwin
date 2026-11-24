@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -711,6 +711,11 @@ cpu_init(void)
 
 	assert(exception_stack_pointer() != 0);
 
+#if HAS_USER_PAC
+	cdp->rop_key = CPU_USER_PAC_NO_KEY;
+	cdp->jop_key = CPU_USER_PAC_NO_KEY;
+#endif
+
 	if (cdp->cpu_type != CPU_TYPE_ARM64) {
 		cdp->cpu_type = CPU_TYPE_ARM64;
 
@@ -879,6 +884,9 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
 #if defined(HAS_APPLE_PAC)
 	cpu_data_ptr->rop_key = 0;
 	cpu_data_ptr->jop_key = ml_default_jop_pid();
+#elif HAS_USER_PAC
+	cpu_data_ptr->rop_key = CPU_USER_PAC_NO_KEY;
+	cpu_data_ptr->jop_key = CPU_USER_PAC_NO_KEY;
 #endif
 #if NEEDS_MTE_IRG_RESEED
 	cpu_data_ptr->cpu_irg_reseed_counter = 0;

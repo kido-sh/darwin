@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2007-2017 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -2912,7 +2912,7 @@ current_thread(void)
 	return current_thread_fast();
 }
 
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 uint8_t
 ml_task_get_disable_user_jop(task_t task)
 {
@@ -2938,13 +2938,30 @@ ml_thread_set_disable_user_jop(thread_t thread, uint8_t disable_user_jop)
 	}
 }
 
+#if HAS_USER_PAC
+static uint64_t
+ml_user_pac_new_pid(void)
+{
+	uint64_t pid;
+
+	do {
+		pid = early_random();
+	} while (pid == CPU_USER_PAC_NO_KEY);
+	return pid;
+}
+#endif
+
 void
 ml_task_set_rop_pid(task_t task, task_t parent_task, boolean_t inherit)
 {
 	if (inherit) {
 		task->rop_pid = parent_task->rop_pid;
 	} else {
+#if HAS_USER_PAC
+		task->rop_pid = ml_user_pac_new_pid();
+#else
 		task->rop_pid = early_random();
+#endif
 	}
 }
 
@@ -2972,6 +2989,9 @@ ml_task_set_jop_pid_from_shared_region(task_t task, boolean_t disable_user_jop)
 		task->jop_pid = ml_non_arm64e_user_jop_pid();
 		return;
 	}
+#if HAS_USER_PAC
+	task->jop_pid = ml_user_pac_new_pid();
+#else
 
 	vm_shared_region_t sr = vm_shared_region_get(task);
 	/*
@@ -2996,6 +3016,7 @@ ml_task_set_jop_pid_from_shared_region(task_t task, boolean_t disable_user_jop)
 		task->jop_pid = early_random();
 	}
 	task_unlock(task);
+#endif
 }
 
 void

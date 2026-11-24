@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
+ * Modified by the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -172,7 +173,7 @@ struct machine_thread {
 #else
 	bool                      reserved9;
 #endif
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 	uint64_t                  rop_pid;
 	uint64_t                  jop_pid;
 #else

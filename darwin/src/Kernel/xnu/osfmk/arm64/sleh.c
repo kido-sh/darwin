@@ -177,6 +177,9 @@ static void handle_pac_fail(arm_saved_state_t *state, uint64_t esr) __dead2;
 static inline uint64_t fault_addr_bitmask(unsigned int bit_from, unsigned int bit_to);
 #endif
 static void handle_bti_fail(arm_saved_state_t *state, uint64_t esr);
+#if !__has_feature(ptrauth_calls) && HAS_USER_PAC
+static void handle_user_pac_fail(arm_saved_state_t *state, uint64_t esr) __dead2;
+#endif
 extern kern_return_t arm_fast_fault(pmap_t, vm_map_address_t, vm_prot_t, bool, bool);
 
 static void handle_uncategorized(arm_saved_state_t *);
@@ -986,6 +989,10 @@ sleh_synchronous(arm_context_t *context, uint64_t esr, vm_offset_t far, __unused
 		handle_pac_fail(state, esr);
 		__builtin_unreachable();
 
+#elif HAS_USER_PAC
+	case ESR_EC_PAC_FAIL:
+		handle_user_pac_fail(state, esr);
+		__builtin_unreachable();
 #endif /* __has_feature(ptrauth_calls) */
 
 #if HAS_ARM_FEAT_SME
@@ -3748,6 +3755,29 @@ handle_bti_fail(arm_saved_state_t *state, uint64_t esr)
 	panic_with_thread_kernel_state(msg, state);
 	__builtin_unreachable();
 }
+
+#if !__has_feature(ptrauth_calls) && HAS_USER_PAC
+static void
+handle_user_pac_fail(arm_saved_state_t *state, uint64_t esr)
+{
+	exception_type_t           exception = EXC_BAD_ACCESS;
+	mach_exception_data_type_t codes[2]  = {EXC_ARM_PAC_FAIL};
+	uint32_t                   instr     = 0;
+
+	if (!is_saved_state64(state) || PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
+		panic("PAC failure (ESR 0x%llx) outside 64-bit user space", esr);
+	}
+
+	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
+	codes[1] = instr;
+	IOLog("PAC failure in user pid %d (%s) at pc=0x%llx lr=0x%llx esr=0x%llx instr=0x%08x\n",
+	    proc_pid(current_proc()), proc_best_name(current_proc()), get_saved_state_pc(state),
+	    get_saved_state_lr(state), esr, instr);
+	pd_fault_dump(state, esr, get_saved_state_pc(state), KERN_FAILURE);
+	exception_triage(exception, codes, 2);
+	__builtin_unreachable();
+}
+#endif
 
 static void
 handle_user_trapped_instruction32(arm_saved_state_t *state, uint64_t esr)

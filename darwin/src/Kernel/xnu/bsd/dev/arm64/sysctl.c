@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2003-2007 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  */
 #include <sys/param.h>
 #include <sys/kernel.h>
@@ -455,6 +455,8 @@ machdep_ptrauth_enabled SYSCTL_HANDLER_ARGS
 #if __has_feature(ptrauth_calls)
 	task_t task = current_task();
 	int ret = !ml_task_get_disable_user_jop(task);
+#elif HAS_USER_PAC
+	int ret = arm64_pac_supported() && !ml_task_get_disable_user_jop(current_task());
 #else
 	const int ret = 0;
 #endif

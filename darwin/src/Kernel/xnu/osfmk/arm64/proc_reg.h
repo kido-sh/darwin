@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -627,7 +627,7 @@
 #endif /* HAS_MTE */
 
 #define SCTLR_RESERVED     ((3ULL << 28) | (1ULL << 20))
-#if defined(HAS_APPLE_PAC)
+#if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
 
 // 31    PACIA_ENABLED AddPACIA and AuthIA functions enabled
 #define SCTLR_PACIA_ENABLED_SHIFT 31
@@ -2556,9 +2556,9 @@ typedef enum {
 	ESR_EC_SVC_64              = 0x15,
 	ESR_EC_HVC_64              = 0x16,
 	ESR_EC_MSR_TRAP            = 0x18,
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 	ESR_EC_PAC_FAIL            = 0x1C,
-#endif /* __has_feature(ptrauth_calls) */
+#endif /* __has_feature(ptrauth_calls) || HAS_USER_PAC */
 #if HAS_ARM_FEAT_SME
 	ESR_EC_SME                 = 0x1D,
 #endif

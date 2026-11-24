@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2011-2013 Apple Inc. All rights reserved.
+ * Modified by the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1856,6 +1857,13 @@ no_asts:
 	POP_FRAME_WITHOUT_LR
 	mov		x3, x19
 #endif /* PRECISE_USER_KERNEL_TIME */
+#if HAS_USER_PAC
+	mov		x19, x3
+	PUSH_FRAME
+	bl		EXT(user_pac_return_to_user)
+	POP_FRAME_WITHOUT_LR
+	mov		x3, x19
+#endif /* HAS_USER_PAC */
 
 #if (CONFIG_KERNEL_INTEGRITY && KERNEL_INTEGRITY_WT)
 	/* Watchtower
