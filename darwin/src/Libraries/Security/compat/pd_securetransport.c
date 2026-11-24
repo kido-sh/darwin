@@ -7,9 +7,6 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
-#ifndef TLS1_3_VERSION
-#define TLS1_3_VERSION 0x0304
-#endif
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreFoundation/CFRuntime.h>
 #include <Security/Security.h>
@@ -18,6 +15,20 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+
+static const SSLCipherSuite defaultCiphers[] = {
+    TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384, TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+    TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA, TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+    TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA, TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+    TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384,
+    TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256, TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+    TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA, TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
+    TLS_RSA_WITH_AES_256_GCM_SHA384, TLS_RSA_WITH_AES_128_GCM_SHA256,
+    TLS_RSA_WITH_AES_256_CBC_SHA256, TLS_RSA_WITH_AES_128_CBC_SHA256,
+    TLS_RSA_WITH_AES_256_CBC_SHA, TLS_RSA_WITH_AES_128_CBC_SHA,
+    TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+};
 
 struct SSLContext {
     CFRuntimeBase base;
@@ -257,7 +268,12 @@ SSLContextRef SSLCreateContext(CFAllocatorRef alloc, SSLProtocolSide protocolSid
         SSL_set_connect_state(context->ssl);
     } else
         SSL_set_accept_state(context->ssl);
-    SSL_set_min_proto_version(context->ssl, TLS1_2_VERSION);
+    SSL_set_min_proto_version(context->ssl, TLS1_VERSION);
+    SSL_set_max_proto_version(context->ssl, TLS1_2_VERSION);
+    if (SSLSetEnabledCiphers(context, defaultCiphers, sizeof(defaultCiphers) / sizeof(defaultCiphers[0])) != noErr) {
+        CFRelease(context);
+        return NULL;
+    }
     return context;
 }
 
@@ -319,10 +335,8 @@ static int opensslVersion(SSLProtocol protocol)
     case kTLSProtocol11:
         return TLS1_1_VERSION;
     case kTLSProtocol12:
-        return TLS1_2_VERSION;
-    case kTLSProtocol13:
     case kTLSProtocolMaxSupported:
-        return TLS1_3_VERSION;
+        return TLS1_2_VERSION;
     default:
         return -1;
     }
@@ -332,8 +346,10 @@ OSStatus SSLSetProtocolVersionMin(SSLContextRef context, SSLProtocol minVersion)
 {
     int version = opensslVersion(minVersion);
 
-    if (context == NULL || version < 0)
+    if (context == NULL)
         return errSecParam;
+    if (version < 0)
+        return errSSLIllegalParam;
     return SSL_set_min_proto_version(context->ssl, version) ? noErr : errSecParam;
 }
 
@@ -341,8 +357,10 @@ OSStatus SSLSetProtocolVersionMax(SSLContextRef context, SSLProtocol maxVersion)
 {
     int version = opensslVersion(maxVersion);
 
-    if (context == NULL || version < 0)
+    if (context == NULL)
         return errSecParam;
+    if (version < 0)
+        return errSSLIllegalParam;
     return SSL_set_max_proto_version(context->ssl, version) ? noErr : errSecParam;
 }
 
@@ -362,9 +380,6 @@ OSStatus SSLGetNegotiatedProtocolVersion(SSLContextRef context, SSLProtocol *pro
         break;
     case TLS1_2_VERSION:
         *protocol = kTLSProtocol12;
-        break;
-    case TLS1_3_VERSION:
-        *protocol = kTLSProtocol13;
         break;
     default:
         *protocol = kSSLProtocolUnknown;
