@@ -1,5 +1,7 @@
+#include <ptrauth.h>
+
 extern void start(void);
-void *pd_libdyld_getStartGlueToCallExit(void) { return (void *)&start; }
+void *pd_libdyld_getStartGlueToCallExit(void) { return ptrauth_strip((void *)&start, ptrauth_key_function_pointer); }
 
 extern void tlv_initializer(void);
 void pd_libdyld_tlv_initializer(void) { tlv_initializer(); }

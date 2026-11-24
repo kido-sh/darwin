@@ -1309,7 +1309,11 @@ struct __pd_block_layout {
     void *isa;
     int flags;
     int reserved;
+#if __has_feature(ptrauth_calls)
+    int (*__ptrauth(0, 1, 0) invoke)(void *block, const void *a, const void *b);
+#else
     int (*invoke)(void *block, const void *a, const void *b);
+#endif
 };
 
 extern void qsort_r(void *, size_t, size_t, void *,

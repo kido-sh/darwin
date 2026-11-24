@@ -1,6 +1,7 @@
 /*-
  * Copyright (c) 1990, 1993
  *	The Regents of the University of California.  All rights reserved.
+ * Modified by the kido authors in 2026; see docs/upstream.md.
  *
  * This code is derived from software contributed to Berkeley by
  * Chris Torek.
@@ -52,6 +53,7 @@ __FBSDID("$FreeBSD: src/lib/libc/stdlib/atexit.c,v 1.8 2007/01/09 00:28:09 imp E
 #include <pthread.h>
 #if (defined(__DYNAMIC__) || defined (__BLOCKS__)) && !TARGET_OS_DRIVERKIT
 #include <dlfcn.h>
+#include <ptrauth.h>
 #endif /* defined(__DYNAMIC__) */
 #include "atexit.h"
 #include "un-namespace.h"
@@ -206,7 +208,7 @@ __cxa_in_range(const struct __cxa_range_t ranges[],
 			   unsigned int count,
 			   const void* fn)
 {
-	uintptr_t addr = (uintptr_t)fn;
+	uintptr_t addr = (uintptr_t)ptrauth_strip(fn, ptrauth_key_function_pointer);
 
 	unsigned int i;
 	for (i = 0; i < count; ++i) {

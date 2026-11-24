@@ -6,6 +6,8 @@
 // See https://swift.org/LICENSE.txt for license information
 // See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
+// Modified by the kido authors in 2026; see docs/upstream.md.
+//
 
 
 #ifndef _BLOCK_PRIVATE_H_
@@ -16,6 +18,14 @@
 #include <stdio.h>
 
 #include "Block.h"
+
+#if __has_feature(ptrauth_calls)
+#define BLOCK_PTRAUTH_ISA __ptrauth(2, 1, 0x6AE1)
+#define BLOCK_PTRAUTH_FN __ptrauth(0, 1, 0)
+#else
+#define BLOCK_PTRAUTH_ISA
+#define BLOCK_PTRAUTH_FN
+#endif
 
 #if __cplusplus
 extern "C" {
@@ -45,8 +55,8 @@ struct Block_descriptor_1 {
 #define BLOCK_DESCRIPTOR_2 1
 struct Block_descriptor_2 {
     // requires BLOCK_HAS_COPY_DISPOSE
-    void (*copy)(void *dst, const void *src);
-    void (*dispose)(const void *);
+    void (*BLOCK_PTRAUTH_FN copy)(void *dst, const void *src);
+    void (*BLOCK_PTRAUTH_FN dispose)(const void *);
 };
 
 #define BLOCK_DESCRIPTOR_3 1
@@ -57,10 +67,10 @@ struct Block_descriptor_3 {
 };
 
 struct Block_layout {
-    void *isa;
+    void *BLOCK_PTRAUTH_ISA isa;
     volatile int32_t flags; // contains ref count
     int32_t reserved; 
-    void (*invoke)(void *, ...);
+    void (*BLOCK_PTRAUTH_FN invoke)(void *, ...);
     struct Block_descriptor_1 *descriptor;
     // imported variables
 };
@@ -94,8 +104,8 @@ struct Block_byref {
 
 struct Block_byref_2 {
     // requires BLOCK_BYREF_HAS_COPY_DISPOSE
-    void (*byref_keep)(struct Block_byref *dst, struct Block_byref *src);
-    void (*byref_destroy)(struct Block_byref *);
+    void (*BLOCK_PTRAUTH_FN byref_keep)(struct Block_byref *dst, struct Block_byref *src);
+    void (*BLOCK_PTRAUTH_FN byref_destroy)(struct Block_byref *);
 };
 
 struct Block_byref_3 {

@@ -6,6 +6,8 @@
 // See https://swift.org/LICENSE.txt for license information
 // See https://swift.org/CONTRIBUTORS.txt for the list of Swift project authors
 //
+// Modified by the kido authors in 2026; see docs/upstream.md.
+//
 
 #include "Block_private.h"
 #include <stdio.h>
@@ -375,6 +377,9 @@ static void *_Block_copy_internal(const void *arg, const bool wantsOne) {
         result->flags &= ~(BLOCK_REFCOUNT_MASK|BLOCK_DEALLOCATING);    // XXX not needed
         result->flags |= BLOCK_NEEDS_FREE | 2;  // logical refcount 1
         result->isa = _NSConcreteMallocBlock;
+#if __has_feature(ptrauth_calls)
+        result->invoke = aBlock->invoke;
+#endif
         _Block_call_copy_helper(result, aBlock);
         return result;
     }
@@ -394,6 +399,9 @@ static void *_Block_copy_internal(const void *arg, const bool wantsOne) {
         else
             flags |= BLOCK_IS_GC;
         result->flags = flags;
+#if __has_feature(ptrauth_calls)
+        result->invoke = aBlock->invoke;
+#endif
         _Block_call_copy_helper(result, aBlock);
         if (hasCTOR) {
             result->isa = _NSConcreteFinalizingBlock;
