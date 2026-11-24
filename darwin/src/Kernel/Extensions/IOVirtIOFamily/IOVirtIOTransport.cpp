@@ -213,21 +213,42 @@ IOVirtIOTransport::attach(IOPCIDevice *pci)
     if (!fCommonCfg || !fNotifyCfg) {
         IOLog("IOVirtIOTransport: attach failed (nCaps=%u commonCfg=%p notifyCfg=%p)\n",
               nCaps, (void *)fCommonCfg, (void *)fNotifyCfg);
+        detach();
         return false;
     }
 
     // VIRTIO 1.1 sec 3.1.1 device initialization handshake.
-    w8(fCommonCfg + kCommonDeviceStatus, 0); // reset
+    if (!reset()) {
+        IOLog("IOVirtIOTransport: the device did not finish resetting\n");
+        detach();
+        return false;
+    }
     w8(fCommonCfg + kCommonDeviceStatus, VIRTIO_STATUS_ACKNOWLEDGE);
     w8(fCommonCfg + kCommonDeviceStatus, VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
+    return true;
+}
+
+static const unsigned kResetTimeoutMs = 1000;
+
+bool
+IOVirtIOTransport::reset()
+{
+    w8(fCommonCfg + kCommonDeviceStatus, 0);
+    for (unsigned ms = 0; r8(fCommonCfg + kCommonDeviceStatus) != 0; ms++) {
+        if (ms == kResetTimeoutMs)
+            return false;
+        IOSleep(1);
+    }
     return true;
 }
 
 void
 IOVirtIOTransport::detach()
 {
-    if (fCommonCfg)
-        w8(fCommonCfg + kCommonDeviceStatus, 0); // reset the device
+    if (fCommonCfg && !reset())
+        IOLog("IOVirtIOTransport: the device did not finish resetting\n");
+    if (fPCIDevice)
+        fPCIDevice->setBusMasterEnable(false);
 
     if (fCommonCfgMap) { fCommonCfgMap->release(); fCommonCfgMap = 0; }
     if (fNotifyCfgMap) { fNotifyCfgMap->release(); fNotifyCfgMap = 0; }

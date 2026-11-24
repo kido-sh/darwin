@@ -126,6 +126,8 @@ public:
     bool setMsixVectors(VirtQueue *vq, uint16_t queueVector, uint16_t configVector);
 
 private:
+    bool reset();
+
     IOPCIDevice       *fPCIDevice;
     IOMemoryMap       *fCommonCfgMap;
     IOMemoryMap       *fNotifyCfgMap;
