@@ -1,0 +1,280 @@
+--- /dev/null
++++ b/crypto/crypto_internal.h
+@@ -0,0 +1,90 @@
++/*	$OpenBSD: crypto_internal.h,v 1.10 2024/04/17 14:43:37 jsing Exp $ */
++/*
++ * Copyright (c) 2023 Joel Sing <jsing@openbsd.org>
++ *
++ * Permission to use, copy, modify, and distribute this software for any
++ * purpose with or without fee is hereby granted, provided that the above
++ * copyright notice and this permission notice appear in all copies.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
++ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
++ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
++ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
++ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
++ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
++ */
++
++#include <stdint.h>
++
++#ifndef HEADER_CRYPTO_INTERNAL_H
++#define HEADER_CRYPTO_INTERNAL_H
++
++/*
++ * Constant time operations for uint8_t.
++ */
++#ifndef HAVE_CRYPTO_CT_NE_ZERO_U8
++static inline int
++crypto_ct_ne_zero_u8(uint8_t v)
++{
++	return (uint8_t)(v | ~(v - 1)) >> ((sizeof(v) * 8) - 1);
++}
++#endif
++
++#ifndef HAVE_CRYPTO_CT_NE_ZERO_MASK_U8
++static inline uint8_t
++crypto_ct_ne_zero_mask_u8(uint8_t v)
++{
++	return 0 - crypto_ct_ne_zero_u8(v);
++}
++#endif
++
++#ifndef HAVE_CRYPTO_CT_EQ_ZERO_U8
++static inline int
++crypto_ct_eq_zero_u8(uint8_t v)
++{
++	return 1 - crypto_ct_ne_zero_u8(v);
++}
++#endif
++
++#ifndef HAVE_CRYPTO_CT_EQ_ZERO_MASK_U8
++static inline uint8_t
++crypto_ct_eq_zero_mask_u8(uint8_t v)
++{
++	return 0 - crypto_ct_eq_zero_u8(v);
++}
++#endif
++
++#ifndef HAVE_CRYPTO_CT_NE_U8
++static inline int
++crypto_ct_ne_u8(uint8_t a, uint8_t b)
++{
++	return crypto_ct_ne_zero_u8(a - b);
++}
++#endif
++
++#ifndef HAVE_CRYPTO_CT_NE_MASK_U8
++static inline uint8_t
++crypto_ct_ne_mask_u8(uint8_t a, uint8_t b)
++{
++	return 0 - crypto_ct_ne_u8(a, b);
++}
++#endif
++
++#ifndef HAVE_CRYPTO_CT_EQ_U8
++static inline int
++crypto_ct_eq_u8(uint8_t a, uint8_t b)
++{
++	return crypto_ct_eq_zero_u8(a - b);
++}
++#endif
++
++#ifndef HAVE_CRYPTO_CT_EQ_MASK_U8
++static inline uint8_t
++crypto_ct_eq_mask_u8(uint8_t a, uint8_t b)
++{
++	return 0 - crypto_ct_eq_u8(a, b);
++}
++#endif
++
++#endif
+--- a/ssl/ssl_srvr.c
++++ b/ssl/ssl_srvr.c
+@@ -166,6 +166,7 @@
+ #include <openssl/x509.h>
+ 
+ #include "bytestring.h"
++#include "../crypto/crypto_internal.h"
+ #include "ssl_sigalgs.h"
+ #include "ssl_tlsext.h"
+ 
+@@ -1719,103 +1720,105 @@
+ static int
+ ssl3_get_client_kex_rsa(SSL *s, CBS *cbs)
+ {
+-	unsigned char fakekey[SSL_MAX_MASTER_KEY_LENGTH];
+-	unsigned char *pms = NULL;
+-	unsigned char *p;
++	uint8_t fakepms[SSL_MAX_MASTER_KEY_LENGTH];
++	uint8_t *pms = NULL;
+ 	size_t pms_len = 0;
++	size_t pad_len;
+ 	EVP_PKEY *pkey = NULL;
+ 	RSA *rsa = NULL;
+ 	CBS enc_pms;
+ 	int decrypt_len;
+-	int al = -1;
++	uint8_t mask;
++	size_t i;
++	int valid = 1;
++	int ret = 0;
+ 
+-	arc4random_buf(fakekey, sizeof(fakekey));
++	/*
++	 * Handle key exchange in the form of an RSA-Encrypted Premaster Secret
++	 * Message. See RFC 5246, section 7.4.7.1.
++	 */
+ 
+-	/* XXX - peer max protocol version. */
+-	fakekey[0] = s->client_version >> 8;
+-	fakekey[1] = s->client_version & 0xff;
++	arc4random_buf(fakepms, sizeof(fakepms));
+ 
++	fakepms[0] = s->client_version >> 8;
++	fakepms[1] = s->client_version & 0xff;
++
+ 	pkey = s->cert->pkeys[SSL_PKEY_RSA].privatekey;
+-	if ((pkey == NULL) || (pkey->type != EVP_PKEY_RSA) ||
+-	    (pkey->pkey.rsa == NULL)) {
+-		al = SSL_AD_HANDSHAKE_FAILURE;
++	if (pkey == NULL || (rsa = EVP_PKEY_get0_RSA(pkey)) == NULL) {
+ 		SSLerror(s, SSL_R_MISSING_RSA_CERTIFICATE);
+-		goto fatal_err;
+-	}
+-	rsa = pkey->pkey.rsa;
+-
+-	pms_len = RSA_size(rsa);
+-	if (pms_len < SSL_MAX_MASTER_KEY_LENGTH)
+-		goto err;
+-	if ((pms = malloc(pms_len)) == NULL)
+-		goto err;
+-	p = pms;
++		ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_HANDSHAKE_FAILURE);
++		goto err;
++	}
+ 
+-	if (!CBS_get_u16_length_prefixed(cbs, &enc_pms))
+-		goto decode_err;
+-	if (CBS_len(cbs) != 0 || CBS_len(&enc_pms) != RSA_size(rsa)) {
++	/*
++	 * The minimum size of an encrypted premaster secret is 11 bytes of
++	 * padding (00 02 <8 or more non-zero bytes> 00) (RFC 8017, section
++	 * 9.2) and 48 bytes of premaster secret (RFC 5246, section 7.4.7.1).
++	 * This means an RSA key size of at least 472 bits.
++	 */
++	pms_len = RSA_size(rsa);
++	if (pms_len < 11 + SSL_MAX_MASTER_KEY_LENGTH) {
++		SSLerror(s, SSL_R_DECRYPTION_FAILED);
++		ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_DECRYPT_ERROR);
++		goto err;
++	}
++	pad_len = pms_len - SSL_MAX_MASTER_KEY_LENGTH;
++
++	if (!CBS_get_u16_length_prefixed(cbs, &enc_pms)) {
++		SSLerror(s, SSL_R_BAD_PACKET_LENGTH);
++		ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_DECODE_ERROR);
++		goto err;
++	}
++	if (CBS_len(&enc_pms) != pms_len || CBS_len(cbs) != 0) {
+ 		SSLerror(s, SSL_R_TLS_RSA_ENCRYPTED_VALUE_LENGTH_IS_WRONG);
++		ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_DECODE_ERROR);
+ 		goto err;
+ 	}
+ 
++	if ((pms = calloc(1, pms_len)) == NULL)
++		goto err;
++
+ 	decrypt_len = RSA_private_decrypt(CBS_len(&enc_pms), CBS_data(&enc_pms),
+-	    pms, rsa, RSA_PKCS1_PADDING);
++	    pms, rsa, RSA_NO_PADDING);
+ 
+-	ERR_clear_error();
+-
+-	if (decrypt_len != SSL_MAX_MASTER_KEY_LENGTH) {
+-		al = SSL_AD_DECODE_ERROR;
+-		/* SSLerror(s, SSL_R_BAD_RSA_DECRYPT); */
+-	}
+-
+-	/* XXX - peer max version. */
+-	if ((al == -1) && !((pms[0] == (s->client_version >> 8)) &&
+-	    (pms[1] == (s->client_version & 0xff)))) {
+-		/*
+-		 * The premaster secret must contain the same version number
+-		 * as the ClientHello to detect version rollback attacks
+-		 * (strangely, the protocol does not offer such protection for
+-		 * DH ciphersuites).
+-		 *
+-		 * The Klima-Pokorny-Rosa extension of Bleichenbacher's attack
+-		 * (http://eprint.iacr.org/2003/052/) exploits the version
+-		 * number check as a "bad version oracle" -- an alert would
+-		 * reveal that the plaintext corresponding to some ciphertext
+-		 * made up by the adversary is properly formatted except that
+-		 * the version number is wrong. To avoid such attacks, we should
+-		 * treat this just like any other decryption error.
+-		 */
+-		al = SSL_AD_DECODE_ERROR;
+-		/* SSLerror(s, SSL_R_BAD_PROTOCOL_VERSION_NUMBER); */
++	if (decrypt_len != pms_len) {
++		SSLerror(s, SSL_R_DECRYPTION_FAILED);
++		ssl3_send_alert(s, SSL3_AL_FATAL, SSL_AD_DECRYPT_ERROR);
++		goto err;
+ 	}
+ 
+-	if (al != -1) {
+-		/*
+-		 * Some decryption failure -- use random value instead
+-		 * as countermeasure against Bleichenbacher's attack
+-		 * on PKCS #1 v1.5 RSA padding (see RFC 2246,
+-		 * section 7.4.7.1).
+-		 */
+-		p = fakekey;
+-	}
++	/*
++	 * All processing from here on needs to avoid leaking any information
++	 * about the decrypted content, in order to prevent oracle attacks and
++	 * minimise timing attacks.
++	 */
+ 
+-	s->session->master_key_length =
+-	    tls1_generate_master_secret(s,
+-		s->session->master_key, p, SSL_MAX_MASTER_KEY_LENGTH);
++	/* Check padding - 00 02 <8 or more non-zero bytes> 00 */
++	valid &= crypto_ct_eq_u8(pms[0], 0x00);
++	valid &= crypto_ct_eq_u8(pms[1], 0x02);
++	for (i = 2; i < pad_len - 1; i++)
++		valid &= crypto_ct_ne_u8(pms[i], 0x00);
++	valid &= crypto_ct_eq_u8(pms[pad_len - 1], 0x00);
+ 
+-	freezero(pms, pms_len);
++	/* Ensure client version in premaster secret matches ClientHello version. */
++	valid &= crypto_ct_eq_u8(pms[pad_len + 0], s->client_version >> 8);
++	valid &= crypto_ct_eq_u8(pms[pad_len + 1], s->client_version & 0xff);
+ 
+-	return (1);
++	/* Use the premaster secret if padding is correct, if not use the fake. */
++	mask = crypto_ct_eq_mask_u8(valid, 1);
++	for (i = 0; i < SSL_MAX_MASTER_KEY_LENGTH; i++)
++		pms[i] = (pms[pad_len + i] & mask) | (fakepms[i] & ~mask);
+ 
+- decode_err:
+-	al = SSL_AD_DECODE_ERROR;
+-	SSLerror(s, SSL_R_BAD_PACKET_LENGTH);
+- fatal_err:
+-	ssl3_send_alert(s, SSL3_AL_FATAL, al);
++	s->session->master_key_length =
++	    tls1_generate_master_secret(s,
++		s->session->master_key, pms, SSL_MAX_MASTER_KEY_LENGTH);
++
++	ret = 1;
++
+  err:
+ 	freezero(pms, pms_len);
+ 
+-	return (-1);
++	return ret;
+ }
+ 
+ static int

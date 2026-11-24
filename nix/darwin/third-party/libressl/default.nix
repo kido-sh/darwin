@@ -46,6 +46,7 @@ stdenv.mkDerivation rec {
     ./dtls-handshake-limits.patch
     ./ocsp-no-trust-other.patch
     ./sigalgs-limit.patch
+    ./rsa-kex-constant-time.patch
   ];
 
   outputs = [ "out" "dev" ];
