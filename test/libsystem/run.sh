@@ -13,11 +13,13 @@ kido=${KIDO:-kido}
 work=$(mktemp -d "${TMPDIR:-/tmp}/kido-libsystem.XXXX")
 trap 'rm -rf "$work"' EXIT
 export KIDO_HOME=$work/home
-tests="t_math t_ucontext t_libc t_oslog t_keychain"
+tests="t_math t_ucontext t_libc t_oslog t_keychain t_malloc"
 for t in $tests; do
   extra=
+  min=13.0
   [[ $t == t_keychain ]] && extra="-framework Security"
-  xcrun clang -arch arm64 -mmacosx-version-min=13.0 -O1 -Wno-deprecated-declarations -Wno-format \
+  [[ $t == t_malloc ]] && min=26.0
+  xcrun clang -arch arm64 -mmacosx-version-min=$min -O1 -Wno-deprecated-declarations -Wno-format \
     -o "$work/$t" "$here/$t.c" $extra || exit 1
 done
 "$kido" image import "$img" libsystem-test >/dev/null || exit 1

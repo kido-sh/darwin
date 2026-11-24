@@ -54,7 +54,7 @@ the release a directory came from and the other licenses its files carry.
 | `darwin/external/corecrypto/**` | `MPL-2.0` | NeoDarwin's corecrypto as forked by PureDarwin. Also `Brian-Gladman-3-Clause` (ccaes/src/gladman), `SSLeay-standalone` (Eric Young's code in cccast, ccrc4, ccsha1), `LicenseRef-Public-Domain` (LibTomCrypt-derived code), `APSL-2.0` (two xnu headers) |
 | `darwin/src/Libraries/libSystem/libc/**` | `APSL-2.0` | Libc-1439.141.1 with FreeBSD and NetBSD code. Also `APSL-1.0`, `APSL-1.1`, `BSD-2-Clause`, `BSD-2-Clause-FreeBSD`, `BSD-3-Clause`, `BSD-4-Clause`, `BSD-4-Clause-UC`, `ISC`, `CMU-Mach`, `HPND`, `dtoa`, `CDDL-1.0`, `Apache-2.0`, `MPL-2.0 OR BSD-2-Clause`, `LicenseRef-Public-Domain` |
 | `darwin/src/Libraries/libSystem/libc/libm/openlibm/**` | `BSD-2-Clause` | openlibm; see its LICENSE.md. Also `BSD-3-Clause`, `ISC`, `MIT`, `LicenseRef-Public-Domain`. kido's src/kido_fenv_arm64.c is `Apache-2.0` |
-| `darwin/src/Libraries/libSystem/libmalloc/**` | `APSL-2.0` | libmalloc-317.140.5. Also `APSL-1.1`, `Apache-2.0` |
+| `darwin/src/Libraries/libSystem/libmalloc/**` | `APSL-2.0` | libmalloc-317.140.5. Also `APSL-1.1`, `Apache-2.0`. kido's src/kido_malloc_type.c is `Apache-2.0` |
 | `darwin/src/Libraries/libSystem/libplatform/**` | `APSL-2.0` | libplatform-254.40.4. Also `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `BSD-4-Clause-UC` |
 | `darwin/src/Libraries/libSystem/pthread/**` | `APSL-2.0` | libpthread-454.80.2. Also `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `BSD-4-Clause`, `HPND` |
 | `darwin/src/Libraries/libSystem/libdispatch/**` | `Apache-2.0` | libdispatch-1271.40.12. Also `Apache-2.0 WITH Swift-exception` |
