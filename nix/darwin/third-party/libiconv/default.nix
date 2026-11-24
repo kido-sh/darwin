@@ -68,8 +68,9 @@ stdenv.mkDerivation {
     }
     mkdir -p obj/core obj/i18n
     MODINC=$(for d in libiconv_modules/*; do printf -- '-I%s ' $d; done)
+    APPLE_C="-std=gnu11 -fmodules -fmodules-cache-path=$PWD/obj/modules"
 
-    $CC -std=gnu89 ${libDefines} -I${variantHeader} -c libcharset/libcharset.c -o obj/libcharset.o
+    $CC $APPLE_C ${libDefines} -I${variantHeader} -c libcharset/libcharset.c -o obj/libcharset.o
     $LINK -dynamiclib -Wl,-exported_symbols_list,${./libcharset.exports} ${dylib.idFlags ./libcharset.exports} \
       obj/libcharset.o -lSystem -o libcharset.1.dylib
     check libcharset.1.dylib ${./libcharset.exports}
@@ -85,7 +86,7 @@ stdenv.mkDerivation {
     check libiconv.2.dylib ${./libiconv.exports}
 
     ${lib.concatMapStrings (m: ''
-      $CC -std=gnu89 ${libDefines} -Icitrus -Ilibcharset $MODINC -c ${moduleSource m} -o obj/i18n/${m}.o
+      $CC $APPLE_C ${libDefines} -Icitrus -Ilibcharset $MODINC -c ${moduleSource m} -o obj/i18n/${m}.o
       $LINK -dynamiclib -Wl,-exported_symbols_list,${./i18n + "/lib${m}.exports"} \
         ${dylib.idFlags (./i18n + "/lib${m}.exports")} obj/i18n/${m}.o \
         ${lib.optionalString (m != "iconv_none") "libiconv.2.dylib"} -lSystem -o lib${m}.dylib
