@@ -50,6 +50,8 @@ stdenv.mkDerivation {
     postFetch = "rm -r $out/tests";
   };
 
+  patches = [ ./iso2022-buffers.patch ];
+
   outputs = [ "out" "dev" ];
   dontConfigure = true;
 

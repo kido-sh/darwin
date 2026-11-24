@@ -1,0 +1,46 @@
+--- a/libiconv_modules/ISO2022/citrus_iso2022.c
++++ b/libiconv_modules/ISO2022/citrus_iso2022.c
+@@ -1029,7 +1029,7 @@
+ {
+ 	_ISO2022Charset cs;
+ 	char *p;
+-	char tmp[MB_LEN_MAX];
++	char tmp[5 + 2 + 3];
+ 	size_t len;
+ 	int bit8, i = 0, target;
+ 	unsigned char mask;
+@@ -1164,15 +1164,7 @@
+ 		break;
+ 	}
+ #ifdef __APPLE__
+-	/*
+-	 * There's likely a more correct solution for this.  The problem is that
+-	 * one can get into situations with CS*MULTI where we encode two escape
+-	 * sequences (e.g., "ESC $ +" followed by "ESC O") and end up with an
+-	 * `i` of 2 or 3, which will overflow the MB_LEN_MAX `tmp`.  We reject
+-	 * them here with EILSEQ, but it may just be that we shouldn't have
+-	 * tried to pull anything else from `wc` at all.
+-	 */
+-	if (sizeof(tmp) - (p - tmp) < i)
++	if ((size_t)(p - tmp) + i > sizeof(tmp))
+ 		goto ilseq;
+ #endif
+ 	while (i-- > 0)
+@@ -1206,7 +1198,7 @@
+     size_t * __restrict nresult)
+ {
+ 	char *result;
+-	char buf[MB_LEN_MAX];
++	char buf[5 + 2 + 3];
+ 	size_t len;
+ 	int ret;
+ 
+@@ -1235,7 +1227,7 @@
+     _ISO2022State * __restrict psenc, size_t * __restrict nresult)
+ {
+ 	char *result;
+-	char buf[MB_LEN_MAX];
++	char buf[5 + 2 + 3];
+ 	size_t len;
+ 	int ret;
+ 

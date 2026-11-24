@@ -159,6 +159,10 @@ main(void)
     CONV("EUC-JP", "UTF-8", "\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e");
     CONV("ISO-2022-JP", "UTF-8", "a\xe6\x97\xa5\xe6\x9c\xac" "b");
     CONV("UTF-8", "ISO-2022-JP", "\x1b$B" "F|K\\" "\x1b(B" "x");
+    CHECK(CONV("ISO-2022-KR", "UTF-8", "a\xea\xb0\x80\xeb\x82\x98" "b") == 0);
+    CONV("UTF-8", "ISO-2022-KR", "\x1b$)C" "a\x0e" "0!3*" "\x0f" "b");
+    CHECK(CONV("ISO-2022-CN", "UTF-8", "\xe4\xb8\x80" "b") == 0);
+    CHECK(CONV("ISO-2022-CN-EXT", "UTF-8", "\xe3\x90\x80") == 0);
     CONV("CP932", "UTF-8", "\xe2\x91\xa0\xe3\x88\xb1");
     CONV("GB18030", "UTF-8", "\xe4\xb8\xad\xf0\x9f\x98\x80");
     CONV("BIG5", "UTF-8", "\xe4\xb8\xad\xe6\x96\x87");

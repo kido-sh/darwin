@@ -43,6 +43,7 @@ the release a directory came from and the other licenses its files carry.
 | `nix/darwin/third-party/{curl,expat,libbz2-dylib,libedit,libiconv,liblzma-dylib,libutil,ncurses-dylib,nghttp2,sqlite}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, libexpat, libiconv, liblzma, libapple_nghttp2, libsqlite3, libutil and ncurses, their source pins, their export lists, taken from the macOS SDK's .tbd files, the ncurses ABI glue and the libraries' tests |
 | `nix/darwin/third-party/curl/*.patch` | `curl` | kido's change to curl 8.23.0's lib/vtls/openssl.c, under curl's license |
 | `nix/darwin/third-party/sqlite/*.patch` | `blessing` | kido's changes to SQLite 3.54.1's src/main.c and ext/fts3/fts3_tokenizer.c, under SQLite's blessing |
+| `nix/darwin/third-party/libiconv/*.patch` | `BSD-2-Clause` | kido's change to the Citrus ISO-2022 converter of Apple's libiconv-115.120.2, under its license |
 | `nix/darwin/third-party/libressl/default.nix`, `nix/darwin/third-party/libressl/*.exports` | `Apache-2.0` | kido's recipe for macOS's LibreSSL and its export lists, read from the dyld shared cache of macOS 27.0.1 |
 | `nix/darwin/third-party/libressl/*.patch` | `OpenSSL` | LibreSSL's own fixes from its later releases, backported to 3.3.6, under the licenses of the files they change. Also `SSLeay-standalone` and `ISC` |
 | `patches/xnu-loader-no-logo.patch` | `BSD-3-Clause` | kido's change to xnu-loader |
