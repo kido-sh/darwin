@@ -18,11 +18,14 @@
 
 static vfstable_t virtiofs_vfsconf;
 int virtiofs_spin_us = 50;
+int virtiofs_entry_cache = 1;
 
 SYSCTL_DECL(_vfs_generic);
 SYSCTL_NODE(_vfs_generic, OID_AUTO, virtiofs, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "virtio-fs");
 SYSCTL_INT(_vfs_generic_virtiofs, OID_AUTO, spin_us, CTLFLAG_RW | CTLFLAG_LOCKED, &virtiofs_spin_us, 0,
            "how long a request waits for its reply before sleeping");
+SYSCTL_INT(_vfs_generic_virtiofs, OID_AUTO, entry_cache, CTLFLAG_RW | CTLFLAG_LOCKED, &virtiofs_entry_cache, 0,
+           "reuse a looked-up name until the host's entry timeout");
 
 int
 virtiofs_call(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_call *c)
@@ -273,6 +276,7 @@ virtiofs_vfs_register(void)
     if (!error) {
         sysctl_register_oid(&sysctl__vfs_generic_virtiofs);
         sysctl_register_oid(&sysctl__vfs_generic_virtiofs_spin_us);
+        sysctl_register_oid(&sysctl__vfs_generic_virtiofs_entry_cache);
     }
     return error;
 }
@@ -283,6 +287,7 @@ virtiofs_vfs_unregister(void)
     if (virtiofs_vfsconf && vfs_fsremove(virtiofs_vfsconf) != 0)
         return EBUSY;
     if (virtiofs_vfsconf) {
+        sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_entry_cache);
         sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_spin_us);
         sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs);
     }

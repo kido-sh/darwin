@@ -6,11 +6,11 @@
 # Mounts directories of this Mac in a VZ container of IMAGE_DIR over virtio-fs and checks them against the
 # Mac. t_virtiofs walks the tree on both sides and the listings must be identical: types, modes, sizes,
 # times, link targets, hard links and contents read both with read and mmap. Then it checks the errors of a
-# read-only mount, reads every file from many threads at once, sees changes made on the Mac, and checks that
-# the host releases what it opened for the guest: all but a few files once the guest unmounts, and a file
-# looked up 500 times once it is forgotten. It ends with read and metadata timings. Needs a kido whose VMM
-# attaches the directories named in KIDO_DEV_VIRTIOFS. Each command in the container fails after TIMEOUT
-# seconds (default 120). Uses a throwaway KIDO_HOME.
+# read-only mount, reads every file from many threads at once, sees changes made on the Mac once the host's
+# one-second entry timeout has passed, and checks that the host releases what it opened for the guest: all
+# but a few files once the guest unmounts, and a file looked up 500 times once it is forgotten. It ends with
+# read and metadata timings. Needs a kido whose VMM attaches the directories named in KIDO_DEV_VIRTIOFS.
+# Each command in the container fails after TIMEOUT seconds (default 120). Uses a throwaway KIDO_HOME.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 img=$1
@@ -126,10 +126,12 @@ mid=$(host_fds)
 printf 'changed\n' >> "$share/small/16384"
 rm "$share/many/f1"
 mv "$share/deep/1/2/3/4" "$share/deep/1/2/3/four"
+sleep 1.1
 check "a file grown on this Mac" prints changed guest /bin/tail -c 8 /mnt/data/small/16384
 check "a file removed on this Mac" fails guest /bin/test -e /mnt/data/many/f1
 check "a directory renamed on this Mac" guest /bin/test -f /mnt/data/deep/1/2/3/four/5/leaf
 printf 'X' | dd of="$share/small/4096" bs=1 seek=100 conv=notrunc 2>/dev/null
+sleep 1.1
 "$work/t_virtiofs" tree "$share/small" > "$work/small.host"
 guest /tmp/t_virtiofs tree /mnt/data/small > "$work/small.guest"
 check "a file rewritten in place on this Mac" diff -u "$work/small.host" "$work/small.guest"
@@ -141,8 +143,10 @@ after=$(host_fds)
 echo "files of the share the host holds open: $before before mounting, $mid after the walks, $after after unmounting"
 check "the host closed all but a few of the files it opened for the guest" test "$after" -le $((before + 32))
 forget_exact() {
-  guest /sbin/mount -t virtiofs -o ro kido:data /mnt/data >/dev/null &&
+  guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.entry_cache=0' >/dev/null &&
+    guest /sbin/mount -t virtiofs -o ro kido:data /mnt/data >/dev/null &&
     guest /tmp/t_virtiofs lookups 500 /mnt/data/small/4097 &&
+    guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.entry_cache=1' >/dev/null &&
     guest /sbin/umount /mnt/data &&
     guest /sbin/mount -t virtiofs -o ro kido:data /mnt/data >/dev/null &&
     guest /bin/sh -c '/tmp/t_virtiofs lookups 1 /mnt/data/many/f1??' &&

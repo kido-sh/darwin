@@ -26,10 +26,12 @@ struct virtiofs_mount {
     uint64_t attr_version;
     vnode_t root;
     struct virtiofs_bucket hash[1 << VIRTIOFS_HASH_BITS];
+    struct virtiofs_bucket names[1 << VIRTIOFS_HASH_BITS];
 };
 
 #define VFSTOVMP(mp) ((struct virtiofs_mount *)vfs_fsprivate(mp))
 
+extern int virtiofs_entry_cache;
 extern struct vnodeopv_desc virtiofs_vnodeop_opv_desc;
 extern struct vnodeopv_desc virtiofs_fifoop_opv_desc;
 
