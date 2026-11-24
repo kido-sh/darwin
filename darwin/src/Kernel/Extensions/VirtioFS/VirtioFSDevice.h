@@ -5,11 +5,15 @@
 #pragma once
 
 #include <IOKit/IOService.h>
+#include <IOKit/IOLocks.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/pci/IOPCIDevice.h>
 #include "IOVirtIOTransport.h"
+#include "virtiofs_dev.h"
+
+struct VirtioFSSlot;
 
 class VirtioFSDevice : public IOService {
     OSDeclareDefaultStructors(VirtioFSDevice)
@@ -19,26 +23,40 @@ public:
     void stop(IOService *provider) override;
     void free() override;
 
+    static VirtioFSDevice *copyDevice(const char *tag);
+    int startSession(struct virtiofs_session *session);
+    int call(struct virtiofs_call *call, uint32_t uid, uint32_t gid, uint32_t pid);
+    void forget(uint64_t nodeid, uint64_t nlookup);
+
 private:
+    bool setupQueues();
+    bool setupSlots();
     bool setupInterrupt();
     void interruptOccurred(IOInterruptEventSource *source, int count);
-    void *request(uint32_t opcode, uint64_t nodeid, uint32_t argLen);
-    int send(VirtQueue *vq, bool wantReply, uint32_t *replyLen);
-    void *reply();
-    void probeInit();
-    void probeRoot();
-    void probeErrors();
-    void forget(uint64_t nodeid);
+    void drainLocked(unsigned q);
+    void pauseLocked(void *event);
+    VirtioFSSlot *takeSlotLocked();
+    void putSlotLocked(VirtioFSSlot *slot);
+    bool submitLocked(unsigned q, VirtioFSSlot *slot, const VirtIOChainEntry *chain, unsigned count);
+    VirtioFSSlot *fillHeaderLocked(uint32_t opcode, uint64_t nodeid, uint32_t len);
 
     IOPCIDevice *fPCIDevice;
     IOVirtIOTransport fTransport;
-    VirtQueue fHiprio;
-    VirtQueue fRequests;
-    IOBufferMemoryDescriptor *fBuffer;
-    uint8_t *fBytes;
-    uint64_t fPhys;
+    VirtQueue fQueues[2];
+    VirtioFSSlot **fInFlight[2];
+    IOBufferMemoryDescriptor *fSlotMem;
+    VirtioFSSlot *fSlots;
+    VirtioFSSlot *fFreeSlots;
+    unsigned fSlotCount;
+    unsigned fSlotWaiters;
+    IOLock *fLock;
+    IOLock *fSessionLock;
     IOWorkLoop *fWorkLoop;
     IOInterruptEventSource *fInterruptSource;
+    bool fIndirect;
+    bool fDead;
+    bool fStarted;
+    bool fLostInterrupt;
+    struct virtiofs_session fSession;
     uint64_t fUnique;
-    uint32_t fInitFlags;
 };

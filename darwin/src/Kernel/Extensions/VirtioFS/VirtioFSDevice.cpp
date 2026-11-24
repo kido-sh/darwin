@@ -4,21 +4,40 @@
  */
 #include "VirtioFSDevice.h"
 #include <IOKit/IOLib.h>
-#include <libkern/OSByteOrder.h>
+#include <kern/clock.h>
 #include <sys/errno.h>
-#include "fuse.h"
+#include "fuse_proto.h"
 
 #define super IOService
 OSDefineMetaClassAndStructors(VirtioFSDevice, IOService)
 
 enum {
-    kRequestBytes = 4096,
-    kReplyBytes = 61440,
-    kTimeoutMs = 5000,
-    kHiprioQueue = 0,
-    kFirstRequestQueue = 1,
-    kUnknownOpcode = 999,
-    kMaxForgets = 32,
+    kHiprio = 0,
+    kRequests = 1,
+    kQueues = 2,
+    kSlotBytes = 4096,
+    kMaxSegments = 40,
+    kTableBytes = kMaxSegments * sizeof(VRingDesc),
+    kInBytes = 2048,
+    kOutBytes = kSlotBytes - kTableBytes - kInBytes,
+    kMaxSlots = 128,
+    kMaxIO = 1 << 17,
+    kMinIO = 1 << 12,
+    kWaitSliceMs = 100,
+};
+
+static const char kTagKey[] = "VirtioFSTag";
+
+struct VirtioFSSlot {
+    VRingDesc *table;
+    uint8_t *in;
+    uint8_t *out;
+    uint64_t tablePhys;
+    uint64_t inPhys;
+    uint64_t outPhys;
+    VirtioFSSlot *next;
+    uint32_t used;
+    bool done;
 };
 
 bool
@@ -31,67 +50,35 @@ VirtioFSDevice::start(IOService *provider)
     if (!fPCIDevice)
         return false;
     fPCIDevice->retain();
-    if (!fPCIDevice->open(this) || !fTransport.attach(fPCIDevice)) {
-        IOLog("VirtioFS: cannot attach to the PCI device\n");
+    fLock = IOLockAlloc();
+    fSessionLock = IOLockAlloc();
+    if (!fLock || !fSessionLock || !fPCIDevice->open(this))
+        return false;
+    if (!fTransport.attach(fPCIDevice)) {
+        fPCIDevice->close(this);
         return false;
     }
 
-    uint32_t low = fTransport.deviceFeatures(0);
-    uint32_t high = fTransport.deviceFeatures(1);
-    IOLog("VirtioFS: device features 0x%08x%08x, %u queues\n", high, low, fTransport.numQueues());
-    if (!fTransport.negotiateFeatures(0)) {
-        IOLog("VirtioFS: the device refused the features\n");
-        return false;
-    }
-
+    uint32_t features = fTransport.deviceFeatures(0) & VIRTIO_RING_F_INDIRECT_DESC;
+    fIndirect = features != 0;
     volatile uint8_t *cfg = fTransport.deviceConfig();
-    if (!cfg) {
-        IOLog("VirtioFS: no device configuration\n");
-        return false;
-    }
-    char tag[37];
-    for (unsigned i = 0; i < 36; i++)
+    char tag[37] = {};
+    for (unsigned i = 0; cfg && i < 36; i++)
         tag[i] = (char)cfg[i];
-    tag[36] = 0;
-    IOLog("VirtioFS: tag \"%s\", %u request queues\n", tag, OSReadLittleInt32(cfg, 36));
 
-    uint64_t shmPhys = 0, shmLength = 0;
-    if (fTransport.sharedMemoryRegion(0, &shmPhys, &shmLength))
-        IOLog("VirtioFS: DAX window at 0x%llx, %llu bytes\n", shmPhys, shmLength);
-    else
-        IOLog("VirtioFS: no DAX window\n");
-
-    if (!fTransport.initQueue(&fHiprio, kHiprioQueue, 16) ||
-        !fTransport.initQueue(&fRequests, kFirstRequestQueue, 64)) {
-        IOLog("VirtioFS: cannot set up the queues\n");
+    if (!tag[0] || !fTransport.negotiateFeatures(features) || !setupQueues() || !setupSlots() ||
+        !setupInterrupt()) {
+        IOLog("VirtioFS: cannot set up the device\n");
+        fTransport.detach();
+        fPCIDevice->close(this);
         return false;
     }
-
-    fBuffer = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-        kIODirectionInOut | kIOMemoryPhysicallyContiguous, kRequestBytes + kReplyBytes, 0xFFFFFFFFULL);
-    if (!fBuffer)
-        return false;
-    if (fBuffer->prepare() != kIOReturnSuccess) {
-        OSSafeReleaseNULL(fBuffer);
-        return false;
-    }
-    fBytes = (uint8_t *)fBuffer->getBytesNoCopy();
-    IOByteCount segment = 0;
-    fPhys = fBuffer->getPhysicalSegment(0, &segment, 0);
-    if (!fPhys || segment < kRequestBytes + kReplyBytes) {
-        IOLog("VirtioFS: the request buffer is not physically contiguous\n");
-        return false;
-    }
-
-    if (!setupInterrupt())
-        IOLog("VirtioFS: no interrupt, polling only\n");
     fTransport.setDriverOk();
 
-    probeInit();
-    probeRoot();
-    probeErrors();
-
+    setProperty(kTagKey, tag);
     registerService();
+    IOLog("VirtioFS: tag \"%s\", %u slots, %u descriptors%s\n", tag, fSlotCount, fQueues[kRequests].queueSize,
+          fIndirect ? ", indirect" : "");
     return true;
 }
 
@@ -100,15 +87,19 @@ VirtioFSDevice::stop(IOService *provider)
 {
     if (fInterruptSource) {
         fInterruptSource->disable();
-        if (fWorkLoop)
-            fWorkLoop->removeEventSource(fInterruptSource);
+        fWorkLoop->removeEventSource(fInterruptSource);
         OSSafeReleaseNULL(fInterruptSource);
     }
-    fTransport.freeQueue(&fRequests);
-    fTransport.freeQueue(&fHiprio);
+    IOLockLock(fLock);
+    fDead = true;
     fTransport.detach();
-    if (fPCIDevice)
-        fPCIDevice->close(this);
+    for (unsigned i = 0; i < fSlotCount; i++)
+        IOLockWakeup(fLock, &fSlots[i], false);
+    IOLockWakeup(fLock, &fFreeSlots, false);
+    IOLockWakeup(fLock, &fQueues[kHiprio], false);
+    IOLockWakeup(fLock, &fQueues[kRequests], false);
+    IOLockUnlock(fLock);
+    fPCIDevice->close(this);
     super::stop(provider);
 }
 
@@ -117,20 +108,81 @@ VirtioFSDevice::free()
 {
     OSSafeReleaseNULL(fInterruptSource);
     OSSafeReleaseNULL(fWorkLoop);
-    if (fBuffer) {
-        fBuffer->complete();
-        OSSafeReleaseNULL(fBuffer);
+    if (fSlots)
+        IOFree(fSlots, sizeof(VirtioFSSlot) * fSlotCount);
+    if (fSlotMem) {
+        fSlotMem->complete();
+        fSlotMem->release();
     }
+    for (unsigned q = 0; q < kQueues; q++) {
+        if (fInFlight[q])
+            IOFree(fInFlight[q], sizeof(VirtioFSSlot *) * fQueues[q].queueSize);
+        fTransport.freeQueue(&fQueues[q]);
+    }
+    if (fLock)
+        IOLockFree(fLock);
+    if (fSessionLock)
+        IOLockFree(fSessionLock);
     OSSafeReleaseNULL(fPCIDevice);
     super::free();
 }
 
 bool
+VirtioFSDevice::setupQueues()
+{
+    static const uint16_t sizes[kQueues] = { 64, 256 };
+
+    for (unsigned q = 0; q < kQueues; q++) {
+        if (!fTransport.initQueue(&fQueues[q], (uint16_t)q, sizes[q]))
+            return false;
+        fTransport.enableFreeList(&fQueues[q]);
+        fInFlight[q] = (VirtioFSSlot **)IOMallocZero(sizeof(VirtioFSSlot *) * fQueues[q].queueSize);
+        if (!fInFlight[q])
+            return false;
+    }
+    return true;
+}
+
+bool
+VirtioFSDevice::setupSlots()
+{
+    unsigned count = fQueues[kRequests].queueSize < kMaxSlots ? fQueues[kRequests].queueSize : kMaxSlots;
+
+    fSlotMem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut, count * kSlotBytes,
+                                                           PAGE_SIZE);
+    if (!fSlotMem)
+        return false;
+    if (fSlotMem->prepare() != kIOReturnSuccess) {
+        OSSafeReleaseNULL(fSlotMem);
+        return false;
+    }
+    fSlots = (VirtioFSSlot *)IOMallocZero(sizeof(VirtioFSSlot) * count);
+    if (!fSlots)
+        return false;
+    fSlotCount = count;
+
+    uint8_t *base = (uint8_t *)fSlotMem->getBytesNoCopy();
+    for (unsigned i = 0; i < count; i++) {
+        VirtioFSSlot *slot = &fSlots[i];
+        IOByteCount length = 0;
+        uint64_t phys = fSlotMem->getPhysicalSegment(i * kSlotBytes, &length, kIOMemoryMapperNone);
+        if (!phys || length < kSlotBytes)
+            return false;
+        slot->table = (VRingDesc *)(base + i * kSlotBytes);
+        slot->in = (uint8_t *)slot->table + kTableBytes;
+        slot->out = slot->in + kInBytes;
+        slot->tablePhys = phys;
+        slot->inPhys = phys + kTableBytes;
+        slot->outPhys = slot->inPhys + kInBytes;
+        slot->next = fFreeSlots;
+        fFreeSlots = slot;
+    }
+    return true;
+}
+
+bool
 VirtioFSDevice::setupInterrupt()
 {
-    int type = 0;
-    if (fPCIDevice->getInterruptType(0, &type) != kIOReturnSuccess)
-        return false;
     fWorkLoop = IOWorkLoop::workLoop();
     if (!fWorkLoop)
         return false;
@@ -148,198 +200,344 @@ VirtioFSDevice::setupInterrupt()
 void
 VirtioFSDevice::interruptOccurred(IOInterruptEventSource *, int)
 {
-    fTransport.readIsr();
+    if (!(fTransport.readIsr() & 1))
+        return;
+    IOLockLock(fLock);
+    drainLocked(kHiprio);
+    drainLocked(kRequests);
+    IOLockUnlock(fLock);
 }
 
-void *
-VirtioFSDevice::request(uint32_t opcode, uint64_t nodeid, uint32_t argLen)
+void
+VirtioFSDevice::drainLocked(unsigned q)
 {
-    bzero(fBytes, kRequestBytes + kReplyBytes);
-    struct fuse_in_header *in = (struct fuse_in_header *)fBytes;
+    VirtQueue *vq = &fQueues[q];
+    uint32_t used = 0;
+    uint16_t head = 0;
+    bool freed = false;
+
+    if (fDead)
+        return;
+    while (fTransport.pollForCompletion(vq, 0, &used, &head)) {
+        if (head >= vq->queueSize || !fInFlight[q][head])
+            continue;
+        VirtioFSSlot *slot = fInFlight[q][head];
+        fInFlight[q][head] = NULL;
+        fTransport.freeDescChain(vq, head);
+        freed = true;
+        if (q == kHiprio) {
+            putSlotLocked(slot);
+        } else {
+            slot->used = used;
+            slot->done = true;
+            IOLockWakeup(fLock, slot, true);
+        }
+    }
+    if (freed)
+        IOLockWakeup(fLock, vq, false);
+}
+
+void
+VirtioFSDevice::pauseLocked(void *event)
+{
+    AbsoluteTime deadline;
+    clock_interval_to_deadline(kWaitSliceMs, kMillisecondScale, &deadline);
+    if (IOLockSleepDeadline(fLock, event, deadline, THREAD_UNINT) != THREAD_TIMED_OUT)
+        return;
+
+    uint16_t seen = fQueues[kRequests].lastUsedIdx;
+    drainLocked(kHiprio);
+    drainLocked(kRequests);
+    if (seen != fQueues[kRequests].lastUsedIdx && !fLostInterrupt) {
+        fLostInterrupt = true;
+        IOLog("VirtioFS: completions arrived without an interrupt\n");
+    }
+}
+
+VirtioFSSlot *
+VirtioFSDevice::takeSlotLocked()
+{
+    while (!fFreeSlots && !fDead) {
+        fSlotWaiters++;
+        pauseLocked(&fFreeSlots);
+        fSlotWaiters--;
+    }
+    if (fDead)
+        return NULL;
+    VirtioFSSlot *slot = fFreeSlots;
+    fFreeSlots = slot->next;
+    slot->done = false;
+    slot->used = 0;
+    return slot;
+}
+
+void
+VirtioFSDevice::putSlotLocked(VirtioFSSlot *slot)
+{
+    slot->next = fFreeSlots;
+    fFreeSlots = slot;
+    if (fSlotWaiters)
+        IOLockWakeup(fLock, &fFreeSlots, true);
+}
+
+bool
+VirtioFSDevice::submitLocked(unsigned q, VirtioFSSlot *slot, const VirtIOChainEntry *chain, unsigned count)
+{
+    VirtQueue *vq = &fQueues[q];
+    VirtIOChainEntry table = { slot->tablePhys, (uint32_t)(count * sizeof(VRingDesc)), false, true };
+    bool indirect = fIndirect && count > 1;
+
+    if (indirect) {
+        for (unsigned i = 0; i < count; i++) {
+            slot->table[i].addr = chain[i].addr;
+            slot->table[i].len = chain[i].len;
+            slot->table[i].flags = (uint16_t)((chain[i].write ? VRING_DESC_F_WRITE : 0) |
+                                              (i + 1 < count ? VRING_DESC_F_NEXT : 0));
+            slot->table[i].next = (uint16_t)(i + 1);
+        }
+    }
+    while (!fDead) {
+        int head = indirect ? fTransport.addDescChainFree(vq, &table, 1) : fTransport.addDescChainFree(vq, chain, count);
+        if (head >= 0) {
+            fInFlight[q][head] = slot;
+            fTransport.notify(vq);
+            return true;
+        }
+        pauseLocked(vq);
+    }
+    return false;
+}
+
+VirtioFSSlot *
+VirtioFSDevice::fillHeaderLocked(uint32_t opcode, uint64_t nodeid, uint32_t len)
+{
+    VirtioFSSlot *slot = takeSlotLocked();
+    if (!slot)
+        return NULL;
+    struct fuse_in_header *in = (struct fuse_in_header *)slot->in;
+    bzero(in, sizeof(*in));
     fUnique += 2;
-    in->len = (uint32_t)sizeof(*in) + argLen;
+    in->len = len;
     in->opcode = opcode;
     in->unique = fUnique;
     in->nodeid = nodeid;
-    return in + 1;
+    return slot;
+}
+
+static bool
+addSegments(VirtIOChainEntry *chain, unsigned *count, IOMemoryDescriptor *md, uint32_t length, bool write)
+{
+    for (IOByteCount offset = 0; offset < length;) {
+        IOByteCount segment = 0;
+        addr64_t phys = md->getPhysicalSegment(offset, &segment, kIOMemoryMapperNone);
+        if (!phys || !segment || *count >= kMaxSegments)
+            return false;
+        if (segment > length - offset)
+            segment = length - offset;
+        chain[(*count)++] = { phys, (uint32_t)segment, write, false };
+        offset += segment;
+    }
+    return true;
+}
+
+static IOMemoryDescriptor *
+dataDescriptor(const struct virtiofs_call *c)
+{
+    IODirection direction = (c->flags & VIRTIOFS_DATA_OUT) ? kIODirectionOut : kIODirectionIn;
+    IOMemoryDescriptor *md;
+
+    if (c->upl)
+        md = IOMemoryDescriptor::withOptions(c->upl, c->datalen, c->upl_offset, NULL,
+                                             kIOMemoryTypeUPL | kIOMemoryAsReference | direction);
+    else
+        md = IOMemoryDescriptor::withAddressRange((mach_vm_address_t)c->data, c->datalen, direction, kernel_task);
+    if (md && md->prepare() != kIOReturnSuccess)
+        OSSafeReleaseNULL(md);
+    return md;
+}
+
+static int
+parseReply(VirtioFSSlot *slot, struct virtiofs_call *c)
+{
+    const struct fuse_in_header *in = (const struct fuse_in_header *)slot->in;
+    bool out = (c->flags & VIRTIOFS_DATA_OUT) != 0;
+    struct fuse_out_header reply;
+
+    memcpy(&reply, slot->out, sizeof(reply));
+    uint32_t room = c->replylen + (out ? 0 : c->datalen);
+    if (slot->used < sizeof(reply) || reply.len < sizeof(reply) || reply.len > slot->used ||
+        reply.len - sizeof(reply) > room || reply.unique != in->unique) {
+        IOLog("VirtioFS: opcode %u: malformed reply\n", in->opcode);
+        return EIO;
+    }
+    if (reply.error)
+        return virtiofs_errno(reply.error);
+
+    uint32_t payload = reply.len - (uint32_t)sizeof(reply);
+    uint32_t fixed = payload < c->replylen ? payload : c->replylen;
+    memcpy(c->reply, slot->out + sizeof(reply), fixed);
+    c->replylen = fixed;
+    if (!out)
+        c->datalen = payload - fixed;
+    return 0;
 }
 
 int
-VirtioFSDevice::send(VirtQueue *vq, bool wantReply, uint32_t *replyLen)
+VirtioFSDevice::call(struct virtiofs_call *c, uint32_t uid, uint32_t gid, uint32_t pid)
 {
-    struct fuse_in_header *in = (struct fuse_in_header *)fBytes;
-    VirtIOChainEntry chain[2] = {
-        { fPhys, in->len, false, false },
-        { fPhys + kRequestBytes, kReplyBytes, true, false },
-    };
-    uint32_t used = 0;
+    bool out = (c->flags & VIRTIOFS_DATA_OUT) != 0;
+    uint32_t args = c->arglen[0] + c->arglen[1];
+    if (args < c->arglen[0] || args > kInBytes - sizeof(struct fuse_in_header) ||
+        c->replylen > kOutBytes - sizeof(struct fuse_out_header) || c->datalen > kMaxIO)
+        return EINVAL;
 
-    *replyLen = 0;
-    fTransport.addDescChain(vq, chain, wantReply ? 2 : 1);
-    fTransport.notify(vq);
-    if (!fTransport.pollForCompletion(vq, kTimeoutMs, &used)) {
-        IOLog("VirtioFS: opcode %u got no answer\n", in->opcode);
-        return -ETIMEDOUT;
+    IOMemoryDescriptor *data = NULL;
+    if (c->datalen && !(data = dataDescriptor(c)))
+        return ENOMEM;
+
+    VirtIOChainEntry chain[kMaxSegments];
+    unsigned count = 1;
+    bool fits = !data || !out || addSegments(chain, &count, data, c->datalen, false);
+    fits = fits && count < kMaxSegments;
+    unsigned replyAt = count++;
+    fits = fits && (!data || out || addSegments(chain, &count, data, c->datalen, true));
+
+    int error = EIO;
+    uint32_t inLen = (uint32_t)sizeof(struct fuse_in_header) + args;
+    IOLockLock(fLock);
+    VirtioFSSlot *slot = fits ? fillHeaderLocked(c->opcode, c->nodeid, inLen + (out ? c->datalen : 0)) : NULL;
+    if (slot) {
+        struct fuse_in_header *in = (struct fuse_in_header *)slot->in;
+        in->uid = uid;
+        in->gid = gid;
+        in->pid = pid;
+        if (c->arglen[0])
+            memcpy(in + 1, c->arg[0], c->arglen[0]);
+        if (c->arglen[1])
+            memcpy((uint8_t *)(in + 1) + c->arglen[0], c->arg[1], c->arglen[1]);
+        chain[0] = { slot->inPhys, inLen, false, false };
+        chain[replyAt] = { slot->outPhys, (uint32_t)(sizeof(struct fuse_out_header) + c->replylen), true, false };
+        bool submitted = submitLocked(kRequests, slot, chain, count);
+        while (submitted && !slot->done && !fDead)
+            pauseLocked(slot);
+        if (slot->done)
+            error = parseReply(slot, c);
+        if (slot->done || !submitted)
+            putSlotLocked(slot);
     }
-    if (!wantReply)
-        return 0;
+    IOLockUnlock(fLock);
 
-    struct fuse_out_header *out = (struct fuse_out_header *)(fBytes + kRequestBytes);
-    if (used < sizeof(*out) || out->len < sizeof(*out) || out->len > used || out->unique != in->unique) {
-        IOLog("VirtioFS: opcode %u: bad reply, %u bytes used, length %u, unique %llu for %llu\n",
-              in->opcode, used, out->len, out->unique, in->unique);
-        return -EPROTO;
+    if (data) {
+        if (!error && !out && (c->flags & VIRTIOFS_ZERO_FILL) && c->datalen < data->getLength())
+            data->writeBytes(c->datalen, NULL, data->getLength() - c->datalen);
+        data->complete();
+        data->release();
     }
-    *replyLen = out->len - (uint32_t)sizeof(*out);
-    return out->error;
-}
-
-void *
-VirtioFSDevice::reply()
-{
-    return fBytes + kRequestBytes + sizeof(struct fuse_out_header);
-}
-
-void
-VirtioFSDevice::probeInit()
-{
-    static const uint32_t offers[] = {
-        0xffffffffu,
-        FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_DO_READDIRPLUS | FUSE_READDIRPLUS_AUTO | FUSE_MAX_PAGES,
-    };
-
-    for (unsigned i = 0; i < sizeof(offers) / sizeof(offers[0]); i++) {
-        struct fuse_init_in *init = (struct fuse_init_in *)request(FUSE_INIT, 0, sizeof(struct fuse_init_in));
-        init->major = FUSE_KERNEL_VERSION;
-        init->minor = FUSE_KERNEL_MINOR_VERSION;
-        init->max_readahead = 1u << 20;
-        init->flags = offers[i];
-        init->flags2 = (offers[i] & FUSE_INIT_EXT) ? 0xffffffffu : 0;
-
-        uint32_t length = 0;
-        int error = send(&fRequests, true, &length);
-        IOLog("VirtioFS: INIT offering 0x%08x: error %d, %u bytes\n", offers[i], error, length);
-        if (error)
-            continue;
-
-        struct fuse_init_out *out = (struct fuse_init_out *)reply();
-        IOLog("VirtioFS: FUSE %u.%u flags 0x%08x flags2 0x%08x max_write %u max_readahead %u "
-              "max_pages %u max_background %u congestion %u time_gran %u map_alignment %u "
-              "max_stack_depth %u request_timeout %u\n",
-              out->major, out->minor, out->flags, out->flags2, out->max_write, out->max_readahead,
-              out->max_pages, out->max_background, out->congestion_threshold, out->time_gran,
-              out->map_alignment, out->max_stack_depth, out->request_timeout);
-        fInitFlags = out->flags;
-        return;
-    }
+    return error;
 }
 
 void
-VirtioFSDevice::probeRoot()
+VirtioFSDevice::forget(uint64_t nodeid, uint64_t nlookup)
 {
-    uint32_t length = 0;
+    uint32_t len = (uint32_t)(sizeof(struct fuse_in_header) + sizeof(struct fuse_forget_in));
 
-    request(FUSE_STATFS, FUSE_ROOT_ID, 0);
-    int error = send(&fRequests, true, &length);
-    if (!error) {
-        struct fuse_kstatfs *st = &((struct fuse_statfs_out *)reply())->st;
-        IOLog("VirtioFS: STATFS blocks %llu bfree %llu bavail %llu files %llu ffree %llu bsize %u "
-              "frsize %u namelen %u\n", st->blocks, st->bfree, st->bavail, st->files, st->ffree,
-              st->bsize, st->frsize, st->namelen);
-    } else {
-        IOLog("VirtioFS: STATFS error %d\n", error);
+    IOLockLock(fLock);
+    VirtioFSSlot *slot = fillHeaderLocked(FUSE_FORGET, nodeid, len);
+    if (slot) {
+        ((struct fuse_forget_in *)(slot->in + sizeof(struct fuse_in_header)))->nlookup = nlookup;
+        VirtIOChainEntry entry = { slot->inPhys, len, false, false };
+        if (!submitLocked(kHiprio, slot, &entry, 1))
+            putSlotLocked(slot);
     }
+    IOLockUnlock(fLock);
+}
 
-    request(FUSE_GETATTR, FUSE_ROOT_ID, sizeof(struct fuse_getattr_in));
-    error = send(&fRequests, true, &length);
-    if (!error) {
-        struct fuse_attr_out *ao = (struct fuse_attr_out *)reply();
-        IOLog("VirtioFS: root ino %llu mode 0%o nlink %u uid %u gid %u size %llu blksize %u "
-              "attr_valid %llu.%09u\n", ao->attr.ino, ao->attr.mode, ao->attr.nlink, ao->attr.uid,
-              ao->attr.gid, ao->attr.size, ao->attr.blksize, ao->attr_valid, ao->attr_valid_nsec);
-    } else {
-        IOLog("VirtioFS: GETATTR error %d\n", error);
-    }
-
-    request(FUSE_OPENDIR, FUSE_ROOT_ID, sizeof(struct fuse_open_in));
-    error = send(&fRequests, true, &length);
-    if (error) {
-        IOLog("VirtioFS: OPENDIR error %d\n", error);
-        return;
-    }
-    uint64_t fh = ((struct fuse_open_out *)reply())->fh;
-    IOLog("VirtioFS: OPENDIR fh %llu open_flags 0x%x\n", fh, ((struct fuse_open_out *)reply())->open_flags);
-
-    bool plus = (fInitFlags & FUSE_DO_READDIRPLUS) != 0;
-    struct fuse_read_in *read = (struct fuse_read_in *)request(plus ? FUSE_READDIRPLUS : FUSE_READDIR,
-        FUSE_ROOT_ID, sizeof(struct fuse_read_in));
-    read->fh = fh;
-    read->size = 8192;
-    error = send(&fRequests, true, &length);
-    IOLog("VirtioFS: %s error %d, %u bytes\n", plus ? "READDIRPLUS" : "READDIR", error, length);
-
-    uint64_t nodeids[kMaxForgets];
-    unsigned nodes = 0;
-    uint8_t *p = (uint8_t *)reply();
-    uint32_t off = 0;
-    while (!error && off < length) {
-        struct fuse_dirent *d;
-        uint64_t nodeid = 0;
-        size_t record;
-        if (plus) {
-            if (length - off < FUSE_NAME_OFFSET_DIRENTPLUS)
-                break;
-            struct fuse_direntplus *dp = (struct fuse_direntplus *)(p + off);
-            d = &dp->dirent;
-            nodeid = dp->entry_out.nodeid;
-            record = FUSE_DIRENTPLUS_SIZE(dp);
-        } else {
-            if (length - off < FUSE_NAME_OFFSET)
-                break;
-            d = (struct fuse_dirent *)(p + off);
-            record = FUSE_DIRENT_SIZE(d);
+int
+VirtioFSDevice::startSession(struct virtiofs_session *session)
+{
+    IOLockLock(fSessionLock);
+    int error = 0;
+    if (!fStarted) {
+        struct fuse_init_in init = {};
+        struct fuse_init_out reply = {};
+        init.major = FUSE_KERNEL_VERSION;
+        init.minor = FUSE_KERNEL_MINOR_VERSION;
+        init.max_readahead = kMaxIO;
+        init.flags = FUSE_ASYNC_READ | FUSE_PARALLEL_DIROPS;
+        struct virtiofs_call c = {};
+        c.opcode = FUSE_INIT;
+        c.arg[0] = &init;
+        c.arglen[0] = sizeof(init);
+        c.reply = &reply;
+        c.replylen = sizeof(reply);
+        error = call(&c, 0, 0, 0);
+        if (!error && (reply.major != FUSE_KERNEL_VERSION || c.replylen < FUSE_COMPAT_22_INIT_OUT_SIZE))
+            error = EPROTONOSUPPORT;
+        if (!error) {
+            uint32_t io = reply.max_write < reply.max_readahead ? reply.max_write : reply.max_readahead;
+            fSession.max_io = io > kMaxIO ? kMaxIO : (io < kMinIO ? kMinIO : io & ~(kMinIO - 1));
+            fSession.flags = reply.flags;
+            fStarted = true;
+            IOLog("VirtioFS: FUSE %u.%u, flags 0x%x, %u-byte I/O\n", reply.major, reply.minor, reply.flags,
+                  fSession.max_io);
         }
-        if (d->namelen > 1024 || record > length - off) {
-            IOLog("VirtioFS: bad directory entry at %u\n", off);
-            break;
-        }
-        IOLog("VirtioFS:   \"%.*s\" type %u ino %llu nodeid %llu off %llu\n", (int)d->namelen, d->name,
-              d->type, d->ino, nodeid, d->off);
-        bool dot = (d->namelen == 1 && d->name[0] == '.') ||
-                   (d->namelen == 2 && d->name[0] == '.' && d->name[1] == '.');
-        if (nodeid && !dot && nodes < kMaxForgets)
-            nodeids[nodes++] = nodeid;
-        off += (uint32_t)record;
     }
-    for (unsigned i = 0; i < nodes; i++)
-        forget(nodeids[i]);
+    if (!error)
+        *session = fSession;
+    IOLockUnlock(fSessionLock);
+    return error;
+}
 
-    struct fuse_release_in *release = (struct fuse_release_in *)request(FUSE_RELEASEDIR, FUSE_ROOT_ID,
-        sizeof(struct fuse_release_in));
-    release->fh = fh;
-    IOLog("VirtioFS: RELEASEDIR error %d\n", send(&fRequests, true, &length));
+VirtioFSDevice *
+VirtioFSDevice::copyDevice(const char *tag)
+{
+    OSDictionary *match = serviceMatching("VirtioFSDevice");
+    const OSSymbol *key = OSSymbol::withCString(kTagKey);
+    OSString *value = OSString::withCString(tag);
+    VirtioFSDevice *dev = NULL;
+
+    if (match && key && value && propertyMatching(key, value, match)) {
+        IOService *service = copyMatchingService(match);
+        dev = OSDynamicCast(VirtioFSDevice, service);
+        if (!dev)
+            OSSafeReleaseNULL(service);
+    }
+    OSSafeReleaseNULL(value);
+    OSSafeReleaseNULL(key);
+    OSSafeReleaseNULL(match);
+    return dev;
+}
+
+extern "C" {
+
+struct virtiofs_dev *
+virtiofs_dev_find(const char *tag)
+{
+    return (struct virtiofs_dev *)VirtioFSDevice::copyDevice(tag);
 }
 
 void
-VirtioFSDevice::probeErrors()
+virtiofs_dev_release(struct virtiofs_dev *dev)
 {
-    uint32_t length = 0;
+    ((VirtioFSDevice *)dev)->release();
+}
 
-    request(kUnknownOpcode, FUSE_ROOT_ID, 0);
-    int error = send(&fRequests, true, &length);
-    IOLog("VirtioFS: unknown opcode: error %d, ENOSYS is 38 on Linux and %d here\n", error, ENOSYS);
+int
+virtiofs_dev_start(struct virtiofs_dev *dev, struct virtiofs_session *session)
+{
+    return ((VirtioFSDevice *)dev)->startSession(session);
+}
 
-    char *name = (char *)request(FUSE_LOOKUP, FUSE_ROOT_ID, 300);
-    memset(name, 'x', 299);
-    error = send(&fRequests, true, &length);
-    IOLog("VirtioFS: 299-byte name: error %d, ENAMETOOLONG is 36 on Linux and %d here\n", error, ENAMETOOLONG);
+int
+virtiofs_dev_call(struct virtiofs_dev *dev, struct virtiofs_call *call, uint32_t uid, uint32_t gid, uint32_t pid)
+{
+    return ((VirtioFSDevice *)dev)->call(call, uid, gid, pid);
 }
 
 void
-VirtioFSDevice::forget(uint64_t nodeid)
+virtiofs_dev_forget(struct virtiofs_dev *dev, uint64_t nodeid, uint64_t nlookup)
 {
-    struct fuse_forget_in *f = (struct fuse_forget_in *)request(FUSE_FORGET, nodeid, sizeof(struct fuse_forget_in));
-    f->nlookup = 1;
-    uint32_t length = 0;
-    IOLog("VirtioFS: FORGET %llu: %d\n", nodeid, send(&fHiprio, false, &length));
+    ((VirtioFSDevice *)dev)->forget(nodeid, nlookup);
+}
+
 }
