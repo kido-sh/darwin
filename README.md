@@ -19,6 +19,7 @@ Darwin kido 25.5.0 Darwin Kernel Version 25.5.0: Mon Nov 23 13:26:52 UTC 2026; n
 - launchd, dyld and libSystem.
 - A small set of Unix tools (toybox and a few BSD tools), zsh as `/bin/sh`, and vi.
 - libcurl, libedit and ncurses with its terminfo database, as macOS has them in `/usr/lib`.
+- LibreSSL's libcrypto, libssl and libtls with the `openssl` and `ocspcheck` tools, as macOS has them.
 - kido's guest agent, which runs the commands that kido sends.
 - The licenses of all of the above, in `/usr/share/doc/kido`.
 
@@ -61,6 +62,10 @@ kido load -i darwin.tar          # on the Mac: loads it as darwin:latest
 
 The corecrypto in KidoDarwin is a fork that nobody has audited. Do not rely on the guest's crypto
 library to protect anything that matters.
+
+LibreSSL 3.3.6, the release macOS ships, with backports of LibreSSL's later security fixes,
+provides the TLS of libcurl, the `openssl` tool and SecureTransport, and Security.framework's RSA, EC
+and DH private-key operations.
 
 ## Where it comes from
 

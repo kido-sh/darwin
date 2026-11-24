@@ -75,8 +75,8 @@ In this repository:
   lists and cmake/MakeInc.def.in.
 - libxpc without Darling's code: clean xpc_errors.c, xpc_abort.c and xpc_codesign.c, and
   clean-room XPC and launch.h headers.
-- Security.framework on the external corecrypto, with kido's glue (Security/corecrypto) over
-  OpenSSL; Darling's corecrypto removed.
+- Security.framework on the external corecrypto, with kido's glue in Security/corecrypto over
+  LibreSSL. Darling's corecrypto is removed.
 - Guest branding (KidoDarwin, hostname kido), no PureDarwin logo in the loader, and no GPL
   programs, headers, static libraries, configd or ipconfig in the image.
 - kido's names where PureDarwin used its own: the kido_* boot-args, the sh.kido.* launchd jobs,
@@ -90,7 +90,7 @@ In this repository:
   syslog(3) messages recorded by PureDarwin's logd in /var/log/system.log; tests in test/libsystem.
 - macOS's libcurl, libedit and ncurses in /usr/lib: libcurl.4, libedit.3, libncurses.5.4,
   libpanel.5.4, libmenu.5.4 and libform.5.4 with macOS's install names, versions and exports, built
-  from nixpkgs' curl 8.21.0 (over the image's OpenSSL and /etc/ssl/cert.pem), libedit 20251016-3.1
+  from nixpkgs' curl 8.21.0 over the image's LibreSSL and /etc/ssl/cert.pem, libedit 20251016-3.1
   and ncurses 6.6; ncurses keeps both of macOS's cchar_t layouts (the plain names and the $NCURSES60
   ones), exports the four ncurses 6.0 internals that later releases dropped or made static, and
   installs its terminfo database; tests in test/syslibs.
@@ -117,6 +117,14 @@ In this repository:
   the panic log goes to a buffer in the kernel, so a panic prints its backtrace, the kexts in it
   and the loaded kexts. Then a virtual machine powers off instead of resetting
   (PDArmPlatformExpert), which stops it under VZ as well as QEMU; tested in test/kernel.
+- macOS's LibreSSL: libcrypto.46, libssl.48 and libtls.20 in /usr/lib with macOS's install names,
+  versions and exports, and the openssl and ocspcheck tools in /usr/bin. They are built from
+  LibreSSL 3.3.6, the release macOS ships, with backports of LibreSSL's later security fixes.
+  The libraries are arm64e, as on macOS. libcurl weak-links libssl and libcrypto as macOS's does.
+  Security.framework's corecrypto glue, its SecureTransport, PKCS #12 import and CMS decoding run on
+  them too, so the image carries no OpenSSL. SecureTransport offers TLS 1.0 to 1.2 with macOS's
+  cipher list and error codes, as macOS's does. The tests are in test/ssl and test/security, which
+  also runs its programs against macOS's own frameworks and compares the results.
 - An APSL header on Ext4FileSystemDriver.cpp, which is derived from Apple's AppleFileSystemDriver.
 - The Nix code reorganized under nix/ and the tree pruned to what the container builds.
 - The licensing files and the change notices.
