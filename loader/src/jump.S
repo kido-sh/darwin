@@ -25,10 +25,18 @@ jump_to_xnu:
     cmp x0, #2
     b.ne 1f
 
-    /* RW=1 only. API/APK (bits 41/40) stay clear so PAuth is disabled below
-     * EL2 and the instructions reach sleh.c's emulation instead of running
-     * natively against keys nothing else agrees on. */
     mov x0, #(1 << 31)
+    mrs x1, id_aa64isar1_el1
+    mov x2, #0xff0
+    movk x2, #0xff00, lsl #16
+    tst x1, x2
+    b.ne 2f
+    mrs x1, s3_0_c0_c6_2
+    tst x1, #0xff00
+    b.eq 3f
+2:
+    orr x0, x0, #(3 << 40)
+3:
     msr hcr_el2, x0
 
     /* CNTVOFF_EL2 is UNKNOWN out of reset and neither TF-A nor U-Boot clears

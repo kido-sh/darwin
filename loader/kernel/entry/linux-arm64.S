@@ -79,6 +79,17 @@ primary_entry:
 
   /* EL2: plain AArch64 EL1 below, timers and GICv3 system registers usable there */
   mov x0, #(1 << 31)
+  mrs x1, id_aa64isar1_el1
+  mov x2, #0xff0
+  movk x2, #0xff00, lsl #16
+  tst x1, x2
+  b.ne 7f
+  mrs x1, s3_0_c0_c6_2
+  tst x1, #0xff00
+  b.eq 8f
+7:
+  orr x0, x0, #(3 << 40)
+8:
   msr hcr_el2, x0
   mrs x0, cnthctl_el2
   orr x0, x0, #3
