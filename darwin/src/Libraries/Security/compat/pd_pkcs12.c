@@ -73,6 +73,18 @@ static CFDataRef copyKeyData(EVP_PKEY *pkey, CFStringRef *keyType)
     return NULL;
 }
 
+static void appendCertificates(CFMutableArrayRef array, STACK_OF(X509) *certs)
+{
+    for (int i = 0; certs && i < sk_X509_num(certs); i++) {
+        SecCertificateRef certificate = createCertificate(sk_X509_value(certs, i));
+
+        if (certificate) {
+            CFArrayAppendValue(array, certificate);
+            CFRelease(certificate);
+        }
+    }
+}
+
 static SecKeyRef createPrivateKey(EVP_PKEY *pkey)
 {
     CFStringRef keyType = NULL;
@@ -101,6 +113,7 @@ OSStatus SecPKCS12Import(CFDataRef pkcs12_data, CFDictionaryRef options, CFArray
     EVP_PKEY *pkey = NULL;
     X509 *x509 = NULL;
     STACK_OF(X509) *ca = NULL;
+    STACK_OF(PKCS7) *safes;
     OSStatus status = errSecDecode;
 
     if (pkcs12_data == NULL || items == NULL)
@@ -117,8 +130,9 @@ OSStatus SecPKCS12Import(CFDataRef pkcs12_data, CFDictionaryRef options, CFArray
     }
     bytes = CFDataGetBytePtr(pkcs12_data);
     p12 = d2i_PKCS12(NULL, &bytes, CFDataGetLength(pkcs12_data));
-    if (p12 == NULL)
+    if (p12 == NULL || (safes = PKCS12_unpack_authsafes(p12)) == NULL)
         goto out;
+    sk_PKCS7_pop_free(safes, PKCS7_free);
     if (!PKCS12_verify_mac(p12, password, -1)) {
         status = errSecAuthFailed;
         goto out;
@@ -136,26 +150,38 @@ OSStatus SecPKCS12Import(CFDataRef pkcs12_data, CFDictionaryRef options, CFArray
         CFMutableDictionaryRef item = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
             &kCFTypeDictionaryValueCallBacks);
 
-        CFArrayAppendValue(chain, certificate);
-        for (int i = 0; ca && i < sk_X509_num(ca); i++) {
-            SecCertificateRef issuer = createCertificate(sk_X509_value(ca, i));
+        SecPolicyRef policy = SecPolicyCreateBasicX509();
+        SecTrustRef trust = NULL;
 
-            if (issuer) {
-                CFArrayAppendValue(chain, issuer);
-                CFRelease(issuer);
-            }
-        }
+        CFArrayAppendValue(chain, certificate);
+        appendCertificates(chain, ca);
         if (identity) {
             CFDictionarySetValue(item, kSecImportItemIdentity, identity);
             CFRelease(identity);
         }
+        if (policy && SecTrustCreateWithCertificates(chain, policy, &trust) == errSecSuccess) {
+            CFDictionarySetValue(item, kSecImportItemTrust, trust);
+            CFRelease(trust);
+        }
+        if (policy)
+            CFRelease(policy);
         CFDictionarySetValue(item, kSecImportItemCertChain, chain);
         CFArrayAppendValue(result, item);
         CFRelease(item);
         CFRelease(chain);
         status = identity ? errSecSuccess : errSecDecode;
+    } else if (pkey == NULL && x509 == NULL && ca && sk_X509_num(ca) > 0) {
+        CFMutableArrayRef certificates = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+        CFMutableDictionaryRef item = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks);
+
+        appendCertificates(certificates, ca);
+        CFDictionarySetValue(item, kSecImportItemCertChain, certificates);
+        CFArrayAppendValue(result, item);
+        CFRelease(item);
+        CFRelease(certificates);
+        status = errSecSuccess;
     } else
-        // a key type SecKey cannot hold, or a file with no key, gives no identity
         status = key == NULL && pkey != NULL ? errSecUnsupportedFormat : errSecDecode;
     if (key)
         CFRelease(key);
