@@ -50,6 +50,13 @@ in
     mkdir -p "$fw/Versions/A/Headers"
     cp build-nix/src/Libraries/Security/libSecurity.dylib \
       "$fw/Versions/A/Security"
+    grep -v '^#' src/Libraries/Security/Security.exports | LC_ALL=C sort > exports.want
+    "$NIX_DARWIN_TOOLCHAIN_DIR/arm64-apple-darwin20.4-nm" -gUj "$fw/Versions/A/Security" | LC_ALL=C sort > exports.have
+    if ! cmp -s exports.want exports.have; then
+      echo "src/Libraries/Security/Security.exports differs from what Security.framework exports:" >&2
+      diff exports.want exports.have >&2
+      exit 1
+    fi
 
     # trustd serves trust evaluation, kido-tlscheck tests it
     install -Dm755 build-nix/src/Libraries/Security/trustd "$out/usr/libexec/trustd"
