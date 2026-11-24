@@ -18,6 +18,7 @@
 , libxml2
 , libressl
 , sqlite
+, pinned
 , agent
 , kido
 , nixpkgsRev
@@ -96,7 +97,9 @@ let
     [ "libressl" libressl.src "COPYING" ]
     [ "sqlite" sqlite.src "LICENSE.md" ]
     [ "go" go.src "LICENSE" ]
-  ];
+  ] ++ lib.concatLists (lib.mapAttrsToList (name: pkg:
+    let pin = lib.importJSON (../darwin/third-party + "/${name}/source.json");
+    in lib.optional (pin.licenseFile != null) [ name pkg.src pin.licenseFile ]) pinned);
   copyTree = component: files: lib.concatMapStrings (f: ''
     install -Dm644 ${builtins.path { path = tree + "/${f}"; name = "license"; }} "$d/${component}/${baseNameOf f}"
   '') files;
@@ -120,7 +123,7 @@ runCommand "kido-notices" { nativeBuildInputs = [ go unzip ]; } ''
   fromSource() {
     local component=$1 src=$2 file=$3 name
     if [ -d "$src" ]; then
-      install -Dm644 "$src/$file" "$d/$component/$file"
+      install -Dm644 "$src/$file" "$d/$component/$(basename "$file")"
     elif [[ $src == *.zip ]]; then
       name=$(unzip -Z1 "$src" | grep -E "^[^/]+/$file\$")
       mkdir -p "$d/$component"

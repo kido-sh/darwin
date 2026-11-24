@@ -12,8 +12,8 @@ Source code
 
 The complete source of the images, including every change made to code under
 the APSL, the MPL, the CDDL and the LGPL, is at https://github.com/kido-sh/darwin.
-The third-party sources that flake.lock pins come from the upstream locations
-listed below.
+The third-party sources that flake.lock and the recipes in
+nix/darwin/third-party pin come from the upstream locations listed below.
 
 
 Upstream bases
@@ -107,6 +107,10 @@ the terminfo database in /usr/share/terminfo, and linked into zsh
 curl 8.21.0, /usr/lib/libcurl.4.dylib
   Copyright (c) 1996 - 2026, Daniel Stenberg, <daniel@haxx.se>, and many
   contributors. curl License (LICENSES/curl.txt). https://curl.se
+
+nghttp2 1.71.0, /usr/lib/libapple_nghttp2.dylib
+  Copyright (c) 2012, 2014, 2015, 2016 Tatsuhiro Tsujikawa. Copyright (c) 2012,
+  2014, 2015, 2016 nghttp2 contributors. MIT License. https://nghttp2.org
 
 libedit 20251016-3.1, /usr/lib/libedit.3.dylib
   Copyright (c) 1989, 1992, 1993 The Regents of the University of California.

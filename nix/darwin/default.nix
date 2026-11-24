@@ -227,6 +227,7 @@ let
     arch = "arm64e";
   };
   libutilArm64eBuild = mkArm64Build ./third-party/libutil { arch = "arm64e"; };
+  nghttp2Arm64eBuild = mkArm64Build ./third-party/nghttp2 { arch = "arm64e"; };
   arm64eTestsBuild = mkArm64Build ../../test/arm64e { };
   coreServicesArm64Build = mkArm64Build ./apple/coreservices.nix {
     src = coreServicesSource;
@@ -535,6 +536,7 @@ in
     liblzmaDylibArm64eBuild
     libutilArm64eBuild
     ncursesDylibArm64Build
+    nghttp2Arm64eBuild
     securityArm64Build
     splitBaseSystemArm64VirtMinimalRelease
     systemConfigurationArm64Build

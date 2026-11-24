@@ -1,0 +1,2 @@
+# macOS's exports that no SDK header declares and that nghttp2 does not export
+_nghttp2_option_set_no_http_semantics

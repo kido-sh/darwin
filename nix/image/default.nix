@@ -19,6 +19,7 @@ let
     liblzmaDylibArm64eBuild
     libutilArm64eBuild
     ncursesDylibArm64Build
+    nghttp2Arm64eBuild
     securityArm64Build
     splitBaseSystemArm64VirtMinimalRelease
     systemConfigurationArm64Build
@@ -30,6 +31,9 @@ let
     inherit kido revision nixpkgsRev;
     agent = agent.agent;
     libressl = libresslArm64eBuild;
+    pinned = {
+      nghttp2 = nghttp2Arm64eBuild;
+    };
   };
   # every image has this root filesystem uuid: uuid5 of https://github.com/kido-sh/darwin#root
   rootUUID = "260a2575-f263-5945-9d65-ddf2d4e215b2";
@@ -77,6 +81,7 @@ let
       securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build
       libzDylibArm64Build libbz2DylibArm64eBuild liblzmaDylibArm64eBuild libutilArm64eBuild
       ncursesDylibArm64Build libeditArm64Build curlArm64Build
+      nghttp2Arm64eBuild
       certificatesBundleBuild containerLaunchdSettings
       agent.root
       libresslArm64eBuild
