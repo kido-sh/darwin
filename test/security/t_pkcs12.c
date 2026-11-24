@@ -126,8 +126,19 @@ main(int argc, char **argv)
     CFArrayRef items = NULL;
     OSStatus status;
 
+    if (argc == 2 && strcmp(argv[1], "constants") == 0) {
+        print_string("kSecImportToMemoryOnly ", kSecImportToMemoryOnly);
+        print_string(", kSecImportExportPassphrase ", kSecImportExportPassphrase);
+        print_string(", items ", kSecImportItemLabel);
+        print_string(" ", kSecImportItemKeyID);
+        print_string(" ", kSecImportItemTrust);
+        print_string(" ", kSecImportItemCertChain);
+        print_string(" ", kSecImportItemIdentity);
+        printf("\n");
+        return 0;
+    }
     if (argc != 4) {
-        fprintf(stderr, "usage: t_pkcs12 NAME FILE PASSWORD\n");
+        fprintf(stderr, "usage: t_pkcs12 constants | t_pkcs12 NAME FILE PASSWORD\n");
         return 2;
     }
     if ((data = slurp(argv[2])) == NULL) {
@@ -137,8 +148,7 @@ main(int argc, char **argv)
     password = CFStringCreateWithCString(NULL, argv[3], kCFStringEncodingUTF8);
     options = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     CFDictionarySetValue(options, kSecImportExportPassphrase, password);
-    if (&kSecImportToMemoryOnly != NULL)
-        CFDictionarySetValue(options, kSecImportToMemoryOnly, kCFBooleanTrue);
+    CFDictionarySetValue(options, kSecImportToMemoryOnly, kCFBooleanTrue);
     status = SecPKCS12Import(data, options, &items);
     printf("%s: status %d, items %ld\n", argv[1], (int)status, items ? (long)CFArrayGetCount(items) : 0L);
     for (CFIndex i = 0; items && i < CFArrayGetCount(items); i++) {

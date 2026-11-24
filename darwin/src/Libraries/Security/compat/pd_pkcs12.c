@@ -12,6 +12,7 @@
 #include <string.h>
 
 const CFStringRef kSecImportExportPassphrase = CFSTR("passphrase");
+const CFStringRef kSecImportToMemoryOnly = CFSTR("memory");
 const CFStringRef kSecImportItemLabel = CFSTR("label");
 const CFStringRef kSecImportItemKeyID = CFSTR("keyid");
 const CFStringRef kSecImportItemTrust = CFSTR("trust");

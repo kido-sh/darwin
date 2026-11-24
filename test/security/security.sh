@@ -109,6 +109,7 @@ ready() {
 
 compare() {
     bin=$1 dir=$2 good=$3 expired=$4 tls13=$5 tls12=$6
+    "$bin/t_pkcs12" constants
     "$bin/t_pkcs12" "RSA p12" "$dir/rsa.p12" kido
     "$bin/t_pkcs12" "EC p12" "$dir/ec.p12" kido
     "$bin/t_pkcs12" "AES p12" "$dir/aes.p12" kido
@@ -135,6 +136,7 @@ compare() {
 check() {
     bin=$1
     fail=0
+    "$bin/t_pkcs12" constants || fail=$((fail + 1))
     "$bin/t_seckey" self || fail=$((fail + 1))
     "$bin/t_seckey" check "$bin/vectors.txt" || fail=$((fail + 1))
     "$bin/t_secspi" "$bin/vectors.txt" || fail=$((fail + 1))
