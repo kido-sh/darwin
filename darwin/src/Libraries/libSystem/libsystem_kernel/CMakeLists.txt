@@ -54,7 +54,7 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/syscalls.a
         ${PUREDARWIN_SOURCE_DIR}/src/Kernel/xnu/bsd/kern/syscalls.master
         ${CMAKE_CURRENT_SOURCE_DIR}/custom ${CMAKE_CURRENT_SOURCE_DIR}/Platforms
         ${_libsystem_kernel_syscall_platform} ${CMAKE_CURRENT_BINARY_DIR}/sys
-    COMMAND ${CMAKE_COMMAND} -E env ARCHS=${PUREDARWIN_ARCH}
+    COMMAND ${CMAKE_COMMAND} -E env ARCHS=${PUREDARWIN_OSX_ARCH}
         ${CMAKE_CURRENT_SOURCE_DIR}/scripts/compile-syscalls.pl
         ${CMAKE_CURRENT_BINARY_DIR}/sys/stubs.list ${CMAKE_CURRENT_BINARY_DIR}/syscalls.a
         -I${PUREDARWIN_BINARY_DIR}/src/Kernel/xnu/xnu_header_install/usr/include

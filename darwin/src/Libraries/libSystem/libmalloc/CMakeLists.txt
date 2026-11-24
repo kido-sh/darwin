@@ -25,9 +25,10 @@ add_library(libmalloc_static STATIC EXCLUDE_FROM_ALL
     src/bitarray.c
     src/vm.c
     src/msl_lite_support.c
+    src/kido_malloc_type.c
 )
 
-set_property(TARGET libmalloc_static PROPERTY OSX_ARCHITECTURES "${PUREDARWIN_ARCH}")
+set_property(TARGET libmalloc_static PROPERTY OSX_ARCHITECTURES "${PUREDARWIN_OSX_ARCH}")
 
 target_compile_definitions(libmalloc_static PRIVATE
     MALLOC_TARGET_EXCLAVES=0

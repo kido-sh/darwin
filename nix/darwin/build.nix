@@ -45,8 +45,10 @@
 , installKexts ? false
 , installKextNames ? [ ]
 , installLibSystem ? false
+, installXpcDev ? false
 , prebuiltLibSystem ? null
 , xnuKernelConfig ? "RELEASE"
+, osxArch ? "arm64"
 , extraCmakeFlags ? [ ]
 # libdyld needs compiler-rt for __isPlatformVersionAtLeast (@available's backend)
 , compilerRt
@@ -167,6 +169,7 @@ EOF
       -DLIBXML2_LIBRARY=${libxml2Library} \
       -DPUREDARWIN_MACOSX_SDK="$DARWIN_SDK_ROOT" \
       -DPUREDARWIN_ARCH=arm64 \
+      -DPUREDARWIN_OSX_ARCH=${osxArch} \
       -DPUREDARWIN_COMPILER_RT_PREFIX=${compilerRt} \
       -DPUREDARWIN_ENABLE_PROJECTS=${if enableProjects then "ON" else "OFF"} \
       -DPUREDARWIN_ENABLE_KERNEL=${if enableKernel then "ON" else "OFF"} \
@@ -230,6 +233,23 @@ EOF
     runHook postBuild
   '';
 
+  preInstall = lib.optionalString (installLibSystem || installXpcDev) ''
+    installXpcDev() {
+      mkdir -p $out/pd-xpc-dev/lib $out/pd-xpc-dev/include
+      for a in XPC/launchd/libXPC_launchd_static.a \
+               XPC/launchd/libXPC_launchd_mig_static.a \
+               XPC/libxpc/libXPC_libxpc_static.a \
+               XPC/libinfo/libXPC_libinfo_static.a \
+               XPC/libnv/libXPC_libnv_static.a \
+               CrashReporterClient/libCrashReporterClient.a; do
+        if [ -e "build-nix/src/Libraries/$a" ]; then
+          cp "build-nix/src/Libraries/$a" $out/pd-xpc-dev/lib/
+        fi
+      done
+      cp -a src/Libraries/XPC/libxpc/include/. $out/pd-xpc-dev/include/
+    }
+  '';
+
   installPhase = ''
     runHook preInstall
     mkdir -p $out
@@ -253,6 +273,8 @@ EOF
       fi
       cp -R "$kext_path" "$out/System/Library/Extensions/"
     done
+  '' + lib.optionalString installXpcDev ''
+    installXpcDev
   '' + lib.optionalString installLibSystem ''
     mkdir -p $out/usr/lib/system
     cp build-nix/src/Libraries/libSystem/stub/libSystem.B.dylib $out/usr/lib/
@@ -293,18 +315,7 @@ EOF
       cp src/Libraries/XPC/logd/sh.kido.logd.plist $out/System/Library/LaunchDaemons/
     fi
 
-    mkdir -p $out/pd-xpc-dev/lib $out/pd-xpc-dev/include
-    for a in XPC/launchd/libXPC_launchd_static.a \
-             XPC/launchd/libXPC_launchd_mig_static.a \
-             XPC/libxpc/libXPC_libxpc_static.a \
-             XPC/libinfo/libXPC_libinfo_static.a \
-             XPC/libnv/libXPC_libnv_static.a \
-             CrashReporterClient/libCrashReporterClient.a; do
-      if [ -e "build-nix/src/Libraries/$a" ]; then
-        cp "build-nix/src/Libraries/$a" $out/pd-xpc-dev/lib/
-      fi
-    done
-    cp -a src/Libraries/XPC/libxpc/include/. $out/pd-xpc-dev/include/
+    installXpcDev
 
     if [ -d build-nix/src/Libraries/libSystem/libc/headers/usr/include ]; then
       mkdir -p $out/pd-guest-headers

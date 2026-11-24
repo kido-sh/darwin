@@ -133,11 +133,22 @@ let
     installUserland = false;
     installKernel = false;
     installLibSystem = true;
+    osxArch = "arm64e";
   };
-  libcxxabiDylibArm64Build = mkArm64Build ./apple/libcxxabi-dylib.nix { src = libcxxDylibSource; };
-  libcxxDylibArm64Build = mkArm64Build ./apple/libcxx-dylib.nix { src = libcxxDylibSource; };
+  libSystemXpcArm64Build = mkPureDarwinBuild {
+    pname = "kido-libsystem-xpc-arm64";
+    src = libSystemSource;
+    buildTargets = [ "XPC_launchd_static" "XPC_launchd_mig_static" "XPC_libxpc_static" "XPC_libinfo_static" "XPC_libnv_static" "CrashReporterClient" ];
+    enableUserspace = false;
+    enableKernel = false;
+    installUserland = false;
+    installKernel = false;
+    installXpcDev = true;
+  };
+  libcxxabiDylibArm64Build = mkArm64Build ./apple/libcxxabi-dylib.nix { src = libcxxDylibSource; arch = "arm64e"; };
+  libcxxDylibArm64Build = mkArm64Build ./apple/libcxx-dylib.nix { src = libcxxDylibSource; arch = "arm64e"; };
   icuCoreArm64Build = mkArm64Build ./apple/icucore.nix { icuSrc = pkgs.icu.src; };
-  libobjcArm64Build = mkArm64Build ./apple/libobjc.nix { src = objcSource; };
+  libobjcArm64Build = mkArm64Build ./apple/libobjc.nix { src = objcSource; arch = "arm64e"; };
   coreFoundationArm64Build = mkArm64Build ./apple/corefoundation.nix {
     icu = icuCoreArm64Build;
     src = "${coreFoundationSource}/src/Frameworks/CoreFoundation";
@@ -192,17 +203,20 @@ let
     foundation = foundationArm64Build;
   };
   launchdArm64Build = mkArm64Build ./apple/launchd.nix {
+    xpcDev = libSystemXpcArm64Build;
     corefoundation = coreFoundationArm64Build;
     iokit = iokitArm64Build;
     src = libSystemSource;
   };
   launchctlArm64Build = mkArm64Build ./apple/launchctl.nix {
+    xpcDev = libSystemXpcArm64Build;
     corefoundation = coreFoundationArm64Build;
     iokit = iokitArm64Build;
     src = libSystemSource;
   };
   libzDylibArm64Build = mkArm64Build ./third-party/libz-dylib.nix {
     inherit (pkgs) zlib;
+    arch = "arm64e";
   };
   coreServicesArm64Build = mkArm64Build ./apple/coreservices.nix {
     src = coreServicesSource;
@@ -374,7 +388,7 @@ let
   };
   libiconvArm64Build = mkArm64Build ./third-party/libiconv.nix { libiconvReal = pkgs.libiconvReal; };
   ncursesArm64Build = mkArm64Build ./third-party/ncurses.nix { ncurses = pkgs.ncurses; };
-  ncursesDylibArm64Build = mkArm64Build ./third-party/ncurses-dylib { ncurses = pkgs.ncurses; };
+  ncursesDylibArm64Build = mkArm64Build ./third-party/ncurses-dylib { ncurses = pkgs.ncurses; arch = "arm64e"; };
   libeditArm64Build = mkArm64Build ./third-party/libedit {
     inherit (pkgs) libedit;
     ncurses = ncursesDylibArm64Build;
@@ -500,6 +514,11 @@ in
     kextsArm64Build
     libeditArm64Build
     libiconvArm64Build
+    libSystemArm64Build
+    libSystemXpcArm64Build
+    libobjcArm64Build
+    libcxxDylibArm64Build
+    libcxxabiDylibArm64Build
     libzDylibArm64Build
     ncursesDylibArm64Build
     securityArm64Build

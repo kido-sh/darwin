@@ -2,6 +2,7 @@
 , lib
 , darwinCrossToolchain
 , targetTriple ? "arm64-apple-darwin20.4"
+, arch ? "arm64"
 , nativeLd
 , libSystem
 , src
@@ -10,7 +11,7 @@
 
 let
 
-  cc = "${darwinCrossToolchain}/bin/${targetTriple}-clang";
+  cc = "${darwinCrossToolchain}/bin/${targetTriple}-clang -arch ${arch}";
 
   # libc++abi ABI-layer sources (mirrors _abi_srcs in the CMakeLists).
   abiSrcs = [

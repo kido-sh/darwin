@@ -4,6 +4,7 @@
 , targetTriple ? "arm64-apple-darwin20.4"
 , nativeLd
 , libSystem
+, xpcDev ? libSystem
 , corefoundation
 , iokit
 , src
@@ -35,25 +36,25 @@ stdenv.mkDerivation {
       -I${src}/src/Libraries/libSystem/libc \
       -I${src}/src/Libraries/libSystem/libplatform/private \
       -I${src}/src/Libraries/libSystem/pthread/compat-include \
-      -I${libSystem}/pd-xpc-dev/include \
+      -I${xpcDev}/pd-xpc-dev/include \
       -I${corefoundation}/include \
       -F${corefoundation}/System/Library/Frameworks \
       -fuse-ld=${nativeLd}/bin/ld -nostdlib \
       -L${libSystem}/usr/lib -L${corefoundation}/usr/lib -F${iokit}/System/Library/Frameworks \
       -Wl,-dylib_file,/usr/lib/system/libdyld.dylib:${libSystem}/usr/lib/system/libdyld.dylib \
       -Wl,-platform_version,macos,26.5,26.5 \
-      -Wl,-oso_prefix,${libSystem}/pd-xpc-dev/lib/ \
-      -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libXPC_libxpc_static.a \
+      -Wl,-oso_prefix,${xpcDev}/pd-xpc-dev/lib/ \
+      -Wl,-force_load,${xpcDev}/pd-xpc-dev/lib/libXPC_libxpc_static.a \
       -Wl,-U,_OBJC_CLASS_\$_NSObject \
       -Wl,-U,_OBJC_METACLASS_\$_NSObject \
       -Wl,-U,__objc_empty_cache \
-      -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libXPC_libinfo_static.a \
-      -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libXPC_libnv_static.a \
+      -Wl,-force_load,${xpcDev}/pd-xpc-dev/lib/libXPC_libinfo_static.a \
+      -Wl,-force_load,${xpcDev}/pd-xpc-dev/lib/libXPC_libnv_static.a \
       -Wl,-fixup_chains \
       -lCoreFoundation -framework IOKit -lSystem \
       ${src}/src/Libraries/XPC/launchctl/launchctl.c \
-      ${libSystem}/pd-xpc-dev/lib/libXPC_launchd_mig_static.a \
-      -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libCrashReporterClient.a \
+      ${xpcDev}/pd-xpc-dev/lib/libXPC_launchd_mig_static.a \
+      -Wl,-force_load,${xpcDev}/pd-xpc-dev/lib/libCrashReporterClient.a \
       -o launchctl
 
     runHook postBuild

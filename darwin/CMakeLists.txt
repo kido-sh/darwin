@@ -114,6 +114,20 @@ else()
 endif()
 message(STATUS "PureDarwin target architecture: ${PUREDARWIN_ARCH}")
 
+if(NOT PUREDARWIN_OSX_ARCH)
+    set(PUREDARWIN_OSX_ARCH "${PUREDARWIN_ARCH}")
+endif()
+if(NOT PUREDARWIN_OSX_ARCH STREQUAL PUREDARWIN_ARCH AND
+   NOT (PUREDARWIN_ARCH STREQUAL "arm64" AND PUREDARWIN_OSX_ARCH STREQUAL "arm64e"))
+    message(FATAL_ERROR "PUREDARWIN_OSX_ARCH ${PUREDARWIN_OSX_ARCH} does not fit PUREDARWIN_ARCH ${PUREDARWIN_ARCH}")
+endif()
+message(STATUS "User-space Mach-O architecture: ${PUREDARWIN_OSX_ARCH}")
+if(NOT PUREDARWIN_OSX_ARCH STREQUAL PUREDARWIN_ARCH)
+    set(CMAKE_OSX_ARCHITECTURES "${PUREDARWIN_OSX_ARCH}")
+    string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,-fixup_chains")
+    string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,-fixup_chains")
+endif()
+
 execute_process(
     COMMAND xcrun --sdk macosx --show-sdk-path
     OUTPUT_VARIABLE _puredarwin_xcrun_macosx_sdk

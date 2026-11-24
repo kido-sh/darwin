@@ -122,7 +122,7 @@ if(PUREDARWIN_ARCH STREQUAL "armv6")
     target_compile_options(dyld PRIVATE -fvisibility=hidden)
 endif()
 
-if(PUREDARWIN_ARCH STREQUAL "arm64")
+if(PUREDARWIN_OSX_ARCH STREQUAL "arm64")
     # Real ptrauth codegen, needed for arm64e chained-fixup signing
     # (MachOLoaded::...::signPointer()) to do anything but write garbage.
     # +pauth: -mcpu=apple-a10 predates PAuth, so the backend won't lower

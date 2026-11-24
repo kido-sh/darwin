@@ -4,6 +4,7 @@
 , targetTriple ? "arm64-apple-darwin20.4"
 , nativeLd
 , libSystem
+, xpcDev ? libSystem
 , corefoundation
 , iokit
 , compilerRt ? null
@@ -28,23 +29,23 @@ stdenv.mkDerivation {
 
     ${darwinCrossToolchain}/bin/${targetTriple}-clang \
       -isysroot "$DARWIN_SDK_ROOT" \
-      -I${libSystem}/pd-xpc-dev/include \
+      -I${xpcDev}/pd-xpc-dev/include \
       -I${corefoundation}/include \
       -fuse-ld=${nativeLd}/bin/ld -nostdlib \
       -Wl,-dylib_file,/usr/lib/system/libdyld.dylib:${libSystem}/usr/lib/system/libdyld.dylib \
       -L${libSystem}/usr/lib -L${corefoundation}/usr/lib -F${iokit}/System/Library/Frameworks \
       -Wl,-dylinker_install_name,/usr/lib/dyld \
       -Wl,-platform_version,macos,26.5,26.5 \
-      -Wl,-oso_prefix,${libSystem}/pd-xpc-dev/lib/ \
-      -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libXPC_launchd_static.a \
-      -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libXPC_launchd_mig_static.a \
-      -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libXPC_libxpc_static.a \
+      -Wl,-oso_prefix,${xpcDev}/pd-xpc-dev/lib/ \
+      -Wl,-force_load,${xpcDev}/pd-xpc-dev/lib/libXPC_launchd_static.a \
+      -Wl,-force_load,${xpcDev}/pd-xpc-dev/lib/libXPC_launchd_mig_static.a \
+      -Wl,-force_load,${xpcDev}/pd-xpc-dev/lib/libXPC_libxpc_static.a \
       -Wl,-U,_OBJC_CLASS_\$_NSObject \
       -Wl,-U,_OBJC_METACLASS_\$_NSObject \
       -Wl,-U,__objc_empty_cache \
-      -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libXPC_libinfo_static.a \
-      -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libXPC_libnv_static.a \
-      -Wl,-force_load,${libSystem}/pd-xpc-dev/lib/libCrashReporterClient.a \
+      -Wl,-force_load,${xpcDev}/pd-xpc-dev/lib/libXPC_libinfo_static.a \
+      -Wl,-force_load,${xpcDev}/pd-xpc-dev/lib/libXPC_libnv_static.a \
+      -Wl,-force_load,${xpcDev}/pd-xpc-dev/lib/libCrashReporterClient.a \
       ${lib.optionalString (!isArmv6) "-Wl,-fixup_chains"} \
       -lCoreFoundation -framework IOKit -lSystem ${lib.optionalString (compilerRt != null) "${compilerRt}/lib/libcompiler_rt.a"} \
       ${src}/src/Libraries/XPC/launchd/pd_launchd_main.c \

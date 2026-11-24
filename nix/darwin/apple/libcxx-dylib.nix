@@ -2,6 +2,7 @@
 , lib
 , darwinCrossToolchain
 , targetTriple ? "arm64-apple-darwin20.4"
+, arch ? "arm64"
 , nativeLd
 , libSystem
 , libcxxabiDylib
@@ -11,7 +12,7 @@
 
 let
 
-  cc = "${darwinCrossToolchain}/bin/${targetTriple}-clang";
+  cc = "${darwinCrossToolchain}/bin/${targetTriple}-clang -arch ${arch}";
 
   # ryu/ are subdirectories; the object names flatten the slash.
   cxxSrcs = [

@@ -11,6 +11,7 @@
 , darwinCrossToolchain
 , nativeLd
 , targetTriple ? "arm64-apple-darwin20.4"
+, arch ? "arm64"
 , libSystem
 , ncurses
 , appleSdk
@@ -50,7 +51,7 @@ stdenv.mkDerivation {
     runHook preConfigure
     export DARWIN_SDK_ROOT="${appleSdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
     export PATH="${darwinCrossToolchain}/bin:$PATH"
-    export CC=${t}-clang AR=${t}-ar RANLIB=${t}-ranlib STRIP=${t}-strip NM=${t}-nm
+    export CC="${t}-clang -arch ${arch}" AR=${t}-ar RANLIB=${t}-ranlib STRIP=${t}-strip NM=${t}-nm
     export CFLAGS="-O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0"
     export LDFLAGS="${linkFlags} -Wl,-dylinker_install_name,/usr/lib/dyld"
     ./configure \

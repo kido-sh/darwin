@@ -5,6 +5,7 @@
 , libSystem
 , zlib
 , targetTriple ? "arm64-apple-darwin20.4"
+, arch ? "arm64"
 , appleSdk
 }:
 
@@ -25,7 +26,7 @@ stdenv.mkDerivation {
   buildPhase = ''
     runHook preBuild
     export PATH="${darwinCrossToolchain}/bin:$PATH"
-    CC="${darwinCrossToolchain}/bin/${targetTriple}-clang"
+    CC="${darwinCrossToolchain}/bin/${targetTriple}-clang -arch ${arch}"
     # unistd.h for lseek()/off_t use in gzlib.c - not pulled in transitively
     # under our SDK header set the way it apparently is on real macOS.
     CFLAGS="-isysroot ${appleSdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk -I${libSystem}/usr/include -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -O2 -include unistd.h"

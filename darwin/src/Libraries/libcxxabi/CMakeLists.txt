@@ -34,7 +34,7 @@ if(CMAKE_HOST_APPLE AND NOT CMAKE_CROSSCOMPILING)
 
     find_program(_real_clang NAMES clang REQUIRED)
 
-    set(_target_flags -arch "${PUREDARWIN_ARCH}")
+    set(_target_flags -arch "${PUREDARWIN_OSX_ARCH}")
 else()
     # osxcross tools normally look like:
     #   x86_64-apple-darwin20.4-ar
@@ -66,7 +66,7 @@ else()
     # explicit target here as well as on the parent CMake targets; these
     # archives are built by raw custom commands rather than normal CMake
     # compile rules.
-    set(_target_flags -arch "${PUREDARWIN_ARCH}")
+    set(_target_flags -arch "${PUREDARWIN_OSX_ARCH}")
 endif()
 
 set(_config "${CMAKE_CURRENT_SOURCE_DIR}/config")   # __config_site, __assertion_handler

@@ -186,6 +186,7 @@ let
   objcSource = sourceWith "kido-objc-source" [
     "src/Libraries/objc4"
     "src/Libraries/libunwind"
+    "src/Libraries/clang_bootstrap/ptrauth.h"
   ];
   libcxxDylibSource = sourceWith "kido-libcxx-dylib-source" [
     "src/Libraries/libcxxabi"
