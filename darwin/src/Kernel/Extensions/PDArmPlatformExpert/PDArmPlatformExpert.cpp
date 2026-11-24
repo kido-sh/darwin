@@ -59,8 +59,8 @@ protected:
 static bool pd_platform_is_bcm283x(void);
 
 #if defined(__arm64__)
-// without a handler reboot(2) returned to a torn-down userland and the board sat there,
-// while panics keep the old behaviour so their output stays on the console
+// without a handler reboot(2) returned to a torn-down userland and the board sat there; a panic
+// powers a virtual machine off once its log is out, and keeps the old behaviour on a board
 static int
 pdArmHaltRestart(unsigned int type)
 {
@@ -70,6 +70,7 @@ pdArmHaltRestart(unsigned int type)
 		IOLog("pdhaltlog: psci handler, type %u\n", type);
 	if (type == kPERestartCPU) return PDArmCPU::systemReset(false);
 	if (type == kPEHaltCPU) return PDArmCPU::systemReset(true);
+	if (type == kPEPanicRestartCPU) return PDArmCPU::hypervisorPowerOff();
 	return -1;
 }
 #endif

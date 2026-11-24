@@ -29,6 +29,7 @@ public:
 	bool startForCPU(unsigned int cpu, uint32_t phys_id, bool boot);
 	// psci system reset, or system off, returns only on failure
 	static int systemReset(bool off);
+	static int hypervisorPowerOff(void);
 };
 
 class PDArmCPUInterruptController : public IOCPUInterruptController {

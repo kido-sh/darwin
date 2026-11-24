@@ -346,6 +346,16 @@ PDArmCPU::systemReset(bool off)
 	return -1;
 }
 
+int
+PDArmCPU::hypervisorPowerOff(void)
+{
+	if (!pd_psci_probed || !pd_psci_ok || pd_psci_use_smc) {
+		return -1;
+	}
+	pd_psci_call(PSCI_FN_SYSTEM_OFF, 0, 0, 0, false);
+	return -1;
+}
+
 #undef super
 #define super IOCPU
 
