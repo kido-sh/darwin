@@ -127,7 +127,7 @@ main(void)
     v = curl_version_info(CURLVERSION_NOW);
     CHECK(v != NULL && v->age >= CURLVERSION_TENTH);
     CHECK(v->version_num >= 0x080700);
-    CHECK(v->ssl_version != NULL && strncmp(v->ssl_version, "OpenSSL/3", 9) == 0);
+    CHECK(v->ssl_version != NULL && strcmp(v->ssl_version, "LibreSSL/3.3.6") == 0);
     CHECK(v->libz_version != NULL);
     CHECK((v->features & CURL_VERSION_SSL) && (v->features & CURL_VERSION_IPV6) &&
           (v->features & CURL_VERSION_LIBZ) && (v->features & CURL_VERSION_ASYNCHDNS) &&

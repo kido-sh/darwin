@@ -2,16 +2,17 @@
 # Copyright (c) 2026 The kido authors
 #
 # macOS's /usr/lib/libcurl.4.dylib under macOS's install name, versions and exports. TLS is the
-# image's OpenSSL, linked in as it is into Security.framework, verifying against the image's
+# image's LibreSSL, its libssl.48 and libcrypto.46 weak-linked as on macOS, verifying against
 # /etc/ssl/cert.pem. No GSS-API or Kerberos, LDAP, HTTP/2 or HTTP/3.
 { stdenv
 , lib
 , darwinCrossToolchain
 , nativeLd
 , targetTriple ? "arm64-apple-darwin20.4"
+, arch ? "arm64"
 , libSystem
 , curl
-, openssl
+, libressl
 , systemConfiguration
 , appleSdk
 }:
@@ -30,11 +31,13 @@ stdenv.mkDerivation {
   pname = "kido-curl";
   inherit (curl) version src;
 
+  patches = [ ./libressl-tls13.patch ];
+
   configurePhase = ''
     runHook preConfigure
     export DARWIN_SDK_ROOT="${appleSdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
     export PATH="${darwinCrossToolchain}/bin:$PATH"
-    export CC=${t}-clang AR=${t}-ar RANLIB=${t}-ranlib STRIP=${t}-strip NM=${t}-nm
+    export CC="${t}-clang -arch ${arch}" AR=${t}-ar RANLIB=${t}-ranlib STRIP=${t}-strip NM=${t}-nm
     export CFLAGS="-O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0"
     # <SystemConfiguration/SCDynamicStoreCopySpecific.h>, which the SDK carries no headers for
     export CPPFLAGS="-I${systemConfiguration}/include"
@@ -46,7 +49,7 @@ stdenv.mkDerivation {
       --disable-shared \
       --enable-static \
       --disable-symbol-hiding \
-      --with-openssl=${openssl} \
+      --with-openssl=${libressl.dev} \
       --with-ca-bundle=/etc/ssl/cert.pem \
       --without-ca-path \
       --without-ca-fallback \
@@ -80,7 +83,8 @@ stdenv.mkDerivation {
     runHook preBuild
     make -j$NIX_BUILD_CORES -C lib
     $CC -dynamiclib -o libcurl.4.dylib -Wl,-force_load,lib/.libs/libcurl.a \
-      ${openssl}/lib/libssl.a ${openssl}/lib/libcrypto.a -lz \
+      -Wl,-weak_library,${libressl}/usr/lib/libcrypto.46.dylib \
+      -Wl,-weak_library,${libressl}/usr/lib/libssl.48.dylib -lz \
       -framework CoreFoundation -framework CoreServices -framework SystemConfiguration \
       -install_name /usr/lib/libcurl.4.dylib -compatibility_version 7 -current_version 9 \
       -Wl,-exported_symbols_list,${./libcurl.exports} -Wl,-dead_strip ${linkFlags}
