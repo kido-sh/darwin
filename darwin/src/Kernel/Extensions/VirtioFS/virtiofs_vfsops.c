@@ -27,8 +27,10 @@ virtiofs_call(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_cal
 }
 
 static int
-root_entry(struct virtiofs_mount *vmp, const char *share, vfs_context_t ctx, struct fuse_entry_out *entry)
+root_entry(struct virtiofs_mount *vmp, const char *share, vfs_context_t ctx, struct fuse_entry_out *entry,
+           uint64_t *version)
 {
+    *version = virtiofs_attr_version(vmp);
     if (*share) {
         struct virtiofs_call c = {
             .opcode = FUSE_LOOKUP, .nodeid = FUSE_ROOT_ID,
@@ -114,6 +116,7 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
     struct virtiofs_mount *vmp = IOMallocZero(sizeof(*vmp));
     IOLock *lock = IOLockAlloc();
     struct fuse_entry_out entry = {};
+    uint64_t version = 0;
     vnode_t root = NULLVP;
     error = vmp && lock ? 0 : ENOMEM;
     if (!error) {
@@ -123,11 +126,11 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
         error = virtiofs_dev_start(dev, &vmp->session);
     }
     if (!error)
-        error = root_entry(vmp, share, ctx, &entry);
+        error = root_entry(vmp, share, ctx, &entry, &version);
     if (!error) {
         vmp->rootid = entry.nodeid;
         vfs_setfsprivate(mp, vmp);
-        error = virtiofs_node_get(vmp, &entry, sharelen ? 1 : 0, NULLVP, NULL, &root);
+        error = virtiofs_node_get(vmp, &entry, version, sharelen ? 1 : 0, NULLVP, NULL, &root);
     }
     if (error) {
         vfs_setfsprivate(mp, NULL);
