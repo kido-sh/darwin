@@ -167,6 +167,21 @@ defaults(void)
     db = saved;
 }
 
+static void
+functions(void)
+{
+    CHECK(run("uuid", "SELECT uuid_str(x'0123456789abcdef0123456789abcdef'), "
+              "hex(uuid_blob('01234567-89ab-cdef-0123-456789abcdef')), length(u), "
+              "substr(u, 9, 1) || substr(u, 14, 2) || substr(u, 19, 1) || substr(u, 24, 1) "
+              "FROM (SELECT uuid() AS u)") == SQLITE_OK);
+    CHECK(run("ieee754", "SELECT ieee754(1.5), ieee754(3, -1), ieee754_mantissa(-0.375), ieee754_exponent(1e300), "
+              "hex(ieee754_to_blob(1.5)), ieee754_from_blob(x'3ff8000000000000'), ieee754_to_int(1.0), "
+              "ieee754_from_int(4609434218613702656), ieee754_inc(1.0, 1) > 1.0") == SQLITE_OK);
+    run("ieee754 null", "SELECT ieee754(NULL), ieee754_mantissa(NULL), ieee754_exponent(NULL), "
+        "ieee754_to_blob(NULL), ieee754_from_blob(NULL), ieee754_to_int(NULL), ieee754_from_int(NULL)");
+    run("function", "SELECT DISTINCT name, narg FROM pragma_function_list ORDER BY name, narg");
+}
+
 static int
 gate(void)
 {
@@ -358,6 +373,7 @@ main(int argc, char **argv)
     CHECK(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) == SQLITE_OK);
     pragmas();
     defaults();
+    functions();
     features();
     limits();
     apis();

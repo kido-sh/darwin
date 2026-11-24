@@ -104,7 +104,7 @@ stdenv.mkDerivation {
     inherit (pin) hash;
   };
 
-  patches = [ ./macos-defaults.patch ];
+  patches = [ ./macos-defaults.patch ./macos-functions.patch ];
 
   nativeBuildInputs = [ unzip ];
   outputs = [ "out" "dev" ];
@@ -115,7 +115,7 @@ stdenv.mkDerivation {
     ./configure --disable-tcl --prefix=/unused
     make sqlite3.c OPT_FEATURE_FLAGS="${defines}"
     SDK="${appleSdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
-    for f in sqlite3.c ext/misc/csv.c src/test_intarray.c; do
+    for f in sqlite3.c ext/misc/csv.c ext/misc/ieee754.c ext/misc/uuid.c src/test_intarray.c; do
       ${t}-clang -arch ${arch} -isysroot "$SDK" -O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 \
         -DHAVE_ISNAN=1 -DHAVE_LOCALTIME_R=1 -DHAVE_GMTIME_R=1 -DHAVE_STRERROR_R=1 -DHAVE_USLEEP=1 \
         -DSQLITE_CORE ${defines} -I. -c $f -o $(basename $f .c).o
@@ -126,7 +126,7 @@ stdenv.mkDerivation {
       -Wl,-dylib_file,/usr/lib/system/libdyld.dylib:${libSystem}/usr/lib/system/libdyld.dylib \
       -Wl,-platform_version,macos,26.5,26.5 -Wl,-fixup_chains \
       -Wl,-exported_symbols_list,want ${dylib.idFlags ./libsqlite3.exports} \
-      sqlite3.o csv.o test_intarray.o -lSystem -o libsqlite3.dylib
+      sqlite3.o csv.o ieee754.o uuid.o test_intarray.o -lSystem -o libsqlite3.dylib
     ${t}-nm -gUj libsqlite3.dylib | sort > have
     cmp -s want have || { echo "libsqlite3 exports differ from macOS's:" >&2; diff want have >&2; exit 1; }
     runHook postBuild
