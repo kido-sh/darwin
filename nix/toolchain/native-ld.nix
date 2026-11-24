@@ -2,7 +2,7 @@
 , lib
 , cmake
 , ninja
-, openssl
+, libressl
 , bison
 , flex
 , perl
@@ -58,7 +58,7 @@ stdenv.mkDerivation {
   # nixpkgs marks gnustep-base linux-only, and nothing here calls it; a Darwin
   # host has the plist tools natively.
   ++ lib.optionals (!stdenv.hostPlatform.isDarwin) [ gnustep-base ];
-  buildInputs = [ zlib libuuid openssl libxml2 libtapi ];
+  buildInputs = [ zlib libuuid libressl libxml2 libtapi ];
 
   configurePhase = ''
     runHook preConfigure
@@ -113,9 +113,9 @@ EOF
       -DCMAKE_CXX_COMPILER=${clang}/bin/clang++ \
       -DCMAKE_AR="$(command -v ar)" \
       -DCMAKE_BUILD_TYPE=Release \
-      -DOPENSSL_ROOT_DIR=${openssl.dev} \
-      -DOPENSSL_CRYPTO_LIBRARY=${openssl.out}/lib/libcrypto${stdenv.hostPlatform.extensions.sharedLibrary} \
-      -DOPENSSL_SSL_LIBRARY=${openssl.out}/lib/libssl${stdenv.hostPlatform.extensions.sharedLibrary} \
+      -DOPENSSL_ROOT_DIR=${libressl.dev} \
+      -DOPENSSL_CRYPTO_LIBRARY=${libressl.out}/lib/libcrypto${stdenv.hostPlatform.extensions.sharedLibrary} \
+      -DOPENSSL_SSL_LIBRARY=${libressl.out}/lib/libssl${stdenv.hostPlatform.extensions.sharedLibrary} \
       -DZLIB_INCLUDE_DIR=${zlib.dev}/include \
       -DZLIB_LIBRARY=${zlib.out}/lib/libz${stdenv.hostPlatform.extensions.sharedLibrary} \
       -DLIBXML2_INCLUDE_DIR=${libxml2.dev}/include/libxml2 \

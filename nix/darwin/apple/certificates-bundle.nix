@@ -1,7 +1,7 @@
 { lib
 , runCommand
 , python3
-, openssl
+, libressl
 , cacert
 , src
 }:
@@ -15,9 +15,10 @@ let
   version = num 0 * 1000000 + num 1 * 1000 + num 2;
 in
 runCommand "kido-certificates-bundle-${cacert.version}" {
-  nativeBuildInputs = [ python3 openssl ];
+  nativeBuildInputs = [ python3 libressl ];
 } ''
-  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /dev/null \
+  printf '[req]\ndistinguished_name = dn\n[dn]\n' > req.cnf
+  openssl req -config req.cnf -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -keyout /dev/null \
     -subj "/O=KidoDarwin/CN=KidoDarwin escrow placeholder" -days 36500 -outform DER -out escrow.der
   python3 ${src}/gen-certificates-bundle.py ${cacert}/etc/ssl/certs/ca-bundle.crt \
     $out/System/Library/Security/Certificates.bundle ${toString version} escrow.der

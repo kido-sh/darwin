@@ -7,7 +7,7 @@
 , nativeUnifdef ? null
 , nativeMigcom ? null
 , appleSdk
-, openssl
+, libressl
 , libxml2
 , m4
 , bison
@@ -64,8 +64,8 @@ let
   zlibLibrary = "${appleSdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib/libz.tbd";
   libxml2Include = "${libxml2.dev}/include/libxml2";
   libxml2Library = "${libxml2.out}/lib/libxml2.so";
-  opensslCryptoLibrary = "${openssl.out}/lib/libcrypto.so";
-  opensslSslLibrary = "${openssl.out}/lib/libssl.so";
+  opensslCryptoLibrary = "${libressl.out}/lib/libcrypto.so";
+  opensslSslLibrary = "${libressl.out}/lib/libssl.so";
 in
 stdenv.mkDerivation ({
   inherit pname version;
@@ -82,7 +82,7 @@ stdenv.mkDerivation ({
     gnustep-base
   ];
 
-  buildInputs = [ zlib openssl libuuid ];
+  buildInputs = [ zlib libressl libuuid ];
 
   configurePhase = ''
     runHook preConfigure
@@ -159,7 +159,7 @@ EOF
     cmake -S . -B build-nix -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE=cmake/nix-toolchain.cmake \
       -DCMAKE_BUILD_TYPE=Debug \
-      -DOPENSSL_INCLUDE_DIR=${openssl.dev}/include \
+      -DOPENSSL_INCLUDE_DIR=${libressl.dev}/include \
       -DOPENSSL_CRYPTO_LIBRARY=${opensslCryptoLibrary} \
       -DOPENSSL_SSL_LIBRARY=${opensslSslLibrary} \
       -DZLIB_INCLUDE_DIR=${zlibInclude} \

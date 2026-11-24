@@ -1,6 +1,6 @@
 { stdenv
 , lib
-, openssl
+, libressl
 , zlib
 , libxml2
 }:
@@ -47,7 +47,7 @@ stdenv.mkDerivation {
   dontUnpack = true;
 
   nativeBuildInputs = [ ];
-  buildInputs = [ openssl zlib libxml2 ];
+  buildInputs = [ libressl zlib libxml2 ];
 
   buildPhase = ''
     runHook preBuild
@@ -66,13 +66,13 @@ stdenv.mkDerivation {
     done
     pcc_wait
     for f in ${lib.concatStringsSep " " libxarSrcs}; do
-      pcc $CC $CFLAGS -I${openssl.dev}/include -I${libxml2.dev}/include/libxml2 -c "${xar}/lib/$f" -o "obj/libxar_$f.o"
+      pcc $CC $CFLAGS -I${libressl.dev}/include -I${libxml2.dev}/include/libxml2 -c "${xar}/lib/$f" -o "obj/libxar_$f.o"
     done
     pcc_wait
 
     $CC obj/otool_*.o obj/libstuff_*.o obj/libxar_*.o -o host_otool \
       -Wl,--allow-multiple-definition \
-      -L${openssl.out}/lib -L${zlib.out}/lib -L${libxml2.out}/lib \
+      -L${libressl.out}/lib -L${zlib.out}/lib -L${libxml2.out}/lib \
       -lcrypto -lssl -lz -lxml2 -lm -lpthread
 
     $CC $CFLAGS -c "${cctools}/misc/install_name_tool.c" -o obj/int_install_name_tool.c.o
