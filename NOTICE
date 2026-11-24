@@ -198,6 +198,11 @@ iana-etc 20251215
 LLVM compiler-rt builtins 21.1.8
   The LLVM Project contributors. Apache License 2.0 with LLVM Exceptions.
 
+The FUSE protocol header of Linux 7.3, in the VirtioFS kernel extension
+  Copyright (C) 2001-2007 Miklos Szeredi. All rights reserved. BSD 2-Clause
+  License, one of the two licenses the header is offered under.
+  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+
 kido-agent, https://github.com/kido-sh/kido
   The kido authors. Apache License 2.0. Built with the Go standard library,
   Copyright 2009 The Go Authors, BSD 3-Clause License.
