@@ -125,6 +125,14 @@ zlib 1.3.2, also linked into toybox
   (C) 1995-2026 Jean-loup Gailly and Mark Adler. zlib License.
   https://zlib.net
 
+bzip2 1.0.8, /usr/lib/libbz2.1.0.dylib
+  Copyright (C) 1996-2019 Julian R Seward. bzip2 License (LICENSES/bzip2-1.0.6.txt).
+  https://sourceware.org/bzip2/
+
+xz 5.8.3, /usr/lib/liblzma.5.dylib
+  liblzma by Lasse Collin and the xz contributors. BSD Zero Clause License.
+  https://tukaani.org/xz/
+
 toybox 0.8.13
   Copyright (C) 2006, 2019 by Rob Landley. Zero-Clause BSD.
   https://landley.net/toybox/

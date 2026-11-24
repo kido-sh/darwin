@@ -218,6 +218,15 @@ let
     inherit (pkgs) zlib;
     arch = "arm64e";
   };
+  libbz2DylibArm64eBuild = mkArm64Build ./third-party/libbz2-dylib {
+    inherit (pkgs) bzip2;
+    arch = "arm64e";
+  };
+  liblzmaDylibArm64eBuild = mkArm64Build ./third-party/liblzma-dylib {
+    inherit (pkgs) xz;
+    arch = "arm64e";
+  };
+  libutilArm64eBuild = mkArm64Build ./third-party/libutil { arch = "arm64e"; };
   coreServicesArm64Build = mkArm64Build ./apple/coreservices.nix {
     src = coreServicesSource;
     corefoundation = coreFoundationArm64Build;
@@ -520,6 +529,9 @@ in
     libcxxDylibArm64Build
     libcxxabiDylibArm64Build
     libzDylibArm64Build
+    libbz2DylibArm64eBuild
+    liblzmaDylibArm64eBuild
+    libutilArm64eBuild
     ncursesDylibArm64Build
     securityArm64Build
     splitBaseSystemArm64VirtMinimalRelease

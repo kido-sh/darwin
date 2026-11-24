@@ -14,6 +14,9 @@ let
     libeditArm64Build
     libiconvArm64Build
     libzDylibArm64Build
+    libbz2DylibArm64eBuild
+    liblzmaDylibArm64eBuild
+    libutilArm64eBuild
     ncursesDylibArm64Build
     securityArm64Build
     splitBaseSystemArm64VirtMinimalRelease
@@ -70,7 +73,8 @@ let
     extraPackages = [
       zshArm64Build libiconvArm64Build toyboxArm64Build
       securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build
-      libzDylibArm64Build ncursesDylibArm64Build libeditArm64Build curlArm64Build
+      libzDylibArm64Build libbz2DylibArm64eBuild liblzmaDylibArm64eBuild libutilArm64eBuild
+      ncursesDylibArm64Build libeditArm64Build curlArm64Build
       certificatesBundleBuild containerLaunchdSettings
       agent.root
     ];

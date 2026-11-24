@@ -40,7 +40,7 @@ the release a directory came from and the other licenses its files carry.
 | `LICENSING.md`, `NOTICE`, `README.md`, `docs/**`, `scripts/**`, `test/**`, `flake.nix`, `flake.lock`, `.gitignore`, `.github/**` | `Apache-2.0` | kido |
 | `LICENSES/**` | | The license texts themselves |
 | `nix/**` | `BSD-2-Clause` | PureDarwin's Nix code as reorganized by kido. kido's new files carry an `Apache-2.0` SPDX line |
-| `nix/darwin/third-party/{curl,libedit,ncurses-dylib}/**` | `Apache-2.0` | kido's recipes for macOS's libcurl, libedit and ncurses, their export lists, taken from the macOS 26.5 SDK's .tbd files, and the ncurses ABI glue |
+| `nix/darwin/third-party/{curl,libbz2-dylib,libedit,liblzma-dylib,libutil,ncurses-dylib}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, liblzma, libutil and ncurses, their export lists, taken from the macOS 26.5 SDK's .tbd files, the ncurses ABI glue and libutil's functions |
 | `patches/xnu-loader-no-logo.patch` | `BSD-3-Clause` | kido's change to xnu-loader |
 | `patches/libtapi-riscv.patch` | `Apache-2.0 WITH LLVM-exception` | PureDarwin's change to LLVM's libtapi |
 | `loader/**` | `BSD-3-Clause` | xnu-loader by Vali0004. Its include/boot.h is xnu's pexpert/i386/boot.h as xnu-loader changed it, `APSL-2.0` |
@@ -142,6 +142,8 @@ this repository.
 | GNU libiconv | 1.19 | `LGPL-2.1-or-later` | /usr/lib/libiconv.2.dylib, libcharset.1.dylib. The GPL-3.0 iconv program is not installed |
 | ICU | 76.1 | `LicenseRef-ICU` | /usr/lib/libicucore.A.dylib and the libicu* libraries |
 | zlib | 1.3.2 | `Zlib` | /usr/lib/libz.1.dylib, and linked into toybox |
+| bzip2 | 1.0.8 | `bzip2-1.0.6` | /usr/lib/libbz2.1.0.dylib |
+| xz | 5.8.3 | `0BSD` | /usr/lib/liblzma.5.dylib |
 | toybox | 0.8.13 | `0BSD` | /bin/toybox and its links |
 | libffi | 3.5.2 | `MIT` | Linked into Foundation |
 | libxml2 | 2.15.3 | `MIT` | Linked into Foundation |

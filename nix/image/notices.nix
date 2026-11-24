@@ -12,6 +12,8 @@
 , toybox
 , icu
 , zlib
+, bzip2
+, xz
 , libffiReal
 , libxml2
 , openssl
@@ -87,6 +89,8 @@ let
     [ "toybox" toybox.src "LICENSE" ]
     [ "icu" icu.src "LICENSE" ]
     [ "zlib" zlib.src "LICENSE" ]
+    [ "bzip2" bzip2.src "LICENSE" ]
+    [ "xz" xz.src "COPYING.0BSD" ]
     [ "libffi" libffiReal.src "LICENSE" ]
     [ "libxml2" libxml2.src "Copyright" ]
     [ "openssl" openssl.src "LICENSE.txt" ]
