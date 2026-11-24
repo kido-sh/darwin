@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
@@ -55,6 +56,14 @@ now(void)
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return tv.tv_sec + tv.tv_usec / 1e6;
+}
+
+static double
+cpu(void)
+{
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    return ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
 }
 
 static int
@@ -365,15 +374,16 @@ stress(const char *root, int threads, int rounds)
     struct worker w[64];
     if (threads > 64)
         threads = 64;
-    double t0 = now();
+    double t0 = now(), c0 = cpu();
     for (int i = 0; i < threads; i++) {
         w[i] = (struct worker){ i, rounds, want };
         pthread_create(&tid[i], NULL, stress_one, &w[i]);
     }
     for (int i = 0; i < threads; i++)
         pthread_join(tid[i], NULL);
-    printf("stress: %d threads x %d rounds over %zu files in %.2f s, %d failures\n", threads, rounds, nfiles,
-           now() - t0, failures);
+    double dt = now() - t0;
+    printf("stress: %d threads x %d rounds over %zu files in %.2f s at %.2f CPUs busy, %d failures\n", threads,
+           rounds, nfiles, dt, (cpu() - c0) / dt, failures);
     return failures ? 1 : 0;
 }
 
@@ -505,36 +515,36 @@ lookups(int times, char **paths)
     return 0;
 }
 
-static double
-read_pass(const char *path, size_t bufsize, int nocache)
+static void
+read_pass(const char *what, const char *path, size_t bufsize, int nocache)
 {
     static unsigned char *buf;
     if (!buf)
         buf = malloc(16 << 20);
     int fd = open(path, O_RDONLY);
     if (fd < 0)
-        return -1;
+        return;
     if (nocache)
         fcntl(fd, F_NOCACHE, 1);
-    double t0 = now();
+    double t0 = now(), c0 = cpu();
     off_t total = 0;
     ssize_t n;
     while ((n = read(fd, buf, bufsize)) > 0)
         total += n;
-    double dt = now() - t0;
+    double dt = now() - t0, dc = cpu() - c0;
     close(fd);
-    return total / dt / 1e6;
+    printf("  %s: %.0f MB/s, %.2f CPUs busy\n", what, total / dt / 1e6, dc / dt);
 }
 
 static int
 bench(const char *path)
 {
     printf("read %s\n", path);
-    printf("  first pass, 1 MiB reads: %.0f MB/s\n", read_pass(path, 1 << 20, 0));
-    printf("  cached pass, 1 MiB reads: %.0f MB/s\n", read_pass(path, 1 << 20, 0));
-    printf("  cached pass, 16 KiB reads: %.0f MB/s\n", read_pass(path, 16 << 10, 0));
-    printf("  uncached pass, 1 MiB reads: %.0f MB/s\n", read_pass(path, 1 << 20, 1));
-    printf("  uncached pass, 16 MiB reads: %.0f MB/s\n", read_pass(path, 16 << 20, 1));
+    read_pass("first pass, 1 MiB reads", path, 1 << 20, 0);
+    read_pass("cached pass, 1 MiB reads", path, 1 << 20, 0);
+    read_pass("cached pass, 16 KiB reads", path, 16 << 10, 0);
+    read_pass("uncached pass, 1 MiB reads", path, 1 << 20, 1);
+    read_pass("uncached pass, 16 MiB reads", path, 16 << 20, 1);
     return 0;
 }
 
@@ -559,13 +569,14 @@ bench_meta(const char *dir, int rounds)
     struct stat st;
     char path[2048];
     t0 = now();
+    double c0 = cpu();
     for (int r = 0; r < rounds; r++) {
         for (size_t i = 0; i < n; i++) {
             snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
             lstat(path, &st);
         }
     }
-    double statted = now() - t0;
+    double statted = now() - t0, statcpu = cpu() - c0;
     t0 = now();
     for (size_t i = 0; i < n; i++) {
         snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
@@ -574,8 +585,8 @@ bench_meta(const char *dir, int rounds)
             close(fd);
     }
     double opened = now() - t0;
-    printf("%s: readdir of %zu entries %.2f ms, lstat %.1f us each, open+close %.1f us each\n", dir, n,
-           listed * 1e3, statted / (rounds * (double)n) * 1e6, opened / (double)n * 1e6);
+    printf("%s: readdir of %zu entries %.2f ms, lstat %.1f us each at %.2f CPUs busy, open+close %.1f us each\n",
+           dir, n, listed * 1e3, statted / (rounds * (double)n) * 1e6, statcpu / statted, opened / (double)n * 1e6);
     return 0;
 }
 
