@@ -41,6 +41,7 @@ the release a directory came from and the other licenses its files carry.
 | `LICENSES/**` | | The license texts themselves |
 | `nix/**` | `BSD-2-Clause` | PureDarwin's Nix code as reorganized by kido. kido's new files carry an `Apache-2.0` SPDX line |
 | `nix/darwin/third-party/{curl,libbz2-dylib,libedit,liblzma-dylib,libutil,ncurses-dylib}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, liblzma, libutil and ncurses, their export lists, taken from the macOS 26.5 SDK's .tbd files, the ncurses ABI glue and libutil's functions |
+| `nix/darwin/third-party/libressl/default.nix`, `nix/darwin/third-party/libressl/*.exports` | `Apache-2.0` | kido's recipe for macOS's LibreSSL and its export lists, read from the dyld shared cache of macOS 27.0.1 |
 | `patches/xnu-loader-no-logo.patch` | `BSD-3-Clause` | kido's change to xnu-loader |
 | `patches/libtapi-riscv.patch` | `Apache-2.0 WITH LLVM-exception` | PureDarwin's change to LLVM's libtapi |
 | `loader/**` | `BSD-3-Clause` | xnu-loader by Vali0004. Its include/boot.h is xnu's pexpert/i386/boot.h as xnu-loader changed it, `APSL-2.0` |
@@ -134,6 +135,7 @@ this repository.
 | Component | Version | License | Where |
 |---|---|---|---|
 | OpenSSL | 3.6.3 | `Apache-2.0` | Linked into Security.framework and /usr/lib/libcurl.4.dylib |
+| LibreSSL | 3.3.6 | `OpenSSL`, `SSLeay-standalone`, `ISC`, `BSD-3-Clause`, `LicenseRef-Public-Domain` | /usr/lib/libcrypto.46.dylib, libssl.48.dylib and libtls.20.dylib, /usr/bin/openssl, /usr/bin/ocspcheck, and /etc/ssl/openssl.cnf and x509v3.cnf |
 | SQLite | 3.51.2 | `blessing` | Linked into Security.framework |
 | zsh | 5.9.1 | `LicenseRef-zsh` | /bin/zsh. The GPL-2.0 completion functions are removed |
 | ncurses | 6.6 | `X11-distribute-modifications-variant` | /usr/lib/libncurses.5.4.dylib, libpanel.5.4, libmenu.5.4 and libform.5.4; the terminfo database in /usr/share/terminfo, compiled from its terminfo.src; and linked into zsh |

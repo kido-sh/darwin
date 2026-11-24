@@ -86,6 +86,14 @@ OpenSSL 3.6.3, linked into Security.framework and libcurl
   Copyright (c) 1998-2025 The OpenSSL Project Authors. Apache License 2.0.
   https://www.openssl.org
 
+LibreSSL 3.3.6: /usr/lib/libcrypto.46.dylib, libssl.48 and libtls.20,
+/usr/bin/openssl and /usr/bin/ocspcheck
+  Copyright (c) 1998-2011 The OpenSSL Project. Copyright (C) 1995-1998 Eric
+  Young (eay@cryptsoft.com). LibreSSL's own files are copyright their authors.
+  OpenSSL License and original SSLeay License (LICENSES/OpenSSL.txt and
+  LICENSES/SSLeay-standalone.txt), ISC License, and the other licenses its
+  files state. https://www.libressl.org
+
 SQLite 3.51.2, linked into Security.framework
   Public domain. https://sqlite.org
 

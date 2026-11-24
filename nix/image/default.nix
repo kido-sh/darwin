@@ -13,6 +13,7 @@ let
     kextsArm64Build
     libeditArm64Build
     libiconvArm64Build
+    libresslArm64eBuild
     libzDylibArm64Build
     libbz2DylibArm64eBuild
     liblzmaDylibArm64eBuild
@@ -28,6 +29,7 @@ let
   notices = pkgs.callPackage ./notices.nix {
     inherit kido revision nixpkgsRev;
     agent = agent.agent;
+    libressl = libresslArm64eBuild;
   };
   # every image has this root filesystem uuid: uuid5 of https://github.com/kido-sh/darwin#root
   rootUUID = "260a2575-f263-5945-9d65-ddf2d4e215b2";
@@ -77,6 +79,7 @@ let
       ncursesDylibArm64Build libeditArm64Build curlArm64Build
       certificatesBundleBuild containerLaunchdSettings
       agent.root
+      libresslArm64eBuild
     ];
     inherit notices;
   };

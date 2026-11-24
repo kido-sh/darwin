@@ -360,6 +360,7 @@ let
         runHook postInstall
       '';
     });
+  libresslArm64eBuild = mkArm64Build ./third-party/libressl { arch = "arm64e"; };
   curlArm64Build = mkArm64Build ./third-party/curl {
     inherit (pkgs) curl;
     openssl = opensslThreadsArm64Build;
@@ -524,6 +525,7 @@ in
     kernelArm64VirtBuild
     kextsArm64Build
     libeditArm64Build
+    libresslArm64eBuild
     libiconvArm64Build
     libSystemArm64Build
     libSystemXpcArm64Build
