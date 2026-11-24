@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/xattr.h>
 #include <unistd.h>
@@ -451,6 +452,32 @@ inodes(const char *dir, int limit)
 }
 
 static int
+small_readdir(const char *dir, int bufsize)
+{
+    char *buf = malloc((size_t)bufsize);
+    int fd = open(dir, O_RDONLY | O_DIRECTORY);
+    off_t base = 0;
+    long listed = 0, want = 0;
+    int got;
+
+    if (!buf || fd < 0)
+        return 1;
+    while ((got = syscall(SYS_getdirentries64, fd, buf, bufsize, &base)) > 0) {
+        for (int at = 0; at < got; at += ((struct dirent *)(buf + at))->d_reclen)
+            listed++;
+    }
+    int err = got < 0 ? errno : 0;
+    close(fd);
+    DIR *d = opendir(dir);
+    while (d && readdir(d))
+        want++;
+    if (d)
+        closedir(d);
+    printf("%d-byte buffers: %ld of %ld entries, %s\n", bufsize, listed, want, err ? strerror(err) : "end");
+    return err == EINVAL || (!err && listed == want) ? 0 : 1;
+}
+
+static int
 as_user(uid_t uid, gid_t gid, char **paths)
 {
     struct stat st;
@@ -570,6 +597,8 @@ main(int argc, char **argv)
         return pread_race(argv[2], atoi(argv[3]), atof(argv[4]));
     if (argc == 4 && !strcmp(argv[1], "inodes"))
         return inodes(argv[2], atoi(argv[3]));
+    if (argc == 4 && !strcmp(argv[1], "small-readdir"))
+        return small_readdir(argv[2], atoi(argv[3]));
     if (argc >= 5 && !strcmp(argv[1], "as"))
         return as_user((uid_t)atoi(argv[2]), (gid_t)atoi(argv[3]), argv + 4);
     if (argc >= 4 && !strcmp(argv[1], "lookups"))

@@ -26,6 +26,7 @@
 
 #define DIRENT_LEN(namlen)   ((sizeof(struct dirent) + (namlen) + 1 - (__DARWIN_MAXNAMLEN + 1) + 3) & ~3)
 #define DIRENT64_LEN(namlen) ((sizeof(struct direntry) + (namlen) - (MAXPATHLEN - 1) + 7) & ~7)
+#define READDIR_MIN          4096
 
 enum {
     VN_BUILDING = 0x01,
@@ -694,8 +695,8 @@ virtiofs_vnop_readdir(struct vnop_readdir_args *ap)
         return ENOTDIR;
     if (resid <= 0)
         return EINVAL;
-    uint32_t size = resid < vmp->session.max_io ? (uint32_t)resid : vmp->session.max_io;
-    uint8_t *buf = IOMalloc(size);
+    uint32_t size = resid < READDIR_MIN ? READDIR_MIN : (resid < vmp->session.max_io ? (uint32_t)resid : vmp->session.max_io);
+    uint8_t *buf = IOMallocZero(size);
     if (!buf)
         return ENOMEM;
     int error = handle_get(np, ap->a_context, &fh);
@@ -753,7 +754,7 @@ virtiofs_vnop_readlink(struct vnop_readlink_args *ap)
 
     if (!vnode_islnk(ap->a_vp))
         return EINVAL;
-    char *buf = IOMalloc(MAXPATHLEN);
+    char *buf = IOMallocZero(MAXPATHLEN);
     if (!buf)
         return ENOMEM;
     struct virtiofs_call c = { .opcode = FUSE_READLINK, .nodeid = np->nodeid, .datalen = MAXPATHLEN, .data = buf };

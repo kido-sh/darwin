@@ -113,6 +113,8 @@ check "mount kido:locked" guest /sbin/mount -t virtiofs -o ro kido:locked /mnt/l
 check "a file the host cannot read cannot be opened" fails guest /bin/cat /mnt/locked/noaccess
 check "unmount kido:locked" guest /sbin/umount /mnt/locked
 check "errors of a read-only mount" guest /tmp/t_virtiofs errors /mnt/data kido:data
+check "a 512-byte readdir buffer lists every entry" guest /tmp/t_virtiofs small-readdir /mnt/data/names 512
+check "a 256-byte readdir buffer never ends a listing early" guest /tmp/t_virtiofs small-readdir /mnt/data/names 256
 guest /tmp/t_virtiofs as 0 0 /mnt/data /mnt/data/private/f >/dev/null
 check "another user is shown as the owner right after root looked" owned_by 501 20
 check "root is shown as the owner right after another user looked" owned_by 0 0
