@@ -32,6 +32,7 @@ stdenv.mkDerivation {
   src = fetchFromGitHub {
     owner = "apple-oss-distributions";
     repo = "libutil";
+    name = "libutil-${pin.version}-source";
     tag = "libutil-${pin.version}";
     inherit (pin) hash;
   };

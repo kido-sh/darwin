@@ -36,11 +36,12 @@ stdenv.mkDerivation {
   src = fetchFromGitHub {
     owner = "nghttp2";
     repo = "nghttp2";
+    name = "nghttp2-${pin.version}-source";
     tag = "v${pin.version}";
     inherit (pin) hash;
   };
 
-  sourceRoot = "source/lib";
+  sourceRoot = "nghttp2-${pin.version}-source/lib";
   outputs = [ "out" "dev" ];
   dontConfigure = true;
 

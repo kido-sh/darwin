@@ -28,12 +28,13 @@ stdenv.mkDerivation {
   src = fetchFromGitHub {
     owner = "libexpat";
     repo = "libexpat";
+    name = "expat-${pin.version}-source";
     tag = "R_${lib.replaceStrings [ "." ] [ "_" ] pin.version}";
     inherit (pin) hash;
     postFetch = "rm -r $out/testdata";
   };
 
-  sourceRoot = "source/expat/lib";
+  sourceRoot = "expat-${pin.version}-source/expat/lib";
   outputs = [ "out" "dev" ];
   dontConfigure = true;
 

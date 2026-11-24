@@ -45,6 +45,7 @@ stdenv.mkDerivation {
   src = fetchFromGitHub {
     owner = "apple-oss-distributions";
     repo = "libiconv";
+    name = "libiconv-${pin.version}-source";
     tag = "libiconv-${pin.version}";
     inherit (pin) hash;
     postFetch = "rm -r $out/tests";

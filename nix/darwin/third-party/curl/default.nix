@@ -40,6 +40,7 @@ stdenv.mkDerivation {
   src = fetchFromGitHub {
     owner = "curl";
     repo = "curl";
+    name = "curl-${pin.version}-source";
     tag = "curl-${lib.replaceStrings [ "." ] [ "_" ] pin.version}";
     inherit (pin) hash;
   };
