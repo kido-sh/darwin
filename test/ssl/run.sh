@@ -46,13 +46,14 @@ build() {
 for arch in arm64e arm64; do
   build $arch t_crypto-$arch "$work/libcrypto.46.tbd" || exit 1
   build $arch t_tls-$arch "$work/libssl.48.tbd" "$work/libtls.20.tbd" || exit 1
+  build $arch t_rsakex-$arch "$work/libcrypto.46.tbd" "$work/libssl.48.tbd" || exit 1
 done
 build arm64 t_libcurl -lcurl || exit 1
 "$kido" image import "$img" ssl-test >/dev/null || exit 1
 "$kido" run -d --name ssl-test ssl-test >/dev/null || exit 1
 trap '"$kido" rm -f ssl-test >/dev/null 2>&1; rm -rf "$work"' EXIT
 timed "$kido" exec ssl-test /bin/mkdir -p /var/root/ssl || exit 1
-for f in "$work"/t_crypto-* "$work"/t_tls-* "$work/t_libcurl" "$here/ssl.sh"; do
+for f in "$work"/t_crypto-* "$work"/t_tls-* "$work"/t_rsakex-* "$work/t_libcurl" "$here/ssl.sh"; do
   "$kido" cp "$f" ssl-test:/var/root/ssl/ || exit 1
 done
 timed "$kido" exec ssl-test /bin/sh /var/root/ssl/ssl.sh

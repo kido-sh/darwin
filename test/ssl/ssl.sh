@@ -183,6 +183,11 @@ for arch in arm64e arm64; do
 done
 out=$("$work/t_libcurl" "$work/pki" 8443 8444) || { rc=$?; fail=$((fail + 1)); echo "FAIL t_libcurl exited $rc"; }
 printf '%s\n' "$out" | grep -v '^result'
+"$openssl" req -new -x509 -newkey rsa:2048 -nodes -keyout rsakex.key -subj /CN=kido-rsakex -days 30 -out rsakex.pem \
+    2>/dev/null
+for arch in arm64e arm64; do
+    "$work/t_rsakex-$arch" rsakex.key rsakex.pem || { rc=$?; fail=$((fail + 1)); echo "FAIL t_rsakex-$arch exited $rc"; }
+done
 
 expect "OCSP good" 0 "" "$ocspcheck" -C ca.pem server-chain.pem
 expect "OCSP revoked" fail "certificate is revoked" "$ocspcheck" -C ca.pem revoked-chain.pem
