@@ -27,6 +27,9 @@
 #if __has_include(<ptrauth.h>)
  #include <ptrauth.h>
 #endif
+#ifndef ptrauth_function_pointer_type_discriminator
+ #define ptrauth_function_pointer_type_discriminator(__type) ((uintptr_t)0)
+#endif
 /* Defines SPI_AVAILABLE / SPI_DEPRECATED (empty fallbacks). dyld_process_info.h
  * uses SPI_AVAILABLE but only pulls it transitively via the real dispatch.h,
  * which our minimal dispatch stub replaces -- so pull it explicitly here. */
