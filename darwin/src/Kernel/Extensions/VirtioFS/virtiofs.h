@@ -31,6 +31,7 @@ struct virtiofs_mount {
 #define VFSTOVMP(mp) ((struct virtiofs_mount *)vfs_fsprivate(mp))
 
 extern struct vnodeopv_desc virtiofs_vnodeop_opv_desc;
+extern struct vnodeopv_desc virtiofs_fifoop_opv_desc;
 
 int virtiofs_vfs_register(void);
 int virtiofs_vfs_unregister(void);

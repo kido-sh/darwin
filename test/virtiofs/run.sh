@@ -117,6 +117,7 @@ guest /tmp/t_virtiofs as 0 0 /mnt/data /mnt/data/private/f >/dev/null
 check "another user is shown as the owner right after root looked" owned_by 501 20
 check "root is shown as the owner right after another user looked" owned_by 0 0
 check "a program runs from the share" guest /mnt/data/exec tree /mnt/data/deep
+check "a FIFO on the share works as a pipe" prints hello guest /bin/sh -c 'echo hello >> /mnt/data/links/fifo & cat /mnt/data/links/fifo; wait'
 check "concurrent reads" guest /tmp/t_virtiofs stress /mnt/data 16 2
 
 mid=$(host_fds)

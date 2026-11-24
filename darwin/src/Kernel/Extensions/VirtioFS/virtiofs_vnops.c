@@ -17,6 +17,8 @@
 #include <sys/unistd.h>
 #include <sys/vnode_if.h>
 #include <kern/clock.h>
+#include <miscfs/fifofs/fifo.h>
+#include <vfs/vfs_support.h>
 #include <IOKit/IOLib.h>
 #include <libkern/libkern.h>
 #include "fuse_proto.h"
@@ -53,6 +55,7 @@ struct virtiofs_node {
 #define VTON(vp) ((struct virtiofs_node *)vnode_fsnode(vp))
 
 int (**virtiofs_vnodeop_p)(void *);
+int (**virtiofs_fifoop_p)(void *);
 
 static struct virtiofs_bucket *
 bucket(struct virtiofs_mount *vmp, uint64_t nodeid)
@@ -309,8 +312,9 @@ virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry
         .vnfs_str = "virtiofs",
         .vnfs_dvp = dvp,
         .vnfs_fsnode = np,
-        .vnfs_vops = virtiofs_vnodeop_p,
+        .vnfs_vops = IFTOVT(entry->attr.mode) == VFIFO ? virtiofs_fifoop_p : virtiofs_vnodeop_p,
         .vnfs_markroot = entry->nodeid == vmp->rootid,
+        .vnfs_rdev = NODEV,
         .vnfs_filesize = (off_t)entry->attr.size,
         .vnfs_cnp = cnp,
         .vnfs_flags = VNFS_NOCACHE | VNFS_CANTCACHE | VNFS_ADDFSREF,
@@ -860,3 +864,26 @@ static const struct vnodeopv_entry_desc virtiofs_vnodeop_entries[] = {
 };
 
 struct vnodeopv_desc virtiofs_vnodeop_opv_desc = { &virtiofs_vnodeop_p, virtiofs_vnodeop_entries };
+
+static const struct vnodeopv_entry_desc virtiofs_fifoop_entries[] = {
+    { &vnop_default_desc, (VOPFUNC)vn_default_error },
+    { &vnop_lookup_desc, (VOPFUNC)fifo_lookup },
+    { &vnop_open_desc, (VOPFUNC)fifo_open },
+    { &vnop_close_desc, (VOPFUNC)fifo_close },
+    { &vnop_getattr_desc, (VOPFUNC)virtiofs_vnop_getattr },
+    { &vnop_read_desc, (VOPFUNC)fifo_read },
+    { &vnop_write_desc, (VOPFUNC)fifo_write },
+    { &vnop_ioctl_desc, (VOPFUNC)fifo_ioctl },
+    { &vnop_select_desc, (VOPFUNC)fifo_select },
+    { &vnop_revoke_desc, (VOPFUNC)fifo_revoke },
+    { &vnop_mmap_desc, (VOPFUNC)fifo_mmap },
+    { &vnop_fsync_desc, (VOPFUNC)virtiofs_vnop_fsync },
+    { &vnop_pathconf_desc, (VOPFUNC)fifo_pathconf },
+    { &vnop_getxattr_desc, (VOPFUNC)virtiofs_vnop_getxattr },
+    { &vnop_listxattr_desc, (VOPFUNC)virtiofs_vnop_listxattr },
+    { &vnop_inactive_desc, (VOPFUNC)virtiofs_vnop_inactive },
+    { &vnop_reclaim_desc, (VOPFUNC)virtiofs_vnop_reclaim },
+    { NULL, NULL }
+};
+
+struct vnodeopv_desc virtiofs_fifoop_opv_desc = { &virtiofs_fifoop_p, virtiofs_fifoop_entries };

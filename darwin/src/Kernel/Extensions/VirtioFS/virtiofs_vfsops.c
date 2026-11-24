@@ -250,10 +250,10 @@ static struct vfsops virtiofs_vfsops = {
 int
 virtiofs_vfs_register(void)
 {
-    struct vnodeopv_desc *opv[] = { &virtiofs_vnodeop_opv_desc };
+    struct vnodeopv_desc *opv[] = { &virtiofs_vnodeop_opv_desc, &virtiofs_fifoop_opv_desc };
     struct vfs_fsentry vfe = {
         .vfe_vfsops = &virtiofs_vfsops,
-        .vfe_vopcnt = 1,
+        .vfe_vopcnt = 2,
         .vfe_opvdescs = opv,
         .vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLFSNODELOCK | VFS_TBL64BITREADY | VFS_TBLNOTYPENUM |
                      VFS_TBLREADDIR_EXTENDED,
