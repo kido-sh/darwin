@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2007-2011 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -1822,6 +1822,11 @@ init_ptpages(tt_entry_t *tt, vm_map_address_t start, vm_map_address_t end, bool 
 
 #define ARM64_PHYSMAP_SLIDE_RANGE (1ULL << 30) // 1 GB
 #define ARM64_PHYSMAP_SLIDE_MASK  (ARM64_PHYSMAP_SLIDE_RANGE - 1)
+#if XNU_MONITOR
+#define ARM64_PHYSMAP_BLOCK_SLACK 0ULL
+#else
+#define ARM64_PHYSMAP_BLOCK_SLACK (PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE)
+#endif
 
 void
 arm_vm_init(uint64_t memory_size, boot_args * args)
@@ -1871,7 +1876,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 #endif
 
 #if defined(ARM_LARGE_MEMORY)
-	unsigned long physmap_l1_entries = ((real_phys_size + ARM64_PHYSMAP_SLIDE_RANGE) >> ARM_TT_L1_SHIFT) + 1;
+	unsigned long physmap_l1_entries = ((real_phys_size + ARM64_PHYSMAP_SLIDE_RANGE + ARM64_PHYSMAP_BLOCK_SLACK) >> ARM_TT_L1_SHIFT) + 1;
 	physmap_base = VM_MIN_KERNEL_ADDRESS - (physmap_l1_entries << ARM_TT_L1_SHIFT);
 #else
 	physmap_base = phystokv(args->topOfKernelData);
@@ -1900,7 +1905,7 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
 #if defined(ARM_LARGE_MEMORY)
 	/* For large memory systems with no PPL such as virtual machines */
 	static_memory_end = phystokv(args->topOfKernelData);
-	physmap_end = physmap_base + real_phys_size;
+	physmap_end = physmap_base + real_phys_size + ARM64_PHYSMAP_BLOCK_SLACK;
 #else
 	static_memory_end = physmap_base + mem_size + (PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE); // worst possible case for block alignment
 	physmap_end = physmap_base + real_phys_size + (PTOV_TABLE_SIZE * ARM_TT_TWIG_SIZE);
