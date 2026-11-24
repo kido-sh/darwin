@@ -9,6 +9,7 @@
 #include <CoreFoundation/CFRuntime.h>
 #include <Security/Security.h>
 #include "../apple/CMS/CMSDecoder.h"
+#include "../apple/OSX/libsecurity_cssm/lib/cssmerr.h"
 #include <pthread.h>
 
 struct _CMSDecoder {
@@ -177,6 +178,20 @@ static bool contentMatches(CMSDecoderRef decoder, CMS_SignerInfo *signer)
     return matches;
 }
 
+static OSStatus cssmResult(OSStatus status)
+{
+    switch (status) {
+    case errSecCertificateExpired:
+        return CSSMERR_TP_CERT_EXPIRED;
+    case errSecCertificateNotValidYet:
+        return CSSMERR_TP_CERT_NOT_VALID_YET;
+    case errSecCertificateRevoked:
+        return CSSMERR_TP_CERT_REVOKED;
+    default:
+        return CSSMERR_TP_NOT_TRUSTED;
+    }
+}
+
 OSStatus CMSDecoderCopySignerStatus(CMSDecoderRef cmsDecoder, size_t signerIndex, CFTypeRef policyOrArray,
     Boolean evaluateSecTrust, CMSSignerStatus *signerStatusOut, SecTrustRef *secTrustOut,
     OSStatus *certVerifyResultCodeOut)
@@ -238,7 +253,7 @@ OSStatus CMSDecoderCopySignerStatus(CMSDecoderRef cmsDecoder, size_t signerIndex
             CFErrorRef error = NULL;
 
             if (!SecTrustEvaluateWithError(trust, &error)) {
-                certResult = error ? (OSStatus)CFErrorGetCode(error) : errSecNotTrusted;
+                certResult = cssmResult(error ? (OSStatus)CFErrorGetCode(error) : errSecNotTrusted);
                 if (status == kCMSSignerValid)
                     status = kCMSSignerInvalidCert;
             }
