@@ -146,7 +146,7 @@ sources the recipes in nix/darwin/third-party pin by hash, and kido for its agen
 | nghttp2 | 1.71.0 | `MIT` | /usr/lib/libapple_nghttp2.dylib |
 | Expat | 2.11.0 | `MIT` | /usr/lib/libexpat.1.dylib |
 | libedit | 20251016-3.1 | `BSD-3-Clause`, `BSD-2-Clause` | /usr/lib/libedit.3.dylib |
-| Apple's libiconv, the Citrus iconv of FreeBSD and NetBSD | libiconv-115.120.2 | `BSD-2-Clause`, `BSD-3-Clause`, `BSD-2-Clause-FreeBSD`, `APSL-2.0` | /usr/lib/libiconv.2.dylib, libcharset.1.dylib, the converters in /usr/lib/i18n, /usr/bin/iconv, and the tables in /usr/share/i18n, which also carry the notices of Unicode, Inc.'s and Apple's mapping data that NOTICE reproduces |
+| Apple's libiconv, the Citrus iconv of FreeBSD and NetBSD | libiconv-115.120.2 | `BSD-2-Clause`, `BSD-3-Clause`, `BSD-4-Clause`, `BSD-2-Clause-FreeBSD`, `APSL-2.0`, `Unicode-3.0` | /usr/lib/libiconv.2.dylib, libcharset.1.dylib, the converters in /usr/lib/i18n, /usr/bin/iconv, and the tables in /usr/share/i18n, compiled from the mapping data of Unicode, Inc., Apple, the Citrus Project and others, whose notices NOTICE reproduces |
 | Apple's libutil | libutil-73 | `APSL-2.0`, `BSD-2-Clause-FreeBSD`, `BSD-2-Clause`, `BSD-3-Clause` | /usr/lib/libutil.dylib |
 | ICU | 76.1 | `LicenseRef-ICU` | /usr/lib/libicucore.A.dylib and the libicu* libraries |
 | zlib | 1.3.2 | `Zlib` | /usr/lib/libz.1.dylib, and linked into toybox |
