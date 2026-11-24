@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2000-2017, 2024 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2021-2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2021-2026 and the kido authors in 2026; see docs/upstream.md.
  *
  *    arm platform expert initialization.
  */
@@ -82,6 +82,11 @@ clock_frequency_info_t gPEClockFrequencyInfo;
 vm_offset_t gPanicBase = 0;
 unsigned int gPanicSize;
 struct embedded_panic_header *panic_info = NULL;
+
+#if defined(QEMUVIRT)
+#define PE_RAM_PANIC_LOG_SIZE (128 * 1024)
+static uint8_t pe_ram_panic_log[PE_RAM_PANIC_LOG_SIZE] __attribute__((aligned(64)));
+#endif
 
 #if (DEVELOPMENT || DEBUG) && defined(XNU_TARGET_OS_BRIDGE)
 /*
@@ -565,6 +570,14 @@ PE_create_console(void)
 	 * Do this before the VRAM is trashed.
 	 */
 	check_for_panic_log();
+#if defined(QEMUVIRT)
+	if (gPanicBase == 0) {
+		gPanicBase = (vm_offset_t)pe_ram_panic_log;
+		gPanicSize = sizeof(pe_ram_panic_log);
+		panic_text_len = gPanicSize - sizeof(struct embedded_panic_header);
+		panic_info = (struct embedded_panic_header *)gPanicBase;
+	}
+#endif
 
 	if (PE_state.video.v_display) {
 		/*
