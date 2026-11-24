@@ -104,6 +104,8 @@ stdenv.mkDerivation {
     inherit (pin) hash;
   };
 
+  patches = [ ./macos-defaults.patch ];
+
   nativeBuildInputs = [ unzip ];
   outputs = [ "out" "dev" ];
   dontConfigure = true;

@@ -95,6 +95,23 @@ done
 if wanted http2; then
   GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o "$work/h2server" "$lib/curl/h2server/main.go" || exit 1
 fi
+gates=()
+if wanted sqlite; then
+  for v in 0.0 10.13 10.14 10.15 10.16; do
+    mkdir -p "$work/gate/sdk-$v"
+    vtool -set-build-version macos 11.0 "$v" -replace -output "$work/gate/sdk-$v/t_sqlite" "$work/sqlite" 2>/dev/null &&
+      codesign -f -s - "$work/gate/sdk-$v/t_sqlite" 2>/dev/null ||
+      { echo "syslibs: cannot make the SDK $v copy of t_sqlite" >&2; exit 1; }
+    gates+=("sdk-$v/t_sqlite")
+  done
+  for n in sqlite3 testfixture xctest; do
+    mkdir -p "$work/gate/name-$n" && cp "$work/sqlite" "$work/gate/name-$n/$n" || exit 1
+    gates+=("name-$n/$n")
+  done
+  mkdir -p "$work/gate/name-xctest-sdk-10.13" &&
+    cp "$work/gate/sdk-10.13/t_sqlite" "$work/gate/name-xctest-sdk-10.13/xctest" || exit 1
+  gates+=("name-xctest-sdk-10.13/xctest")
+fi
 "$kido" image import "$img" syslibs-test >/dev/null || exit 1
 "$kido" run -d --name syslibs-test -p 127.0.0.1:$port:8443 -p 127.0.0.1:$((port + 1)):8444 \
   -p 127.0.0.1:$((port + 2)):8080 syslibs-test >/dev/null || exit 1
@@ -106,6 +123,10 @@ for t in $tests h2server; do
     [[ -f $f ]] || continue
     "$kido" cp "$f" syslibs-test:$g/ || exit 1
   done
+done
+for v in ${gates[@]+"${gates[@]}"}; do
+  timed "$kido" exec syslibs-test /bin/mkdir -p "$g/gate/${v%/*}" || exit 1
+  "$kido" cp "$work/gate/$v" "syslibs-test:$g/gate/${v%/*}/" || exit 1
 done
 if wanted http2; then
   timed "$kido" exec -d syslibs-test $g/h2server -dir $g/h2 || exit 1
@@ -164,5 +185,16 @@ for t in $tests; do
       diff "$work/$bin.mac.design" "$work/$bin.guest.design" | grep '^[<>]'
     fi
   done
+done
+for v in ${gates[@]+"${gates[@]}"}; do
+  timed "$kido" exec syslibs-test "$g/gate/$v" "$g" gate > "$work/gate.guest" 2>&1 || rc=1
+  "$work/gate/$v" "$work" gate > "$work/gate.mac" 2>&1 || rc=1
+  if diff "$work/gate.mac" "$work/gate.guest" > "$work/gate.diff"; then
+    echo "sqlite ${v%/*}: the same as macOS: $(head -n 1 "$work/gate.guest")"
+  else
+    echo "sqlite ${v%/*}: differs from macOS (< macOS, > guest):"
+    cat "$work/gate.diff"
+    rc=1
+  fi
 done
 exit $rc

@@ -142,6 +142,52 @@ limits(void)
 }
 
 static void
+defaults(void)
+{
+    sqlite3 *saved = db;
+    CHECK(sqlite3_open(":memory:", &db) == SQLITE_OK);
+    for (int op = SQLITE_DBCONFIG_ENABLE_FKEY; op <= SQLITE_DBCONFIG_MAX; op++) {
+        int v = -1;
+        int rc = sqlite3_db_config(db, op, -1, &v);
+        printf("dbconfig %d rc %d value %d\n", op, rc, v);
+    }
+    int v = -1;
+    sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_FTS3_TOKENIZER, 1, &v);
+    printf("dbconfig fts3_tokenizer after enabling it %d\n", v);
+    CHECK(v == 0);
+    v = -1;
+    sqlite3_db_config(db, SQLITE_DBCONFIG_DEFENSIVE, -1, &v);
+    CHECK(v == 1);
+    run("tokenizer", "SELECT fts3_tokenizer('simple') IS NULL");
+    CHECK(run("tokenizer", "SELECT fts3_tokenizer('kido', x'4141414141414141')") == SQLITE_ERROR);
+    run("defensive", "PRAGMA journal_mode = OFF");
+    run("defensive", "PRAGMA writable_schema = ON");
+    run("defensive", "PRAGMA writable_schema");
+    sqlite3_close(db);
+    db = saved;
+}
+
+static int
+gate(void)
+{
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
+        return 1;
+    }
+    int t = -1, d = -1, off = -1, on = -1;
+    sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_FTS3_TOKENIZER, -1, &t);
+    sqlite3_db_config(db, SQLITE_DBCONFIG_DEFENSIVE, -1, &d);
+    int rc0 = sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_FTS3_TOKENIZER, 0, &off);
+    int rc1 = sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_FTS3_TOKENIZER, 1, &on);
+    printf("%s: fts3_tokenizer %d, set to 0 rc %d gives %d, set to 1 rc %d gives %d, defensive %d\n",
+           getprogname(), t, rc0, off, rc1, on, d);
+    run("tokenizer", "SELECT fts3_tokenizer('simple') IS NULL");
+    run("tokenizer", "SELECT fts3_tokenizer('kido', fts3_tokenizer('simple')) IS NOT NULL");
+    run("defensive", "PRAGMA writable_schema = ON; PRAGMA writable_schema");
+    sqlite3_close(db);
+    return 0;
+}
+
+static void
 apis(void)
 {
     sqlite3_stmt *st = NULL;
@@ -296,6 +342,9 @@ int
 main(int argc, char **argv)
 {
     const char *dir = argc > 1 ? argv[1] : "/tmp";
+    if (argc > 2 && strcmp(argv[2], "gate") == 0) {
+        return gate();
+    }
     printf("version %s %d\n", sqlite3_libversion(), sqlite3_libversion_number());
     printf("source %s\n", sqlite3_sourceid());
     CHECK(sqlite3_libversion_number() >= 3054000);
@@ -308,6 +357,7 @@ main(int argc, char **argv)
     unlink(path);
     CHECK(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) == SQLITE_OK);
     pragmas();
+    defaults();
     features();
     limits();
     apis();
