@@ -27,6 +27,7 @@
         inherit (image) image oci disk rootfs kc loader agent;
         kernel = darwin.kernelArm64VirtBuild;
         kexts = darwin.kextsArm64Build;
+        arm64e-tests = darwin.arm64eTestsBuild;
       };
     };
 }

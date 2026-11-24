@@ -227,6 +227,7 @@ let
     arch = "arm64e";
   };
   libutilArm64eBuild = mkArm64Build ./third-party/libutil { arch = "arm64e"; };
+  arm64eTestsBuild = mkArm64Build ../../test/arm64e { };
   coreServicesArm64Build = mkArm64Build ./apple/coreservices.nix {
     src = coreServicesSource;
     corefoundation = coreFoundationArm64Build;
@@ -515,6 +516,7 @@ let
 in
 {
   inherit
+    arm64eTestsBuild
     kernelSource
     certificatesBundleBuild
     coreServicesArm64Build
