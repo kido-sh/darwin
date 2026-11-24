@@ -22,7 +22,7 @@ Darwin kido 25.5.0 Darwin Kernel Version 25.5.0: Mon Nov 23 13:26:52 UTC 2026; n
 - kido's guest agent, which runs the commands that kido sends.
 - The licenses of all of the above, in `/usr/share/doc/kido`.
 
-The image is about 40 MB to download. A `kido run` of one command takes about half a second.
+The image is about 40 MB to download. A `kido run` of one command takes under a second.
 
 ## Run your own tools
 
