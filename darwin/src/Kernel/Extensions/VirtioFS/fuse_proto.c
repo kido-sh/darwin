@@ -38,6 +38,8 @@ virtiofs_errno(int32_t fuse_error)
 int
 virtiofs_attr_ok(const struct fuse_attr *attr)
 {
+    if (attr->size > INT64_MAX)
+        return 0;
     switch (attr->mode & S_IFMT) {
     case S_IFREG: case S_IFDIR: case S_IFLNK: case S_IFIFO: case S_IFCHR: case S_IFBLK: case S_IFSOCK:
         return 1;
