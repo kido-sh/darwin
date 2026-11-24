@@ -3,21 +3,27 @@
 #
 # macOS's /usr/lib/libcurl.4.dylib under macOS's install name, versions and exports. TLS is the
 # image's LibreSSL, its libssl.48 and libcrypto.46 weak-linked as on macOS, verifying against
-# /etc/ssl/cert.pem. No GSS-API or Kerberos, LDAP, HTTP/2 or HTTP/3.
+# /etc/ssl/cert.pem. HTTP/2 through libapple_nghttp2, linked as on macOS. No GSS-API or Kerberos,
+# LDAP or HTTP/3.
 { stdenv
 , lib
+, callPackage
+, fetchFromGitHub
+, autoreconfHook
 , darwinCrossToolchain
 , nativeLd
 , targetTriple ? "arm64-apple-darwin20.4"
 , arch ? "arm64"
 , libSystem
-, curl
 , libressl
+, nghttp2
 , systemConfiguration
 , appleSdk
 }:
 
 let
+  pin = lib.importJSON ./source.json;
+  dylib = callPackage ../dylib.nix { };
   t = "${darwinCrossToolchain}/bin/${targetTriple}";
   linkFlags = lib.concatStringsSep " " [
     "-nostdlib"
@@ -29,9 +35,20 @@ let
 in
 stdenv.mkDerivation {
   pname = "kido-curl";
-  inherit (curl) version src;
+  inherit (pin) version;
+
+  src = fetchFromGitHub {
+    owner = "curl";
+    repo = "curl";
+    tag = "curl-${lib.replaceStrings [ "." ] [ "_" ] pin.version}";
+    inherit (pin) hash;
+  };
 
   patches = [ ./libressl-tls13.patch ];
+  postPatch = ''
+    substituteInPlace include/curl/curlver.h --replace-fail '"${pin.version}-DEV"' '"${pin.version}"'
+  '';
+  nativeBuildInputs = [ autoreconfHook ];
 
   configurePhase = ''
     runHook preConfigure
@@ -64,7 +81,7 @@ stdenv.mkDerivation {
       --without-apple-idn \
       --without-brotli \
       --without-zstd \
-      --without-nghttp2 \
+      --with-nghttp2=${nghttp2.dev} \
       --without-ngtcp2 \
       --without-nghttp3 \
       --without-quiche \
@@ -83,10 +100,11 @@ stdenv.mkDerivation {
     runHook preBuild
     make -j$NIX_BUILD_CORES -C lib
     $CC -dynamiclib -o libcurl.4.dylib -Wl,-force_load,lib/.libs/libcurl.a \
+      -framework CoreFoundation -framework CoreServices \
       -Wl,-weak_library,${libressl}/usr/lib/libcrypto.46.dylib \
-      -Wl,-weak_library,${libressl}/usr/lib/libssl.48.dylib -lz \
-      -framework CoreFoundation -framework CoreServices -framework SystemConfiguration \
-      -install_name /usr/lib/libcurl.4.dylib -compatibility_version 7 -current_version 9 \
+      -Wl,-weak_library,${libressl}/usr/lib/libssl.48.dylib \
+      -framework SystemConfiguration ${nghttp2}/usr/lib/libapple_nghttp2.dylib -lz \
+      ${dylib.idFlags ./libcurl.exports} \
       -Wl,-exported_symbols_list,${./libcurl.exports} -Wl,-dead_strip ${linkFlags}
     grep -v '^#' ${./libcurl.exports} | sort > want
     $NM -gUj libcurl.4.dylib | sort > have

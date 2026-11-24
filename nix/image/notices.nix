@@ -7,7 +7,6 @@
 , libiconvReal
 , zsh
 , ncurses
-, curl
 , libedit
 , toybox
 , icu
@@ -85,7 +84,6 @@ let
     [ "libiconv" libiconvReal.src "COPYING.LIB" ]
     [ "zsh" zsh.src "LICENCE" ]
     [ "ncurses" ncurses.src "COPYING" ]
-    [ "curl" curl.src "COPYING" ]
     [ "libedit" libedit.src "COPYING" ]
     [ "toybox" toybox.src "LICENSE" ]
     [ "icu" icu.src "LICENSE" ]

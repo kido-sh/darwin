@@ -32,6 +32,7 @@ let
     agent = agent.agent;
     libressl = libresslArm64eBuild;
     pinned = {
+      curl = curlArm64Build;
       nghttp2 = nghttp2Arm64eBuild;
     };
   };

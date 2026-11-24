@@ -28,6 +28,7 @@
         kernel = darwin.kernelArm64VirtBuild;
         kexts = darwin.kextsArm64Build;
         arm64e-tests = darwin.arm64eTestsBuild;
+        curl = darwin.curlArm64Build;
         nghttp2 = darwin.nghttp2Arm64eBuild;
       };
     };

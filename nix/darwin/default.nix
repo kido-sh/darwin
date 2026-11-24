@@ -361,8 +361,8 @@ let
     });
   libresslArm64eBuild = mkArm64Build ./third-party/libressl { arch = "arm64e"; };
   curlArm64Build = mkArm64Build ./third-party/curl {
-    inherit (pkgs) curl;
     libressl = libresslArm64eBuild;
+    nghttp2 = nghttp2Arm64eBuild;
     systemConfiguration = systemConfigurationArm64Build;
   };
   certificatesBundleBuild =

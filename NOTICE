@@ -104,7 +104,7 @@ the terminfo database in /usr/share/terminfo, and linked into zsh
   Copyright 1998-2017,2018 Free Software Foundation, Inc.
   https://invisible-island.net/ncurses/
 
-curl 8.21.0, /usr/lib/libcurl.4.dylib
+curl 8.23.0, /usr/lib/libcurl.4.dylib
   Copyright (c) 1996 - 2026, Daniel Stenberg, <daniel@haxx.se>, and many
   contributors. curl License (LICENSES/curl.txt). https://curl.se
 

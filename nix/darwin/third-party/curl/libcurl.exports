@@ -1,4 +1,4 @@
-# The symbols the macOS 26.5 SDK's libcurl.4.tbd exports
+# The symbols the macOS 27.0 SDK's libcurl.4.tbd exports
 # install name /usr/lib/libcurl.4.dylib, current version 9, compatibility version 7
 _curl_easy_cleanup
 _curl_easy_duphandle
