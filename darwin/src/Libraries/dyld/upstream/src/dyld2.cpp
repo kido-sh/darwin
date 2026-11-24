@@ -1,7 +1,7 @@
 /* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*-
  *
  * Copyright (c) 2004-2013 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -6705,14 +6705,7 @@ _main(const macho_header* mainExecutableMH, uintptr_t mainExecutableSlide,
 		sExecShortName = sExecPath;
 
 #if TARGET_OS_OSX && __has_feature(ptrauth_calls)
-	// on Apple Silicon macOS, only Apple signed ("platform binary") arm64e can be loaded
-	sOnlyPlatformArm64e = true;
-
-	// internal builds, or if boot-arg is set, then non-platform-binary arm64e slices can be run
-	if ( const char* abiMode = _simple_getenv(apple, "arm64e_abi") ) {
-		if ( strcmp(abiMode, "all") == 0 )
-			sOnlyPlatformArm64e = false;
-	}
+	sOnlyPlatformArm64e = false;
 #endif
 
     configureProcessRestrictions(mainExecutableMH, envp);

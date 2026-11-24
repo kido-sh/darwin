@@ -1,7 +1,7 @@
 /* -*- mode: C++; c-basic-offset: 4; tab-width: 4 -*-
  *
  * Copyright (c) 2015 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_LICENSE_HEADER_START@
  *
@@ -31,6 +31,8 @@
 #if __linux__
 #define SUPPORT_ARCH_arm64e 1
 #define SUPPORT_ARCH_arm64_32 1
+#elif __arm64e__
+#define SUPPORT_ARCH_arm64e 1
 #endif
 
 #endif // _DYLD_SUPPORTED_ARCHS_H_
