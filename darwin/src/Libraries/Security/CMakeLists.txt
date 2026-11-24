@@ -119,6 +119,7 @@ target_sources(Security PRIVATE
     compat/pd_cms.c
     compat/pd_security_macos_trust.c
     compat/pd_authsession.c
+    compat/kido_certificate_legacy.c
 )
 
 target_include_directories(Security PRIVATE

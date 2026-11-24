@@ -67,6 +67,7 @@ EOF
         -out expired.pem 2>/dev/null
     for c in rsa ec; do
         "$openssl" ca -batch -notext -config ca.cnf -days 30 -extensions signer -in $c.csr -out $c.pem 2>/dev/null
+        "$openssl" x509 -in $c.pem -outform DER -out $c.der || exit 1
         "$openssl" pkcs12 -export -inkey $c.key -in $c.pem -certfile ca.pem -name "kido $c" -passout pass:kido \
             -out $c.p12 || exit 1
     done
@@ -131,6 +132,7 @@ compare() {
     "$bin/t_sectls" "SecureTransport, wrong name" "$dir/ca.der" "$good" wrong.example
     "$bin/t_sectls" "SecureTransport, system roots" "$dir/ca.der" "$good" localhost system
     "$bin/t_libcurl" "$dir" "$good" "$expired" | grep '^result'
+    "$bin/t_certlegacy" RSA "$dir/rsa.der" EC "$dir/ec.der" | grep '^result'
 }
 
 check() {
@@ -142,6 +144,7 @@ check() {
     "$bin/t_secspi" "$bin/vectors.txt" || fail=$((fail + 1))
     "$bin/t_seckey" gen > "$bin/pki/guest.vec" || fail=$((fail + 1))
     "$bin/t_seckey" check "$bin/pki/guest.vec" || fail=$((fail + 1))
+    "$bin/t_certlegacy" RSA "$bin/pki/rsa.der" EC "$bin/pki/ec.der" || fail=$((fail + 1))
     exit $fail
 }
 

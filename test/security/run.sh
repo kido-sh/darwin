@@ -7,12 +7,15 @@
 # clang against the macOS SDK and runs them in a container of IMAGE_DIR with kido (KIDO, default kido
 # on PATH; KIDO_BACKEND and KIDO_QEMU as for kido's test/e2e.sh), and again on this Mac, macOS 15 or
 # later, against macOS's own frameworks, on the same files and the same TLS servers in the container.
-# Built for macOS 15, t_pkcs12 loads only where Security exports kSecImportToMemoryOnly, as macOS's does.
+# Built for macOS 15, t_pkcs12 loads only where Security exports kSecImportToMemoryOnly, as macOS's does,
+# and t_certlegacy only where it exports the two-argument SecCertificateCopyPublicKey and
+# SecCertificateCopySerialNumber under their $LEGACYMAC names.
 # Passes when the guest's checks pass, each side accepts the other's keys and signatures, and both
-# sides print the same results. Three results differ by design and are shown apart: macOS refuses the
-# AES-encrypted PKCS#12 file, and macOS's libcurl names a second TLS backend and cannot be limited to
-# TLS 1.3, which curl 8.21 over LibreSSL can. vectors.txt holds known answers made by macOS's
-# Security. PORT (default 18453) is the first of the four local ports the servers are published on.
+# sides print the same results. Four results differ by design and are shown apart: macOS refuses the
+# AES-encrypted PKCS#12 file, macOS's libcurl names a second TLS backend and cannot be limited to
+# TLS 1.3, which curl over LibreSSL can, and macOS's legacy EC key reports the block size of its
+# CDSA key, not the key size. vectors.txt holds known answers made by macOS's Security. PORT (default
+# 18453) is the first of the four local ports the servers are published on.
 # Each command in the container fails after TIMEOUT seconds (default 120). Uses a throwaway KIDO_HOME.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -43,9 +46,10 @@ exports=$here/../../nix/darwin/third-party/libressl
 } > "$work/libcrypto.46.tbd"
 mkdir -p "$work/bin"
 build() {
-  xcrun clang -arch arm64 -mmacosx-version-min=15.0 -O1 -Wno-deprecated-declarations -o "$work/bin/$1" "$2" "${@:3}"
+  xcrun clang -arch arm64 -mmacosx-version-min=15.0 -O1 -Wno-deprecated-declarations -Wno-nonnull -o "$work/bin/$1" \
+    "$2" "${@:3}"
 }
-for t in t_seckey t_pkcs12 t_cms t_sectls; do
+for t in t_seckey t_pkcs12 t_cms t_sectls t_certlegacy; do
   build $t "$here/$t.c" -framework Security -framework CoreFoundation || exit 1
 done
 build t_secspi "$here/t_secspi.c" "$work/libcrypto.46.tbd" -framework Security || exit 1
@@ -74,7 +78,7 @@ timed "$kido" exec security-test /bin/sh $g/security.sh compare $g $g/pki 8453 8
 sh "$here/security.sh" compare "$work/bin" "$work/pki" $port $((port + 1)) $((port + 2)) $((port + 3)) \
   > "$work/mac.txt" || rc=1
 cat "$work/guest.txt"
-known='^(AES p12|result curl backend|result curl TLS 1\.3 only)'
+known='^(AES p12|result curl backend|result curl TLS 1\.3 only|result certlegacy blocksize EC)'
 for side in mac guest; do
   grep -Ev "$known" "$work/$side.txt" > "$work/$side.same"
   grep -E "$known" "$work/$side.txt" > "$work/$side.known"

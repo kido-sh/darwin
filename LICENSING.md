@@ -73,7 +73,7 @@ the release a directory came from and the other licenses its files carry.
 | `darwin/src/Libraries/objc4/**` | `APSL-2.0` | objc4-818.2. Also `NCSA` (the llvm-*.h headers), `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `BSD-2-Clause`, `HPND`, `LicenseRef-Public-Domain` |
 | `darwin/src/Libraries/Security/apple/**` | `APSL-2.0` | Security-59754.120.12. NSS code in OSX/libsecurity_asn1 is `MPL-1.1` (see Decisions). Also `APSL-1.2`, `BSD-3-Clause`, `HPND` |
 | `darwin/src/Libraries/Security/corecrypto/**` | `Apache-2.0` | kido's corecrypto glue for Security |
-| `darwin/src/Libraries/Security/{certificates,compat,include,tools}/**`, `darwin/src/Libraries/Security/Security.exports` | `BSD-2-Clause` | PureDarwin. Also `MPL-2.0`, `MPL-2.0 OR BSD-2-Clause`, and `APSL-2.0` (copies of three xnu headers) |
+| `darwin/src/Libraries/Security/{certificates,compat,include,tools}/**`, `darwin/src/Libraries/Security/Security.exports` | `BSD-2-Clause` | PureDarwin. Also `MPL-2.0`, `MPL-2.0 OR BSD-2-Clause`, and `APSL-2.0` (copies of three xnu headers). kido's compat/kido_certificate_legacy.c is `Apache-2.0` |
 | `darwin/src/Libraries/CommonCrypto/**` | `APSL-2.0` | CommonCrypto-60178.120.3. PureDarwin's rewrites are `MPL-2.0 OR BSD-2-Clause` |
 | `darwin/src/Libraries/libresolv/**` | `APSL-2.0` | libresolv-68.120.2. Also `ISC`, `BSD-2-Clause`, `BSD-3-Clause`, `BSD-4-Clause-UC` |
 | `darwin/src/Libraries/syslog/**` | `APSL-2.0` | syslog-385. Also `BSD-3-Clause`, `BSD-4-Clause-UC` |
