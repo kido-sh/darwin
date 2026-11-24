@@ -94,6 +94,21 @@ In this repository:
   and ncurses 6.6; ncurses keeps both of macOS's cchar_t layouts (the plain names and the $NCURSES60
   ones), exports the four ncurses 6.0 internals that later releases dropped or made static, and
   installs its terminfo database; tests in test/syslibs.
+- Pointer authentication as macOS has it. dyld, libSystem, libobjc, libc++, libc++abi, libz.1, and
+  libncurses.5.4 with libpanel, libmenu and libform are arm64e only. So are three new libraries with
+  macOS's install names, versions and exports: libutil, libbz2.1.0 built from bzip2 1.0.8, and
+  liblzma.5 built from xz 5.8.3. libutil's humanize_number comes from NetBSD and the rest of libutil
+  is new code. Every exec of an arm64e program gets its own IA, IB, DA, DB and GA keys, and a forked
+  child keeps the keys of its parent. An arm64 process runs with pointer authentication off, so arm64
+  programs work on the arm64e libraries. The kernel loads the keys on the way back to user space. PAC
+  instructions run natively on a CPU with FEAT_PAuth instead of being rewritten at page-in, and a
+  failed authentication raises EXC_BAD_ACCESS. When the guest starts at EL2, the loader and the
+  secondary CPUs let the kernel and user space use pointer authentication. dyld loads any arm64e
+  image, and the Blocks runtime signs blocks as the compiler does. libobjc is built with LLVM's
+  clang, which does not define __PTRAUTH_INTRINSICS__ the way Apple's clang does, so the build
+  defines it by hand. <ptrauth.h> has the names of Apple's arm64e ABI that Darwin's sources use.
+  libSystem exports Libc's getbsize and strtonum and macOS's typed allocation calls, which Apple's ls
+  and grep import. The tests are in test/arm64e, test/syslibs and test/libsystem.
 - An APSL header on Ext4FileSystemDriver.cpp, which is derived from Apple's AppleFileSystemDriver.
 - The Nix code reorganized under nix/ and the tree pruned to what the container builds.
 - The licensing files and the change notices.

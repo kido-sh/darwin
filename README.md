@@ -26,8 +26,10 @@ The image is about 40 MB to download. A `kido run` of one command takes under a 
 
 ## Run your own tools
 
-macOS arm64 command-line tools run unchanged, as long as KidoDarwin has the functions and
-libraries they use. Apple's own binaries do not run, because they are built for arm64e.
+macOS command-line tools run unchanged, as long as KidoDarwin has the functions and libraries they
+use. Like macOS, it runs arm64 and arm64e tools on arm64e system libraries: dyld, libSystem,
+libobjc, libc++ and the libraries Apple's own /bin/ls and /usr/bin/grep link are arm64e. Its other
+libraries are still arm64 only, which arm64e tools cannot load.
 [kido's README](https://github.com/kido-sh/kido#examples) shows how to build an image with your
 own tool in it.
 
