@@ -228,6 +228,7 @@ let
   };
   libutilArm64eBuild = mkArm64Build ./third-party/libutil { arch = "arm64e"; };
   expatArm64eBuild = mkArm64Build ./third-party/expat { arch = "arm64e"; };
+  sqliteDylibArm64eBuild = mkArm64Build ./third-party/sqlite { arch = "arm64e"; };
   nghttp2Arm64eBuild = mkArm64Build ./third-party/nghttp2 { arch = "arm64e"; };
   arm64eTestsBuild = mkArm64Build ../../test/arm64e { };
   coreServicesArm64Build = mkArm64Build ./apple/coreservices.nix {
@@ -240,7 +241,7 @@ let
     corefoundation = coreFoundationArm64Build;
     libobjc = libobjcArm64Build;
     foundation = foundationArm64Build;
-    sqlite = sqliteArm64Build;
+    sqlite = sqliteDylibArm64eBuild.dev;
     src = securitySource;
     libressl = libresslArm64eBuild;
     libz = libzDylibArm64Build;
@@ -373,18 +374,6 @@ let
 
   xvfbZlibArm64Build = mkArm64Build ./third-party/xvfb-zlib.nix { inherit (pkgs) zlib; };
   toyboxArm64Build = mkArm64Build ./third-party/toybox.nix { zlib = xvfbZlibArm64Build; };
-  sqliteArm64Build = mkArm64Build ./third-party/xorg-cross-lib.nix {
-    pname = "kido-sqlite";
-    inherit (pkgs.sqlite) version;
-    # nixpkgs' sqlite src is a .zip the default unpacker cannot read.
-    src = pkgs.runCommand "sqlite-src-${pkgs.sqlite.version}" { nativeBuildInputs = [ pkgs.unzip ]; } ''
-      unzip -q ${pkgs.sqlite.src}
-      mkdir -p $out
-      cp -R sqlite-src-*/. $out/
-      chmod -R u+w $out
-    '';
-    configureFlags = [ "--disable-readline" "--disable-editline" ];
-  };
   libffiArm64Build = mkArm64Build ./third-party/xorg-cross-lib.nix {
     pname = "kido-libffi";
     version = pkgs.libffiReal.version;
@@ -540,6 +529,7 @@ in
     ncursesDylibArm64Build
     nghttp2Arm64eBuild
     securityArm64Build
+    sqliteDylibArm64eBuild
     splitBaseSystemArm64VirtMinimalRelease
     systemConfigurationArm64Build
     toyboxArm64Build

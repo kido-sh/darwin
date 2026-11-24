@@ -31,6 +31,7 @@
         curl = darwin.curlArm64Build;
         expat = darwin.expatArm64eBuild;
         nghttp2 = darwin.nghttp2Arm64eBuild;
+        sqlite = darwin.sqliteDylibArm64eBuild;
       };
     };
 }

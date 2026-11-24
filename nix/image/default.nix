@@ -22,6 +22,7 @@ let
     ncursesDylibArm64Build
     nghttp2Arm64eBuild
     securityArm64Build
+    sqliteDylibArm64eBuild
     splitBaseSystemArm64VirtMinimalRelease
     systemConfigurationArm64Build
     toyboxArm64Build
@@ -36,6 +37,7 @@ let
       curl = curlArm64Build;
       expat = expatArm64eBuild;
       nghttp2 = nghttp2Arm64eBuild;
+      sqlite = sqliteDylibArm64eBuild;
     };
   };
   # every image has this root filesystem uuid: uuid5 of https://github.com/kido-sh/darwin#root
@@ -84,7 +86,7 @@ let
       securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build
       libzDylibArm64Build libbz2DylibArm64eBuild liblzmaDylibArm64eBuild libutilArm64eBuild
       ncursesDylibArm64Build libeditArm64Build curlArm64Build
-      nghttp2Arm64eBuild expatArm64eBuild
+      nghttp2Arm64eBuild expatArm64eBuild sqliteDylibArm64eBuild
       certificatesBundleBuild containerLaunchdSettings
       agent.root
       libresslArm64eBuild

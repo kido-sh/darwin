@@ -16,7 +16,6 @@
 , libffiReal
 , libxml2
 , libressl
-, sqlite
 , pinned
 , agent
 , kido
@@ -93,7 +92,6 @@ let
     [ "libffi" libffiReal.src "LICENSE" ]
     [ "libxml2" libxml2.src "Copyright" ]
     [ "libressl" libressl.src "COPYING" ]
-    [ "sqlite" sqlite.src "LICENSE.md" ]
     [ "go" go.src "LICENSE" ]
   ] ++ lib.concatLists (lib.mapAttrsToList (name: pkg:
     let pin = lib.importJSON (../darwin/third-party + "/${name}/source.json");

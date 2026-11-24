@@ -1,0 +1,26 @@
+# macOS's exports that no SDK header declares and that SQLite does not export
+__sqlite3_apple_archive
+__sqlite3_apple_archive_type
+__sqlite3_apple_unarchive
+__sqlite3_db_clone
+__sqlite3_db_copy
+__sqlite3_db_copy_compact
+__sqlite3_db_truncate
+__sqlite3_integrity_check
+__sqlite3_lockstate
+__sqlite3_maintain_load_factor
+__sqlite3_purgeEligiblePagerCacheMemory
+__sqlite3_system_busy_handler
+__sqlite_auto_profile
+__sqlite_auto_trace
+_sqlite3_activate_see
+_sqlite3_bind_blob_b
+_sqlite3_bind_text_b
+_sqlite3_carray_init
+_sqlite3_exec_b
+_sqlite3_key
+_sqlite3_key_v2
+_sqlite3_key_v3
+_sqlite3_rekey
+_sqlite3_rekey_v2
+_sqlite3_rekey_v3

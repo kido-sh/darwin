@@ -40,7 +40,7 @@ the release a directory came from and the other licenses its files carry.
 | `LICENSING.md`, `NOTICE`, `README.md`, `docs/**`, `scripts/**`, `test/**`, `flake.nix`, `flake.lock`, `.gitignore`, `.github/**` | `Apache-2.0` | kido |
 | `LICENSES/**` | | The license texts themselves |
 | `nix/**` | `BSD-2-Clause` | PureDarwin's Nix code as reorganized by kido. kido's new files carry an `Apache-2.0` SPDX line |
-| `nix/darwin/third-party/{curl,expat,libbz2-dylib,libedit,liblzma-dylib,libutil,ncurses-dylib,nghttp2}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, libexpat, liblzma, libapple_nghttp2, libutil and ncurses, their source pins, their export lists, taken from the macOS SDK's .tbd files, the ncurses ABI glue, libutil's functions and the libraries' tests |
+| `nix/darwin/third-party/{curl,expat,libbz2-dylib,libedit,liblzma-dylib,libutil,ncurses-dylib,nghttp2,sqlite}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, libexpat, liblzma, libapple_nghttp2, libsqlite3, libutil and ncurses, their source pins, their export lists, taken from the macOS SDK's .tbd files, the ncurses ABI glue, libutil's functions and the libraries' tests |
 | `nix/darwin/third-party/curl/*.patch` | `curl` | kido's change to curl 8.23.0's lib/vtls/openssl.c, under curl's license |
 | `nix/darwin/third-party/libressl/default.nix`, `nix/darwin/third-party/libressl/*.exports` | `Apache-2.0` | kido's recipe for macOS's LibreSSL and its export lists, read from the dyld shared cache of macOS 27.0.1 |
 | `nix/darwin/third-party/libressl/*.patch` | `OpenSSL` | LibreSSL's own fixes from its later releases, backported to 3.3.6, under the licenses of the files they change. Also `SSLeay-standalone` and `ISC` |
@@ -137,7 +137,7 @@ sources the recipes in nix/darwin/third-party pin by hash, and kido for its agen
 | Component | Version | License | Where |
 |---|---|---|---|
 | LibreSSL | 3.3.6 | `OpenSSL`, `SSLeay-standalone`, `ISC`, `BSD-3-Clause`, `LicenseRef-Public-Domain` | /usr/lib/libcrypto.46.dylib, libssl.48.dylib and libtls.20.dylib, /usr/bin/openssl, /usr/bin/ocspcheck, and /etc/ssl/openssl.cnf and x509v3.cnf |
-| SQLite | 3.51.2 | `blessing` | Linked into Security.framework |
+| SQLite | 3.54.1 | `blessing` | /usr/lib/libsqlite3.dylib, which Security.framework links |
 | zsh | 5.9.1 | `LicenseRef-zsh` | /bin/zsh. The GPL-2.0 completion functions are removed |
 | ncurses | 6.6 | `X11-distribute-modifications-variant` | /usr/lib/libncurses.5.4.dylib, libpanel.5.4, libmenu.5.4 and libform.5.4; the terminfo database in /usr/share/terminfo, compiled from its terminfo.src; and linked into zsh |
 | curl | 8.23.0 | `curl` | /usr/lib/libcurl.4.dylib |
