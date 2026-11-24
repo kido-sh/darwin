@@ -27,6 +27,7 @@ enum {
 };
 
 static const char kTagKey[] = "VirtioFSTag";
+static const uint64_t kMatchTimeoutNs = 1000 * 1000 * 1000;
 
 struct VirtioFSSlot {
     VRingDesc *table;
@@ -474,8 +475,7 @@ int
 VirtioFSDevice::startSession(struct virtiofs_session *session)
 {
     IOLockLock(fSessionLock);
-    int error = 0;
-    if (!fStarted) {
+    if (!fStarted && !fInitError) {
         struct fuse_init_in init = {};
         struct fuse_init_out reply = {};
         init.major = FUSE_KERNEL_VERSION;
@@ -488,10 +488,13 @@ VirtioFSDevice::startSession(struct virtiofs_session *session)
         c.arglen[0] = sizeof(init);
         c.reply = &reply;
         c.replylen = sizeof(reply);
-        error = call(&c, 0, 0, 0);
+        int error = call(&c, 0, 0, 0);
         if (!error && (reply.major != FUSE_KERNEL_VERSION || c.replylen < FUSE_COMPAT_22_INIT_OUT_SIZE))
             error = EPROTONOSUPPORT;
-        if (!error) {
+        if (error) {
+            fInitError = error;
+            IOLog("VirtioFS: FUSE_INIT failed with error %d\n", error);
+        } else {
             uint32_t io = reply.max_write < reply.max_readahead ? reply.max_write : reply.max_readahead;
             fSession.max_io = io > kMaxIO ? kMaxIO : (io < kMinIO ? kMinIO : io & ~(kMinIO - 1));
             fSession.flags = reply.flags;
@@ -500,6 +503,7 @@ VirtioFSDevice::startSession(struct virtiofs_session *session)
                   fSession.max_io);
         }
     }
+    int error = fInitError;
     if (!error)
         *session = fSession;
     IOLockUnlock(fSessionLock);
@@ -515,7 +519,7 @@ VirtioFSDevice::copyDevice(const char *tag)
     VirtioFSDevice *dev = NULL;
 
     if (match && key && value && propertyMatching(key, value, match)) {
-        IOService *service = copyMatchingService(match);
+        IOService *service = waitForMatchingService(match, kMatchTimeoutNs);
         dev = OSDynamicCast(VirtioFSDevice, service);
         if (!dev)
             OSSafeReleaseNULL(service);

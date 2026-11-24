@@ -58,6 +58,7 @@ private:
     bool fDead;
     bool fStarted;
     bool fLostInterrupt;
+    int fInitError;
     struct virtiofs_session fSession;
     uint64_t fUnique;
 };
