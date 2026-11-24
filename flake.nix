@@ -10,9 +10,8 @@
   outputs = { self, nixpkgs, kido }:
     let
       system = "aarch64-linux";
-      toolchain = import ./nix/toolchain {
-        basePkgs = import nixpkgs { inherit system; };
-      };
+      basePkgs = import nixpkgs { inherit system; };
+      toolchain = import ./nix/toolchain { inherit basePkgs; };
       darwin = import ./nix/darwin { inherit toolchain; };
       image = import ./nix/image {
         inherit toolchain darwin kido;
@@ -22,6 +21,8 @@
       };
     in
     {
+      checks.${system}.virtiofs-fuzz = basePkgs.callPackage ./nix/checks/virtiofs-fuzz.nix { };
+
       packages.${system} = {
         default = image.image;
         inherit (image) image oci disk rootfs kc loader agent;

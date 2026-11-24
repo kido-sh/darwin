@@ -4,6 +4,7 @@ set_property(TARGET VirtioFS.kext PROPERTY OUTPUT_NAME VirtioFS)
 
 target_sources(VirtioFS.kext PRIVATE
     VirtioFSDevice.cpp
+    fuse_proto.c
 )
 
 target_include_directories(VirtioFS.kext PRIVATE
