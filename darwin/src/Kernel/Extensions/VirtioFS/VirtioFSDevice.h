@@ -34,6 +34,7 @@ private:
     bool setupInterrupt();
     void interruptOccurred(IOInterruptEventSource *source, int count);
     void drainLocked(unsigned q);
+    void failLocked(bool broken);
     void pauseLocked(void *event);
     VirtioFSSlot *takeSlotLocked();
     void putSlotLocked(VirtioFSSlot *slot);

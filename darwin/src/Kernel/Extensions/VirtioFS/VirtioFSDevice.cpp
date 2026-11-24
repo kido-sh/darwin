@@ -91,13 +91,7 @@ VirtioFSDevice::stop(IOService *provider)
         OSSafeReleaseNULL(fInterruptSource);
     }
     IOLockLock(fLock);
-    fDead = true;
-    fTransport.detach();
-    for (unsigned i = 0; i < fSlotCount; i++)
-        IOLockWakeup(fLock, &fSlots[i], false);
-    IOLockWakeup(fLock, &fFreeSlots, false);
-    IOLockWakeup(fLock, &fQueues[kHiprio], false);
-    IOLockWakeup(fLock, &fQueues[kRequests], false);
+    failLocked(false);
     IOLockUnlock(fLock);
     fPCIDevice->close(this);
     super::stop(provider);
@@ -133,7 +127,8 @@ VirtioFSDevice::setupQueues()
     static const uint16_t sizes[kQueues] = { 64, 256 };
 
     for (unsigned q = 0; q < kQueues; q++) {
-        if (!fTransport.initQueue(&fQueues[q], (uint16_t)q, sizes[q]))
+        if (!fTransport.initQueue(&fQueues[q], (uint16_t)q, sizes[q]) ||
+            (q == kRequests && fQueues[q].queueSize < kMaxSegments))
             return false;
         fTransport.enableFreeList(&fQueues[q]);
         fInFlight[q] = (VirtioFSSlot **)IOMallocZero(sizeof(VirtioFSSlot *) * fQueues[q].queueSize);
@@ -218,10 +213,17 @@ VirtioFSDevice::drainLocked(unsigned q)
 
     if (fDead)
         return;
-    while (fTransport.pollForCompletion(vq, 0, &used, &head)) {
-        if (head >= vq->queueSize || !fInFlight[q][head])
-            continue;
-        VirtioFSSlot *slot = fInFlight[q][head];
+    uint16_t pending = (uint16_t)(((volatile VRingUsedHdr *)vq->used)->idx - vq->lastUsedIdx);
+    if (pending > vq->queueSize - vq->numFree) {
+        failLocked(true);
+        return;
+    }
+    while (pending-- && fTransport.pollForCompletion(vq, 0, &used, &head)) {
+        VirtioFSSlot *slot = head < vq->queueSize ? fInFlight[q][head] : NULL;
+        if (!slot) {
+            failLocked(true);
+            return;
+        }
         fInFlight[q][head] = NULL;
         fTransport.freeDescChain(vq, head);
         freed = true;
@@ -235,6 +237,22 @@ VirtioFSDevice::drainLocked(unsigned q)
     }
     if (freed)
         IOLockWakeup(fLock, vq, false);
+}
+
+void
+VirtioFSDevice::failLocked(bool broken)
+{
+    if (fDead)
+        return;
+    if (broken)
+        IOLog("VirtioFS: the device completed a request it was not given, failing it\n");
+    fDead = true;
+    fTransport.detach();
+    for (unsigned i = 0; i < fSlotCount; i++)
+        IOLockWakeup(fLock, &fSlots[i], false);
+    IOLockWakeup(fLock, &fFreeSlots, false);
+    IOLockWakeup(fLock, &fQueues[kHiprio], false);
+    IOLockWakeup(fLock, &fQueues[kRequests], false);
 }
 
 void
