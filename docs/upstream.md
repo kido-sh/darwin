@@ -109,6 +109,10 @@ In this repository:
   defines it by hand. <ptrauth.h> has the names of Apple's arm64e ABI that Darwin's sources use.
   libSystem exports Libc's getbsize and strtonum and macOS's typed allocation calls, which Apple's ls
   and grep import. The tests are in test/arm64e, test/syslibs and test/libsystem.
+- The end of the physical aperture on VIRT (arm_vm_init.c): with ARM_LARGE_MEMORY and no PPL,
+  physmap_end and the L1 entries the aperture takes below the kernel's address range leave room
+  for the block alignment of its segments, as XNU without ARM_LARGE_MEMORY does, so copies through
+  the last pages of RAM no longer panic in copy_validate_kernel_addr; the test is in test/kernel.
 - An APSL header on Ext4FileSystemDriver.cpp, which is derived from Apple's AppleFileSystemDriver.
 - The Nix code reorganized under nix/ and the tree pruned to what the container builds.
 - The licensing files and the change notices.
