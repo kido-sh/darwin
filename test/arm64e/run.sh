@@ -57,13 +57,13 @@ for arch in arm64e arm64; do
 done
 run /var/root/t_daemons
 if [[ -n $llvm ]]; then
-  "$kido" exec arm64e-test /bin/mkdir -p /var/root/llvm || rc=1
+  timed "$kido" exec arm64e-test /bin/mkdir -p /var/root/llvm || rc=1
   for arch in arm64e arm64; do
     "$kido" cp "$llvm/t_pac-$arch" arm64e-test:/var/root/llvm/ || rc=1
     run /var/root/llvm/t_pac-$arch
   done
 fi
-"$kido" exec arm64e-test /bin/mkdir -p /var/root/mac || rc=1
+timed "$kido" exec arm64e-test /bin/mkdir -p /var/root/mac || rc=1
 for tool in /bin/ls /usr/bin/grep; do
   "$kido" cp "$tool" arm64e-test:/var/root/mac/ || rc=1
 done

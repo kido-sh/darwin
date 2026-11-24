@@ -5,14 +5,28 @@
 # usage: test/libsystem/run.sh IMAGE_DIR
 # Builds the tests with Xcode's clang against the macOS SDK, the ABI real macOS tools use, and runs
 # them in a container of IMAGE_DIR with kido (KIDO, default kido on PATH; KIDO_BACKEND and KIDO_QEMU
-# as for kido's test/e2e.sh). Uses a throwaway KIDO_HOME.
+# as for kido's test/e2e.sh). Each command in the container fails after TIMEOUT seconds (default 120).
+# Uses a throwaway KIDO_HOME.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 img=$1
 kido=${KIDO:-kido}
+limit=${TIMEOUT:-120}
 work=$(mktemp -d "${TMPDIR:-/tmp}/kido-libsystem.XXXX")
 trap 'rm -rf "$work"' EXIT
 export KIDO_HOME=$work/home
+timed() {
+  "$@" &
+  local pid=$!
+  (trap 'kill $s 2>/dev/null; exit 0' TERM; sleep "$limit" & s=$!; wait $s; kill "$pid") >/dev/null 2>&1 &
+  local watchdog=$!
+  wait "$pid"
+  local rc=$?
+  kill "$watchdog" 2>/dev/null
+  wait "$watchdog"
+  [[ $rc == 143 ]] && echo "FAIL timeout after ${limit}s: $*"
+  return $rc
+}
 tests="t_math t_ucontext t_libc t_oslog t_keychain t_malloc"
 for t in $tests; do
   extra=
@@ -27,11 +41,11 @@ done
 trap '"$kido" rm -f libsystem-test >/dev/null 2>&1; rm -rf "$work"' EXIT
 rc=0
 for t in $tests; do
-  "$kido" cp "$work/$t" libsystem-test:/var/root/ && "$kido" exec libsystem-test /var/root/$t || rc=1
+  "$kido" cp "$work/$t" libsystem-test:/var/root/ && timed "$kido" exec libsystem-test /var/root/$t || rc=1
 done
-"$kido" exec libsystem-test /var/root/t_oslog rotate || rc=1
+timed "$kido" exec libsystem-test /var/root/t_oslog rotate || rc=1
 sleep 2
-if "$kido" exec libsystem-test /bin/sh -c \
+if timed "$kido" exec libsystem-test /bin/sh -c \
   'test -f /var/log/system.log.1 && test $(wc -c < /var/log/system.log.1) -le 2097152 && test $(wc -c < /var/log/system.log) -le 2097152'; then
   echo "logd: system.log rotated, both files within 2 MiB"
 else

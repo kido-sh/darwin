@@ -13,15 +13,28 @@
 # AES-encrypted PKCS#12 file, and macOS's libcurl names a second TLS backend and cannot be limited to
 # TLS 1.3, which curl 8.21 over LibreSSL can. vectors.txt holds known answers made by macOS's
 # Security. PORT (default 18453) is the first of the four local ports the servers are published on.
-# Uses a throwaway KIDO_HOME.
+# Each command in the container fails after TIMEOUT seconds (default 120). Uses a throwaway KIDO_HOME.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 img=$1
 kido=${KIDO:-kido}
 port=${PORT:-18453}
+limit=${TIMEOUT:-120}
 work=$(mktemp -d "${TMPDIR:-/tmp}/kido-security.XXXX")
 trap 'rm -rf "$work"' EXIT
 export KIDO_HOME=$work/home
+timed() {
+  "$@" &
+  local pid=$!
+  (trap 'kill $s 2>/dev/null; exit 0' TERM; sleep "$limit" & s=$!; wait $s; kill "$pid") >/dev/null 2>&1 &
+  local watchdog=$!
+  wait "$pid"
+  local rc=$?
+  kill "$watchdog" 2>/dev/null
+  wait "$watchdog"
+  [[ $rc == 143 ]] && echo "FAIL timeout after ${limit}s: $*"
+  return $rc
+}
 exports=$here/../../nix/darwin/third-party/libressl
 {
   printf -- "--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\ninstall-name: '/usr/lib/libcrypto.46.dylib'\n"
@@ -43,20 +56,21 @@ cp "$here/security.sh" "$here/vectors.txt" "$work/bin/"
   -p 127.0.0.1:$((port + 2)):8455 -p 127.0.0.1:$((port + 3)):8456 security-test >/dev/null || exit 1
 trap '"$kido" rm -f security-test >/dev/null 2>&1; rm -rf "$work"' EXIT
 g=/var/root/security
-"$kido" exec security-test /bin/mkdir -p $g || exit 1
+timed "$kido" exec security-test /bin/mkdir -p $g || exit 1
 for f in "$work"/bin/*; do
   "$kido" cp "$f" security-test:$g/ || exit 1
 done
-"$kido" exec security-test /bin/sh $g/security.sh setup $g/pki || exit 1
-"$kido" exec -d security-test /bin/sh $g/security.sh serve $g/pki || exit 1
-"$kido" exec security-test /bin/sh $g/security.sh ready || exit 1
+timed "$kido" exec security-test /bin/sh $g/security.sh setup $g/pki || exit 1
+timed "$kido" exec -d security-test /bin/sh $g/security.sh serve $g/pki || exit 1
+timed "$kido" exec security-test /bin/sh $g/security.sh ready || exit 1
 rc=0
-"$kido" exec security-test /bin/sh $g/security.sh check $g || rc=1
+timed "$kido" exec security-test /bin/sh $g/security.sh check $g || rc=1
 "$kido" cp security-test:$g/pki "$work/pki" || exit 1
 "$work/bin/t_seckey" check "$work/pki/guest.vec" | sed 's/^/macOS on the guest'"'"'s keys: /' || rc=1
 "$work/bin/t_seckey" gen > "$work/mac.vec" && "$kido" cp "$work/mac.vec" security-test:$g/mac.vec || exit 1
-"$kido" exec security-test $g/t_seckey check $g/mac.vec | sed 's/^/the guest on macOS'"'"'s keys: /' || rc=1
-"$kido" exec security-test /bin/sh $g/security.sh compare $g $g/pki 8453 8454 8455 8456 > "$work/guest.txt" || rc=1
+timed "$kido" exec security-test $g/t_seckey check $g/mac.vec | sed 's/^/the guest on macOS'"'"'s keys: /' || rc=1
+timed "$kido" exec security-test /bin/sh $g/security.sh compare $g $g/pki 8453 8454 8455 8456 > "$work/guest.txt" ||
+  rc=1
 sh "$here/security.sh" compare "$work/bin" "$work/pki" $port $((port + 1)) $((port + 2)) $((port + 3)) \
   > "$work/mac.txt" || rc=1
 cat "$work/guest.txt"
