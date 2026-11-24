@@ -9,7 +9,7 @@
 , llvmSrc
 , llvmVersion
 , targetTriple ? "arm64-apple-darwin20.4"
-, targetArch ? "arm64"
+, targetArchs ? [ "arm64" "arm64e" ]
 , toolchainTriple ? targetTriple
 , appleSdk
 }:
@@ -39,16 +39,17 @@ stdenv.mkDerivation {
     ln -s "${darwinCrossToolchain}/bin/${targetTriple}-lipo" toolshim/lipo
     export PATH="$PWD/toolshim:$PATH"
 
-    commonFlags="-isysroot $DARWIN_SDK_ROOT -mmacosx-version-min=26.5 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -arch ${targetArch}"
+    for arch in ${lib.concatStringsSep " " targetArchs}; do
+    commonFlags="-isysroot $DARWIN_SDK_ROOT -mmacosx-version-min=26.5 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -arch $arch"
 
     # PureDarwin exports the builtins from libSystem (they are named in
     # libSystem.exports), and -exported_symbols_list cannot promote a hidden
     # symbol. So force hidden off via DCOMPILER_RT_HAS_VISIBILITY_HIDDEN_FLAG.
     # libSystem must see it to export it.
 
-    cmake -B build -G Ninja compiler-rt/lib/builtins \
+    cmake -B build-$arch -G Ninja compiler-rt/lib/builtins \
       -DCMAKE_SYSTEM_NAME=Darwin \
-      -DCMAKE_SYSTEM_PROCESSOR=${targetArch} \
+      -DCMAKE_SYSTEM_PROCESSOR=$arch \
       -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
       -DCMAKE_C_COMPILER=${darwinCrossToolchain}/bin/${toolchainTriple}-clang \
       -DCMAKE_C_COMPILER_TARGET=${targetTriple} \
@@ -63,10 +64,10 @@ stdenv.mkDerivation {
       -DCMAKE_ASM_FLAGS="$commonFlags" \
       -DCMAKE_CXX_FLAGS="$commonFlags" \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=$out \
+      -DCMAKE_INSTALL_PREFIX=$PWD/install-$arch \
       -DDARWIN_osx_SYSROOT="$DARWIN_SDK_ROOT" \
-      -DDARWIN_osx_ARCHS=${targetArch} \
-      -DDARWIN_osx_BUILTIN_ARCHS=${targetArch} \
+      -DDARWIN_osx_ARCHS=$arch \
+      -DDARWIN_osx_BUILTIN_ARCHS=$arch \
       -DCOMPILER_RT_ENABLE_MACCATALYST=OFF \
       -DCOMPILER_RT_HAS_VISIBILITY_HIDDEN_FLAG=OFF \
       -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
@@ -83,35 +84,40 @@ stdenv.mkDerivation {
       -DCOMPILER_RT_ENABLE_TVOS=OFF \
       -DCOMPILER_RT_INCLUDE_TESTS=OFF \
       -DLLVM_ENABLE_ASSERTIONS=OFF
+    done
 
     runHook postConfigure
   '';
 
   buildPhase = ''
     runHook preBuild
-    ninja -C build
+    for arch in ${lib.concatStringsSep " " targetArchs}; do
+      ninja -C build-$arch
+    done
     runHook postBuild
   '';
 
   installPhase = ''
     runHook preInstall
-    ninja -C build install
-
     # Darwin names the builtins archive after the platform (libclang_rt.osx.a),
     # not "builtins" as the generic layout does. Accept either and expose a
     # stable libcompiler_rt.a, so consumers do not have to know which.
     # libclang_rt.cc_kext.a is deliberately not used: it is the kext-safe
     # subset, and nothing here links kexts against compiler-rt.
     mkdir -p $out/lib
-    found=$(find $out -name 'libclang_rt.osx.a' -o -name 'libclang_rt.builtins*.a' | head -1)
-    if [ -z "$found" ]; then
-      echo "compiler-rt: no builtins archive was produced" >&2
-      find $out -name '*.a' >&2
-      exit 1
-    fi
-    cp "$found" $out/lib/libcompiler_rt.a
-    echo "compiler-rt: staged $found as libcompiler_rt.a"
-    ${nativeMesonTools}/bin/otool -h "$found" || true
+    archives=""
+    for arch in ${lib.concatStringsSep " " targetArchs}; do
+      ninja -C build-$arch install
+      found=$(find install-$arch -name 'libclang_rt.osx.a' -o -name 'libclang_rt.builtins*.a' | head -1)
+      if [ -z "$found" ]; then
+        echo "compiler-rt: no $arch builtins archive was produced" >&2
+        exit 1
+      fi
+      ${darwinCrossToolchain}/bin/${targetTriple}-lipo -thin $arch -output thin-$arch.a "$found"
+      archives="$archives thin-$arch.a"
+    done
+    ${darwinCrossToolchain}/bin/${targetTriple}-lipo -create $archives -output $out/lib/libcompiler_rt.a
+    ${darwinCrossToolchain}/bin/${targetTriple}-lipo -info $out/lib/libcompiler_rt.a
 
     runHook postInstall
   '';
@@ -119,7 +125,7 @@ stdenv.mkDerivation {
   dontFixup = true;
 
   meta = with lib; {
-    description = "LLVM compiler-rt builtins cross-built for PureDarwin (${targetTriple})";
+    description = "LLVM compiler-rt builtins cross-built for PureDarwin (${lib.concatStringsSep ", " targetArchs})";
     platforms = platforms.unix;
   };
 }
