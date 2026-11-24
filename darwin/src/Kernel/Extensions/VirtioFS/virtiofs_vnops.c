@@ -182,21 +182,46 @@ node_size(struct virtiofs_node *np)
     return size;
 }
 
-static void
-node_rename(vnode_t vp, vnode_t dvp, struct componentname *cnp)
+static bool
+is_ancestor(vnode_t vp, vnode_t dvp)
 {
+    vnode_t p = dvp;
+    bool found = false;
+
+    for (int depth = 0; p != NULLVP && !found && depth < 4096; depth++) {
+        found = p == vp;
+        vnode_t next = found || vnode_isvroot(p) ? NULLVP : vnode_getparent(p);
+        if (p != dvp)
+            vnode_put(p);
+        p = next;
+    }
+    if (p != NULLVP && p != dvp)
+        vnode_put(p);
+    return found;
+}
+
+static int
+node_place(vnode_t vp, vnode_t dvp, struct componentname *cnp)
+{
+    if (vp == dvp)
+        return EIO;
+
     vnode_t parent = vnode_getparent(vp);
     const char *name = vnode_getname(vp);
     bool same = parent == dvp && name && strnlen(name, cnp->cn_namelen + 1) == (size_t)cnp->cn_namelen &&
                 strncmp(name, cnp->cn_nameptr, cnp->cn_namelen) == 0;
+    bool loop = !same && parent != dvp && vnode_isdir(vp) && is_ancestor(vp, dvp);
 
     if (name)
         vnode_putname(name);
     if (parent)
         vnode_put(parent);
+    if (loop)
+        return EIO;
     if (!same)
         vnode_update_identity(vp, dvp, cnp->cn_nameptr, cnp->cn_namelen, cnp->cn_hash,
                               VNODE_UPDATE_PARENT | VNODE_UPDATE_NAME);
+    return 0;
 }
 
 static void
@@ -210,17 +235,19 @@ static int
 node_found(struct virtiofs_node *np, vnode_t vp, const struct fuse_entry_out *entry, uint64_t version,
            uint64_t nlookup, vnode_t dvp, struct componentname *cnp)
 {
-    if (vnode_vtype(vp) != IFTOVT(entry->attr.mode)) {
+    int error = vnode_vtype(vp) == IFTOVT(entry->attr.mode) ? 0 : EIO;
+
+    if (!error && dvp && cnp)
+        error = node_place(vp, dvp, cnp);
+    if (error) {
         vnode_put(vp);
         forget(np->vmp, entry->nodeid, nlookup);
-        return EIO;
+        return error;
     }
     IOLockLock(np->vmp->lock);
     np->nlookup += nlookup;
     IOLockUnlock(np->vmp->lock);
     node_apply(np, &entry->attr, entry->attr_valid, entry->attr_valid_nsec, version);
-    if (dvp && cnp && vp != dvp)
-        node_rename(vp, dvp, cnp);
     return 0;
 }
 
