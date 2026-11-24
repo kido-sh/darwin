@@ -40,7 +40,7 @@ the release a directory came from and the other licenses its files carry.
 | `LICENSING.md`, `NOTICE`, `README.md`, `docs/**`, `scripts/**`, `test/**`, `flake.nix`, `flake.lock`, `.gitignore`, `.github/**` | `Apache-2.0` | kido |
 | `LICENSES/**` | | The license texts themselves |
 | `nix/**` | `BSD-2-Clause` | PureDarwin's Nix code as reorganized by kido. kido's new files carry an `Apache-2.0` SPDX line |
-| `nix/darwin/third-party/{curl,libbz2-dylib,libedit,liblzma-dylib,libutil,ncurses-dylib,nghttp2}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, liblzma, libapple_nghttp2, libutil and ncurses, their source pins, their export lists, taken from the macOS SDK's .tbd files, the ncurses ABI glue, libutil's functions and the libraries' tests |
+| `nix/darwin/third-party/{curl,expat,libbz2-dylib,libedit,liblzma-dylib,libutil,ncurses-dylib,nghttp2}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, libexpat, liblzma, libapple_nghttp2, libutil and ncurses, their source pins, their export lists, taken from the macOS SDK's .tbd files, the ncurses ABI glue, libutil's functions and the libraries' tests |
 | `nix/darwin/third-party/curl/*.patch` | `curl` | kido's change to curl 8.23.0's lib/vtls/openssl.c, under curl's license |
 | `nix/darwin/third-party/libressl/default.nix`, `nix/darwin/third-party/libressl/*.exports` | `Apache-2.0` | kido's recipe for macOS's LibreSSL and its export lists, read from the dyld shared cache of macOS 27.0.1 |
 | `nix/darwin/third-party/libressl/*.patch` | `OpenSSL` | LibreSSL's own fixes from its later releases, backported to 3.3.6, under the licenses of the files they change. Also `SSLeay-standalone` and `ISC` |
@@ -142,6 +142,7 @@ sources the recipes in nix/darwin/third-party pin by hash, and kido for its agen
 | ncurses | 6.6 | `X11-distribute-modifications-variant` | /usr/lib/libncurses.5.4.dylib, libpanel.5.4, libmenu.5.4 and libform.5.4; the terminfo database in /usr/share/terminfo, compiled from its terminfo.src; and linked into zsh |
 | curl | 8.23.0 | `curl` | /usr/lib/libcurl.4.dylib |
 | nghttp2 | 1.71.0 | `MIT` | /usr/lib/libapple_nghttp2.dylib |
+| Expat | 2.11.0 | `MIT` | /usr/lib/libexpat.1.dylib |
 | libedit | 20251016-3.1 | `BSD-3-Clause`, `BSD-2-Clause` | /usr/lib/libedit.3.dylib |
 | GNU libiconv | 1.19 | `LGPL-2.1-or-later` | /usr/lib/libiconv.2.dylib, libcharset.1.dylib. The GPL-3.0 iconv program is not installed |
 | ICU | 76.1 | `LicenseRef-ICU` | /usr/lib/libicucore.A.dylib and the libicu* libraries |

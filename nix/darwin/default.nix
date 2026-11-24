@@ -227,6 +227,7 @@ let
     arch = "arm64e";
   };
   libutilArm64eBuild = mkArm64Build ./third-party/libutil { arch = "arm64e"; };
+  expatArm64eBuild = mkArm64Build ./third-party/expat { arch = "arm64e"; };
   nghttp2Arm64eBuild = mkArm64Build ./third-party/nghttp2 { arch = "arm64e"; };
   arm64eTestsBuild = mkArm64Build ../../test/arm64e { };
   coreServicesArm64Build = mkArm64Build ./apple/coreservices.nix {
@@ -521,6 +522,7 @@ in
     certificatesBundleBuild
     coreServicesArm64Build
     curlArm64Build
+    expatArm64eBuild
     kernelArm64VirtBuild
     kextsArm64Build
     libeditArm64Build

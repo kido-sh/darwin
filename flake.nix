@@ -29,6 +29,7 @@
         kexts = darwin.kextsArm64Build;
         arm64e-tests = darwin.arm64eTestsBuild;
         curl = darwin.curlArm64Build;
+        expat = darwin.expatArm64eBuild;
         nghttp2 = darwin.nghttp2Arm64eBuild;
       };
     };

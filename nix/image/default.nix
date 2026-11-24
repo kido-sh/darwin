@@ -9,6 +9,7 @@ let
     certificatesBundleBuild
     coreServicesArm64Build
     curlArm64Build
+    expatArm64eBuild
     kernelArm64VirtBuild
     kextsArm64Build
     libeditArm64Build
@@ -33,6 +34,7 @@ let
     libressl = libresslArm64eBuild;
     pinned = {
       curl = curlArm64Build;
+      expat = expatArm64eBuild;
       nghttp2 = nghttp2Arm64eBuild;
     };
   };
@@ -82,7 +84,7 @@ let
       securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build
       libzDylibArm64Build libbz2DylibArm64eBuild liblzmaDylibArm64eBuild libutilArm64eBuild
       ncursesDylibArm64Build libeditArm64Build curlArm64Build
-      nghttp2Arm64eBuild
+      nghttp2Arm64eBuild expatArm64eBuild
       certificatesBundleBuild containerLaunchdSettings
       agent.root
       libresslArm64eBuild
