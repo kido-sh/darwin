@@ -1,0 +1,4 @@
+# The symbols the macOS 27.0 SDK's libmapper_646.tbd exports
+# install name /usr/lib/i18n/libmapper_646.dylib, current version 1.0, compatibility version 1.0
+__citrus_mapper_646_mapper_getops
+__citrus_mapper_646_mapper_ops

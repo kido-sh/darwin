@@ -1,0 +1,4 @@
+# The symbols the macOS 27.0 SDK's libUTF8.tbd exports
+# install name /usr/lib/i18n/libUTF8.dylib, current version 1.0, compatibility version 1.0
+__citrus_UTF8_stdenc_getops
+__citrus_UTF8_stdenc_ops

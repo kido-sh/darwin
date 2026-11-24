@@ -4,7 +4,6 @@
 , lib
 , go
 , unzip
-, libiconvReal
 , zsh
 , ncurses
 , libedit
@@ -80,7 +79,6 @@ let
   };
   # component, then its source archive and the license file at the archive's top level
   fromSource = [
-    [ "libiconv" libiconvReal.src "COPYING.LIB" ]
     [ "zsh" zsh.src "LICENCE" ]
     [ "ncurses" ncurses.src "COPYING" ]
     [ "libedit" libedit.src "COPYING" ]

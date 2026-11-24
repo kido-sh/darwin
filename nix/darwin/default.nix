@@ -230,6 +230,7 @@ let
   expatArm64eBuild = mkArm64Build ./third-party/expat { arch = "arm64e"; };
   sqliteDylibArm64eBuild = mkArm64Build ./third-party/sqlite { arch = "arm64e"; };
   nghttp2Arm64eBuild = mkArm64Build ./third-party/nghttp2 { arch = "arm64e"; };
+  iconvArm64eBuild = mkArm64Build ./third-party/libiconv { arch = "arm64e"; };
   arm64eTestsBuild = mkArm64Build ../../test/arm64e { };
   coreServicesArm64Build = mkArm64Build ./apple/coreservices.nix {
     src = coreServicesSource;
@@ -386,7 +387,6 @@ let
   libxml2Arm64Build = mkArm64Build ./third-party/libxml2.nix {
     inherit (pkgs) libxml2 meson ninja python3 git;
   };
-  libiconvArm64Build = mkArm64Build ./third-party/libiconv.nix { libiconvReal = pkgs.libiconvReal; };
   ncursesArm64Build = mkArm64Build ./third-party/ncurses.nix { ncurses = pkgs.ncurses; };
   ncursesDylibArm64Build = mkArm64Build ./third-party/ncurses-dylib { ncurses = pkgs.ncurses; arch = "arm64e"; };
   libeditArm64Build = mkArm64Build ./third-party/libedit {
@@ -396,7 +396,7 @@ let
   zshArm64Build = mkArm64Build ./third-party/zsh.nix {
     zsh = pkgs.zsh;
     ncurses = ncursesArm64Build;
-    libiconv = libiconvArm64Build;
+    libiconv = iconvArm64eBuild;
   };
   userlandArm64Build = mkPureDarwinBuild {
     pname = "kido-userland";
@@ -512,11 +512,11 @@ in
     coreServicesArm64Build
     curlArm64Build
     expatArm64eBuild
+    iconvArm64eBuild
     kernelArm64VirtBuild
     kextsArm64Build
     libeditArm64Build
     libresslArm64eBuild
-    libiconvArm64Build
     libSystemArm64Build
     libSystemXpcArm64Build
     libobjcArm64Build

@@ -1,0 +1,4 @@
+# The symbols the macOS 27.0 SDK's libVIQR.tbd exports
+# install name /usr/lib/i18n/libVIQR.dylib, current version 1.0, compatibility version 1.0
+__citrus_VIQR_stdenc_getops
+__citrus_VIQR_stdenc_ops

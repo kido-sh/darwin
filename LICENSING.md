@@ -40,7 +40,7 @@ the release a directory came from and the other licenses its files carry.
 | `LICENSING.md`, `NOTICE`, `README.md`, `docs/**`, `scripts/**`, `test/**`, `flake.nix`, `flake.lock`, `.gitignore`, `.github/**` | `Apache-2.0` | kido |
 | `LICENSES/**` | | The license texts themselves |
 | `nix/**` | `BSD-2-Clause` | PureDarwin's Nix code as reorganized by kido. kido's new files carry an `Apache-2.0` SPDX line |
-| `nix/darwin/third-party/{curl,expat,libbz2-dylib,libedit,liblzma-dylib,libutil,ncurses-dylib,nghttp2,sqlite}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, libexpat, liblzma, libapple_nghttp2, libsqlite3, libutil and ncurses, their source pins, their export lists, taken from the macOS SDK's .tbd files, the ncurses ABI glue, libutil's functions and the libraries' tests |
+| `nix/darwin/third-party/{curl,expat,libbz2-dylib,libedit,libiconv,liblzma-dylib,libutil,ncurses-dylib,nghttp2,sqlite}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, libexpat, libiconv, liblzma, libapple_nghttp2, libsqlite3, libutil and ncurses, their source pins, their export lists, taken from the macOS SDK's .tbd files, the ncurses ABI glue, libutil's functions and the libraries' tests |
 | `nix/darwin/third-party/curl/*.patch` | `curl` | kido's change to curl 8.23.0's lib/vtls/openssl.c, under curl's license |
 | `nix/darwin/third-party/libressl/default.nix`, `nix/darwin/third-party/libressl/*.exports` | `Apache-2.0` | kido's recipe for macOS's LibreSSL and its export lists, read from the dyld shared cache of macOS 27.0.1 |
 | `nix/darwin/third-party/libressl/*.patch` | `OpenSSL` | LibreSSL's own fixes from its later releases, backported to 3.3.6, under the licenses of the files they change. Also `SSLeay-standalone` and `ISC` |
@@ -106,7 +106,7 @@ Source means this repository; binaries means a built image or any file from one.
 | `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, `Apache-2.0 WITH Swift-exception` | Keep the notices and a copy of the license. Changed files carry a notice saying so | Give a copy of the license and the attributions in NOTICE. The LLVM and Swift exceptions waive this only for their code that compiling other code embeds in a binary, such as inline header code and compiler-rt builtins |
 | `MPL-2.0`, `MPL-1.1` | Keep the notices. MPL 1.1 also wants a file describing our changes and their dates: docs/upstream.md | Make the source available and tell recipients where it is |
 | `CDDL-1.0` | Keep the notices; changed files name who changed them | Make the source available and tell recipients where it is |
-| `LGPL-2.1-or-later` | Keep the notices; changed files carry a notice | libiconv: give the license text and the source, including the recipe's change to it (nix/darwin/third-party/libiconv.nix), and keep it a shared library users can replace |
+| `LGPL-2.1-or-later` | Nothing: no source here is under it | gnu-efi's inc/subst/elf.h in the EFI loader, as the `LGPL-3.0-or-later` row says |
 | `GPL-1.0-or-later`, `GPL-2.0-or-later`, `LGPL-2.1-only` | Keep the notices; changed files carry a notice and the date | None: these are build-only tools that do not ship |
 | `GPL-2.0-or-later WITH Bison-exception-2.2` | Keep the notices | None: the exception lets the Bison-generated parsers ship under their surrounding license |
 | `BSD-4-Clause`, `BSD-4-Clause-UC`, `OpenSSL`, `SSLeay-standalone` | Keep the notices | Reproduce the notices, and print the acknowledgements in NOTICE wherever the software is advertised. The University of California withdrew its advertising clause in 1999 |
@@ -144,7 +144,7 @@ sources the recipes in nix/darwin/third-party pin by hash, and kido for its agen
 | nghttp2 | 1.71.0 | `MIT` | /usr/lib/libapple_nghttp2.dylib |
 | Expat | 2.11.0 | `MIT` | /usr/lib/libexpat.1.dylib |
 | libedit | 20251016-3.1 | `BSD-3-Clause`, `BSD-2-Clause` | /usr/lib/libedit.3.dylib |
-| GNU libiconv | 1.19 | `LGPL-2.1-or-later` | /usr/lib/libiconv.2.dylib, libcharset.1.dylib. The GPL-3.0 iconv program is not installed |
+| Apple's libiconv, the Citrus iconv of FreeBSD and NetBSD | libiconv-115.120.2 | `BSD-2-Clause`, `BSD-3-Clause`, `BSD-2-Clause-FreeBSD`, `APSL-2.0` | /usr/lib/libiconv.2.dylib, libcharset.1.dylib, the converters in /usr/lib/i18n, /usr/bin/iconv, and the tables in /usr/share/i18n, which also carry the notices of Unicode, Inc.'s and Apple's mapping data that NOTICE reproduces |
 | ICU | 76.1 | `LicenseRef-ICU` | /usr/lib/libicucore.A.dylib and the libicu* libraries |
 | zlib | 1.3.2 | `Zlib` | /usr/lib/libz.1.dylib, and linked into toybox |
 | bzip2 | 1.0.8 | `bzip2-1.0.6` | /usr/lib/libbz2.1.0.dylib |
@@ -178,7 +178,8 @@ These were in the PureDarwin tree and are not in this repository:
   Imagination's binary-only firmware, PDBcm2835SD, IOGraphicsFamily with its GMetric and GTrace
   sources, the FreeBSD NIC ports, the Wi-Fi drivers, and the fbsdkpi layer with Be Incorporated's
   PCI.h, which carries no grant.
-- zsh's GPL-2.0 completion functions and libiconv's GPL-3.0 iconv program, left out of the image.
+- zsh's GPL-2.0 completion functions, left out of the image, and GNU libiconv, which macOS's own
+  iconv from Apple's libiconv replaced.
 
 ## corecrypto
 

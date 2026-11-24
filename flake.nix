@@ -30,6 +30,7 @@
         arm64e-tests = darwin.arm64eTestsBuild;
         curl = darwin.curlArm64Build;
         expat = darwin.expatArm64eBuild;
+        libiconv = darwin.iconvArm64eBuild;
         nghttp2 = darwin.nghttp2Arm64eBuild;
         sqlite = darwin.sqliteDylibArm64eBuild;
       };

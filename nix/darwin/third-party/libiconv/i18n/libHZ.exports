@@ -1,0 +1,4 @@
+# The symbols the macOS 27.0 SDK's libHZ.tbd exports
+# install name /usr/lib/i18n/libHZ.dylib, current version 1.0, compatibility version 1.0
+__citrus_HZ_stdenc_getops
+__citrus_HZ_stdenc_ops

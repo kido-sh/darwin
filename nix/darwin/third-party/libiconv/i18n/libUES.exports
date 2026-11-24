@@ -1,0 +1,4 @@
+# The symbols the macOS 27.0 SDK's libUES.tbd exports
+# install name /usr/lib/i18n/libUES.dylib, current version 1.0, compatibility version 1.0
+__citrus_UES_stdenc_getops
+__citrus_UES_stdenc_ops

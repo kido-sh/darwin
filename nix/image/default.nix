@@ -10,10 +10,10 @@ let
     coreServicesArm64Build
     curlArm64Build
     expatArm64eBuild
+    iconvArm64eBuild
     kernelArm64VirtBuild
     kextsArm64Build
     libeditArm64Build
-    libiconvArm64Build
     libresslArm64eBuild
     libzDylibArm64Build
     libbz2DylibArm64eBuild
@@ -36,6 +36,7 @@ let
     pinned = {
       curl = curlArm64Build;
       expat = expatArm64eBuild;
+      libiconv = iconvArm64eBuild;
       nghttp2 = nghttp2Arm64eBuild;
       sqlite = sqliteDylibArm64eBuild;
     };
@@ -82,7 +83,7 @@ let
   rootfs = pkgs.callPackage ./rootfs.nix {
     baseSystem = containerBaseSystemArm64;
     extraPackages = [
-      zshArm64Build libiconvArm64Build toyboxArm64Build
+      zshArm64Build iconvArm64eBuild toyboxArm64Build
       securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build
       libzDylibArm64Build libbz2DylibArm64eBuild liblzmaDylibArm64eBuild libutilArm64eBuild
       ncursesDylibArm64Build libeditArm64Build curlArm64Build
