@@ -113,6 +113,10 @@ In this repository:
   physmap_end and the L1 entries the aperture takes below the kernel's address range leave room
   for the block alignment of its segments, as XNU without ARM_LARGE_MEMORY does, so copies through
   the last pages of RAM no longer panic in copy_validate_kernel_addr; the test is in test/kernel.
+- The whole panic log on VIRT's console (pe_init.c): without a panic region in the device tree,
+  the panic log goes to a buffer in the kernel, so a panic prints its backtrace, the kexts in it
+  and the loaded kexts. Then a virtual machine powers off instead of resetting
+  (PDArmPlatformExpert), which stops it under VZ as well as QEMU; tested in test/kernel.
 - An APSL header on Ext4FileSystemDriver.cpp, which is derived from Apple's AppleFileSystemDriver.
 - The Nix code reorganized under nix/ and the tree pruned to what the container builds.
 - The licensing files and the change notices.
