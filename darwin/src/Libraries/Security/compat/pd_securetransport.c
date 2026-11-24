@@ -214,6 +214,39 @@ static int verifyPeer(X509_STORE_CTX *store, void *argument)
     return trusted ? 1 : 0;
 }
 
+static const struct {
+    int alert;
+    OSStatus status;
+} alertStatuses[] = {
+    { SSL_AD_UNEXPECTED_MESSAGE, errSSLPeerUnexpectedMsg }, { SSL_AD_BAD_RECORD_MAC, errSSLPeerBadRecordMac },
+    { SSL_AD_DECRYPTION_FAILED, errSSLPeerDecryptionFail }, { SSL_AD_RECORD_OVERFLOW, errSSLPeerRecordOverflow },
+    { SSL_AD_DECOMPRESSION_FAILURE, errSSLPeerDecompressFail }, { SSL_AD_HANDSHAKE_FAILURE, errSSLPeerHandshakeFail },
+    { SSL_AD_BAD_CERTIFICATE, errSSLPeerBadCert }, { SSL_AD_UNSUPPORTED_CERTIFICATE, errSSLPeerUnsupportedCert },
+    { SSL_AD_CERTIFICATE_REVOKED, errSSLPeerCertRevoked }, { SSL_AD_CERTIFICATE_EXPIRED, errSSLPeerCertExpired },
+    { SSL_AD_CERTIFICATE_UNKNOWN, errSSLPeerCertUnknown }, { SSL_AD_ILLEGAL_PARAMETER, errSSLIllegalParam },
+    { SSL_AD_UNKNOWN_CA, errSSLPeerUnknownCA }, { SSL_AD_ACCESS_DENIED, errSSLPeerAccessDenied },
+    { SSL_AD_DECODE_ERROR, errSSLPeerDecodeError }, { SSL_AD_DECRYPT_ERROR, errSSLPeerDecryptError },
+    { SSL_AD_EXPORT_RESTRICTION, errSSLPeerExportRestriction }, { SSL_AD_PROTOCOL_VERSION, errSSLPeerProtocolVersion },
+    { SSL_AD_INSUFFICIENT_SECURITY, errSSLPeerInsufficientSecurity }, { SSL_AD_INTERNAL_ERROR, errSSLPeerInternalError },
+    { SSL_AD_USER_CANCELLED, errSSLPeerUserCancelled }, { SSL_AD_NO_RENEGOTIATION, errSSLPeerNoRenegotiation },
+};
+
+static OSStatus failureStatus(SSLContextRef context)
+{
+    unsigned long error;
+    int alert = -1;
+
+    while ((error = ERR_get_error()) != 0)
+        if (ERR_GET_LIB(error) == ERR_LIB_SSL && ERR_GET_REASON(error) > SSL_AD_REASON_OFFSET)
+            alert = ERR_GET_REASON(error) - SSL_AD_REASON_OFFSET;
+    if (context->trustFailed)
+        return errSSLXCertChainInvalid;
+    for (size_t i = 0; i < sizeof(alertStatuses) / sizeof(alertStatuses[0]); i++)
+        if (alertStatuses[i].alert == alert)
+            return alertStatuses[i].status;
+    return errSSLProtocol;
+}
+
 static OSStatus statusFor(SSLContextRef context, int result)
 {
     switch (SSL_get_error(context->ssl, result)) {
@@ -228,8 +261,7 @@ static OSStatus statusFor(SSLContextRef context, int result)
         return context->ioError ? context->ioError : errSSLClosedNoNotify;
     default:
         context->state = kSSLAborted;
-        ERR_clear_error();
-        return context->trustFailed ? errSSLXCertChainInvalid : errSSLProtocol;
+        return failureStatus(context);
     }
 }
 
