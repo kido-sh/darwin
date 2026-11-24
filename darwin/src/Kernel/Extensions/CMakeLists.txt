@@ -17,6 +17,7 @@ add_subdirectory(IOStorageFamily)
 add_subdirectory(IOVirtIOFamily)
 add_subdirectory(IOVirtIONet)
 add_subdirectory(IOVirtIOBlock)
+add_subdirectory(VirtioFS)
 add_subdirectory(IONetworkingFamily)
 add_subdirectory(corecrypto)
 add_subdirectory(ext4)
@@ -26,7 +27,7 @@ add_subdirectory(Ext4FileSystemDriver)
 add_custom_target(kexts)
 add_dependencies(kexts
     PDArmPlatformExpert PDArmPCI PDEcamPCI IOPCIFamily ApplePIODMA IOStorageFamily
-    IOVirtIOFamily.kext IOVirtIONet.kext IOVirtIOBlock.kext IONetworkingFamily.kext
+    IOVirtIOFamily.kext IOVirtIONet.kext IOVirtIOBlock.kext VirtioFS.kext IONetworkingFamily.kext
     corecrypto.kext ext4.kext AppleFileSystemDriver.kext Ext4FileSystemDriver.kext
 )
 

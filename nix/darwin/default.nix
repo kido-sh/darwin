@@ -454,7 +454,7 @@ let
     src = kextsOnlySource;
     buildTargets = [
       "PDArmPlatformExpert" "PDArmPCI" "PDEcamPCI" "IOPCIFamily" "IOStorageFamily"
-      "IOVirtIOFamily.kext" "IOVirtIONet.kext" "IOVirtIOBlock.kext" "IONetworkingFamily.kext"
+      "IOVirtIOFamily.kext" "IOVirtIONet.kext" "IOVirtIOBlock.kext" "VirtioFS.kext" "IONetworkingFamily.kext"
       "corecrypto.kext" "ext4.kext" "AppleFileSystemDriver.kext" "Ext4FileSystemDriver.kext"
       "pthread.kext" "amfi.kext" "Sandbox.kext" "PDWatchdog.kext" "PDDiskImages2.kext"
       "PDLifs.kext" "PDKeyStore.kext"
@@ -465,7 +465,7 @@ let
     installKexts = true;
     installKextNames = [
       "PDArmPlatformExpert.kext" "PDArmPCI.kext" "PDEcamPCI.kext" "IOPCIFamily.kext"
-      "IOStorageFamily.kext" "IOVirtIOFamily.kext" "IOVirtIONet.kext" "IOVirtIOBlock.kext"
+      "IOStorageFamily.kext" "IOVirtIOFamily.kext" "IOVirtIONet.kext" "IOVirtIOBlock.kext" "VirtioFS.kext"
       "IONetworkingFamily.kext" "corecrypto.kext" "ext4.kext" "AppleFileSystemDriver.kext"
       "Ext4FileSystemDriver.kext" "pthread.kext" "amfi.kext" "Sandbox.kext" "PDWatchdog.kext"
       "PDDiskImages2.kext" "PDLifs.kext" "PDKeyStore.kext"

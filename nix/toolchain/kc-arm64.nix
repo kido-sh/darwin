@@ -25,6 +25,7 @@ let
     "IONetworkingFamily"
     "IOVirtIOBlock"
     "IOVirtIONet"
+    "VirtioFS"
     "PDWatchdog"
     "PDDiskImages2"
     "PDLifs"
