@@ -12,7 +12,7 @@ of Apple's releases each component was compared with. The per-file list of chang
 | darwin/external/corecrypto | NeoDarwin's corecrypto (https://github.com/NeoDarwinOS/corecrypto) through PureDarwin's interim fork https://github.com/Vali0004/corecrypto | f577aafe4b9a89727968666237d20cc51d2f770d |
 | loader/ | xnu-loader, https://github.com/PureDarwin/xnu-loader | 2e0ccce2bd88eec1194e78eaeb46a91601478555 (2026-10-19), then 2 kido commits on https://github.com/cocoa-xu/xnu-loader, branch darwin-container, at 170dc0e68c172aeeb90f95f1d172109cb11da93c; the subset the arm64 Image and the EFI app build |
 | kc-tools/, iig-tools/ | https://github.com/PureDarwin/kc-tools and https://github.com/PureDarwin/iig-tools | 05e5ed6a42533cfc4330559484e74b6dedeae51e and 28010c688caab7eb5400b9c98faa5b1e538e0108 |
-| Third-party packages | nixpkgs, pinned in flake.lock | Listed in LICENSING.md |
+| Third-party packages | nixpkgs, pinned in flake.lock, and the sources the recipes in nix/darwin/third-party pin by hash | Listed in LICENSING.md |
 
 Most of PureDarwin's tree is Apple's open-source code; "Releases compared" below names the release
 of each component.
@@ -40,7 +40,8 @@ under nix/. corecrypto comes from the pinned fork commit.
 - **GUI, graphics, audio, USB and Xorg**, the GUI and Wi-Fi libraries, libapfsrw.
 - **Test suites and their data**, among them 151 MiB of MallocBench traces.
 - **From the image**: headers, static libraries, configd, ipconfig, the kernel and kext copies,
-  zsh's GPL-2.0 completion functions and run-help, and libiconv's GPL-3.0 iconv program.
+  and zsh's GPL-2.0 completion functions and run-help. GNU libiconv is gone as well, replaced by
+  macOS's own iconv.
 
 ## kido's changes
 
@@ -127,6 +128,20 @@ In this repository:
   cipher list and error codes, as macOS's does. The tests are in test/ssl and test/security, which
   also runs its programs against macOS's own frameworks and compares the results. The build
   host's xar, inside ld64 and otool, links nixpkgs' LibreSSL as well.
+- More of macOS's libraries in /usr/lib, each with macOS's install name, versions and exports and each
+  pinned in its own directory under nix/darwin/third-party with the hash of its source, its export
+  lists, its tests and a flake output. scripts/tbd-exports.py writes the export lists from the macOS
+  SDK, and scripts/bump-lib.sh moves a library to a new release. libexpat.1 is Expat 2.11.0.
+  libsqlite3 is SQLite 3.54.1 with macOS's compile options, and Security.framework links it as
+  macOS's does. libapple_nghttp2 is nghttp2 1.71.0, and libcurl, now curl 8.23.0, links it for
+  HTTP/2 as macOS's does. macOS's iconv replaces GNU libiconv: Apple's libiconv-115.120.2, the Citrus
+  iconv of FreeBSD and NetBSD, with libcharset, the converters in /usr/lib/i18n, the tables in
+  /usr/share/i18n and /usr/bin/iconv. libutil is now Apple's libutil-73. A few of macOS's exports
+  are Apple's own additions, which Apple does not publish, and the recipes leave them out by name.
+  Security.framework also exports SecCertificateCopyPublicKey_ios, SecCertificateCopySerialNumber_ios
+  and the two-argument SecCertificateCopyPublicKey and SecCertificateCopySerialNumber of macOS
+  under their $LEGACYMAC names. The tests are in the libraries' directories, test/syslibs and
+  test/security, and run their programs against macOS's own libraries too.
 - An APSL header on Ext4FileSystemDriver.cpp, which is derived from Apple's AppleFileSystemDriver.
 - The Nix code reorganized under nix/ and the tree pruned to what the container builds.
 - The licensing files and the change notices.

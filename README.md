@@ -18,7 +18,8 @@ Darwin kido 25.5.0 Darwin Kernel Version 25.5.0: Mon Nov 23 13:26:52 UTC 2026; n
 - XNU from Apple's open-source release for macOS 26.5, with the drivers a virtual machine needs.
 - launchd, dyld and libSystem.
 - A small set of Unix tools (toybox and a few BSD tools), zsh as `/bin/sh`, and vi.
-- libcurl, libedit and ncurses with its terminfo database, as macOS has them in `/usr/lib`.
+- libcurl with HTTP/2, libexpat, libsqlite3, libedit, ncurses with its terminfo database, and macOS's
+  own iconv with its conversion tables, as macOS has them in `/usr/lib`.
 - LibreSSL's libcrypto, libssl and libtls with the `openssl` and `ocspcheck` tools, as macOS has them.
 - kido's guest agent, which runs the commands that kido sends.
 - The licenses of all of the above, in `/usr/share/doc/kido`.
