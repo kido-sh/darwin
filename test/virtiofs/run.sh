@@ -50,6 +50,9 @@ prints() {
   shift
   [[ "$("$@" 2>&1)" == "$want" ]]
 }
+owned_by() {
+  [[ $(guest /tmp/t_virtiofs as "$1" "$2" /mnt/data /mnt/data/private /mnt/data/private/f | grep -c " uid=$1 gid=$2 ") == 3 ]]
+}
 host_fds() {
   lsof -p "$vm" 2>/dev/null | awk '$5 == "REG" || $5 == "DIR"' | grep -c "$share" || true
 }
@@ -57,7 +60,9 @@ host_fds() {
 xcrun clang -arch arm64 -mmacosx-version-min=15.0 -O2 -o "$work/t_virtiofs" "$here/t_virtiofs.c" || exit 1
 
 share=$work/share
-mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,links} "$work/empty" "$work/locked"
+mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,links,private} "$work/empty" "$work/locked"
+printf 'mine\n' > "$share/private/f"
+chmod 700 "$share/private"
 : > "$share/small/0"
 for n in 1 4095 4096 4097 16383 16384 16385 131071 131072 131073 1048583; do
   head -c $n /dev/urandom > "$share/small/$n"
@@ -108,6 +113,9 @@ check "mount kido:locked" guest /sbin/mount -t virtiofs -o ro kido:locked /mnt/l
 check "a file the host cannot read cannot be opened" fails guest /bin/cat /mnt/locked/noaccess
 check "unmount kido:locked" guest /sbin/umount /mnt/locked
 check "errors of a read-only mount" guest /tmp/t_virtiofs errors /mnt/data kido:data
+guest /tmp/t_virtiofs as 0 0 /mnt/data /mnt/data/private/f >/dev/null
+check "another user is shown as the owner right after root looked" owned_by 501 20
+check "root is shown as the owner right after another user looked" owned_by 0 0
 check "a program runs from the share" guest /mnt/data/exec tree /mnt/data/deep
 check "concurrent reads" guest /tmp/t_virtiofs stress /mnt/data 16 2
 

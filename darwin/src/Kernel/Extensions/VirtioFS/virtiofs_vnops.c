@@ -8,6 +8,7 @@
 #include <sys/dirent.h>
 #include <sys/errno.h>
 #include <sys/fcntl.h>
+#include <sys/kauth.h>
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/syslimits.h>
@@ -431,6 +432,7 @@ virtiofs_vnop_getattr(struct vnop_getattr_args *ap)
     vnode_t vp = ap->a_vp;
     struct vnode_attr *vap = ap->a_vap;
     struct virtiofs_node *np = VTON(vp);
+    kauth_cred_t cred = vfs_context_ucred(ap->a_context);
     struct fuse_attr attr;
 
     int error = node_attr(np, ap->a_context, &attr);
@@ -443,8 +445,8 @@ virtiofs_vnop_getattr(struct vnop_getattr_args *ap)
     VATTR_RETURN(vap, va_data_alloc, attr.blocks * 512);
     VATTR_RETURN(vap, va_total_alloc, attr.blocks * 512);
     VATTR_RETURN(vap, va_iosize, np->vmp->session.max_io);
-    VATTR_RETURN(vap, va_uid, attr.uid);
-    VATTR_RETURN(vap, va_gid, attr.gid);
+    VATTR_RETURN(vap, va_uid, kauth_cred_getuid(cred));
+    VATTR_RETURN(vap, va_gid, kauth_cred_getgid(cred));
     VATTR_RETURN(vap, va_mode, (mode_t)(attr.mode & ALLPERMS));
     VATTR_RETURN(vap, va_flags, 0);
     VATTR_RETURN(vap, va_fileid, attr.ino);

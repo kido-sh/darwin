@@ -451,6 +451,21 @@ inodes(const char *dir, int limit)
 }
 
 static int
+as_user(uid_t uid, gid_t gid, char **paths)
+{
+    struct stat st;
+    if (setgid(gid) != 0 || setuid(uid) != 0)
+        return 1;
+    for (char **p = paths; *p; p++) {
+        if (lstat(*p, &st) != 0)
+            printf("%s lstat=%s\n", *p, strerror(errno));
+        else
+            printf("%s uid=%u gid=%u mode=%04o\n", *p, st.st_uid, st.st_gid, st.st_mode & 07777);
+    }
+    return 0;
+}
+
+static int
 lookups(int times, char **paths)
 {
     struct stat st;
@@ -555,6 +570,8 @@ main(int argc, char **argv)
         return pread_race(argv[2], atoi(argv[3]), atof(argv[4]));
     if (argc == 4 && !strcmp(argv[1], "inodes"))
         return inodes(argv[2], atoi(argv[3]));
+    if (argc >= 5 && !strcmp(argv[1], "as"))
+        return as_user((uid_t)atoi(argv[2]), (gid_t)atoi(argv[3]), argv + 4);
     if (argc >= 4 && !strcmp(argv[1], "lookups"))
         return lookups(atoi(argv[2]), argv + 3);
     fprintf(stderr, "usage: t_virtiofs tree DIR | errors MNT SPEC | stress DIR THREADS ROUNDS | bench FILE |"
