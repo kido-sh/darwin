@@ -17,7 +17,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "../libsystem/check.h"
+#include "check.h"
 
 #define HN_DECIMAL 0x01
 #define HN_NOSPACE 0x02
