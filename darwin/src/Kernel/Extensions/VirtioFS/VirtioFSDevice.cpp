@@ -459,8 +459,8 @@ static int
 buildRequest(const struct virtiofs_call *c, VirtioFSRequest *r)
 {
     bool out = (c->flags & VIRTIOFS_DATA_OUT) != 0;
-    uint32_t args = c->arglen[0] + c->arglen[1];
-    if (args < c->arglen[0] || args > kInBytes - sizeof(struct fuse_in_header) ||
+    uint64_t args = (uint64_t)c->arglen[0] + c->arglen[1] + c->arglen[2];
+    if (args > kInBytes - sizeof(struct fuse_in_header) ||
         c->replylen > kOutBytes - sizeof(struct fuse_out_header) || c->datalen > kMaxIO)
         return EINVAL;
 
@@ -509,7 +509,7 @@ VirtioFSSlot *
 VirtioFSDevice::startLocked(struct virtiofs_call *c, VirtioFSRequest *r, uint32_t uid, uint32_t gid, uint32_t pid,
                             bool async, virtiofs_done_t done, void *arg)
 {
-    uint32_t inLen = (uint32_t)sizeof(struct fuse_in_header) + c->arglen[0] + c->arglen[1];
+    uint32_t inLen = (uint32_t)sizeof(struct fuse_in_header) + c->arglen[0] + c->arglen[1] + c->arglen[2];
     uint32_t dataOut = (c->flags & VIRTIOFS_DATA_OUT) ? c->datalen : 0;
     VirtioFSSlot *slot = fillHeaderLocked(c->opcode, c->nodeid, inLen + dataOut);
     if (!slot)
@@ -519,10 +519,12 @@ VirtioFSDevice::startLocked(struct virtiofs_call *c, VirtioFSRequest *r, uint32_
     in->uid = uid;
     in->gid = gid;
     in->pid = pid;
-    if (c->arglen[0])
-        memcpy(in + 1, c->arg[0], c->arglen[0]);
-    if (c->arglen[1])
-        memcpy((uint8_t *)(in + 1) + c->arglen[0], c->arg[1], c->arglen[1]);
+    uint8_t *at = (uint8_t *)(in + 1);
+    for (unsigned i = 0; i < 3; i++) {
+        if (c->arglen[i])
+            memcpy(at, c->arg[i], c->arglen[i]);
+        at += c->arglen[i];
+    }
     r->chain[0] = { slot->inPhys, inLen, false, false };
     r->chain[r->replyAt] = { slot->outPhys, (uint32_t)(sizeof(struct fuse_out_header) + c->replylen), true, false };
     if (async)

@@ -19,8 +19,8 @@ struct virtiofs_call {
     uint32_t opcode;
     uint32_t flags;
     uint64_t nodeid;
-    const void *arg[2];
-    uint32_t arglen[2];
+    const void *arg[3];
+    uint32_t arglen[3];
     void *reply;
     uint32_t replylen;
     uint32_t datalen;
