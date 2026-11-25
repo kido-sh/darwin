@@ -619,6 +619,20 @@ handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
     return error;
 }
 
+static bool
+handle_hold(struct virtiofs_node *np, uint64_t *fh)
+{
+    IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_OPENING);
+    bool open = np->flags & VN_OPEN;
+    if (open) {
+        np->users++;
+        *fh = np->fh;
+    }
+    IOLockUnlock(np->vmp->lock);
+    return open;
+}
+
 static int
 handle_check(struct virtiofs_node *np, vfs_context_t ctx)
 {
@@ -1500,12 +1514,17 @@ file_sync(vnode_t vp, vfs_context_t ctx)
     struct virtiofs_node *np = VTON(vp);
     uint64_t fh;
 
-    if (!vnode_isreg(vp) || vfs_isrdonly(vnode_mount(vp)))
+    if (vfs_isrdonly(vnode_mount(vp)) || !(vnode_isreg(vp) || vnode_isdir(vp)))
         return 0;
-    int error = push_dirty(vp);
-    if (!error && whandle_hold(np, &fh)) {
+    int error = vnode_isreg(vp) ? push_dirty(vp) : 0;
+    if (error || vnode_isrecycled(vp))
+        return error;
+    if (vnode_isreg(vp) && whandle_hold(np, &fh)) {
         error = write_sync(np, ctx, fh, FUSE_FSYNC);
         whandle_put(np);
+    } else if (handle_hold(np, &fh)) {
+        error = write_sync(np, ctx, fh, vnode_isdir(vp) ? FUSE_FSYNCDIR : FUSE_FSYNC);
+        handle_put(np);
     }
     return error;
 }
@@ -1836,13 +1855,13 @@ virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
         VATTR_SET_SUPPORTED(vap, va_gid);
     }
     if (VATTR_IS_ACTIVE(vap, va_access_time)) {
-        in.valid |= (vap->va_vaflags & VA_UTIMES_NULL) ? FATTR_ATIME_NOW : FATTR_ATIME;
+        in.valid |= FATTR_ATIME | ((vap->va_vaflags & VA_UTIMES_NULL) ? FATTR_ATIME_NOW : 0);
         in.atime = (uint64_t)vap->va_access_time.tv_sec;
         in.atimensec = (uint32_t)vap->va_access_time.tv_nsec;
         VATTR_SET_SUPPORTED(vap, va_access_time);
     }
     if (VATTR_IS_ACTIVE(vap, va_modify_time)) {
-        in.valid |= (vap->va_vaflags & VA_UTIMES_NULL) ? FATTR_MTIME_NOW : FATTR_MTIME;
+        in.valid |= FATTR_MTIME | ((vap->va_vaflags & VA_UTIMES_NULL) ? FATTR_MTIME_NOW : 0);
         in.mtime = (uint64_t)vap->va_modify_time.tv_sec;
         in.mtimensec = (uint32_t)vap->va_modify_time.tv_nsec;
         VATTR_SET_SUPPORTED(vap, va_modify_time);
@@ -2161,7 +2180,7 @@ xattr_get(vnode_t vp, vfs_context_t ctx, uint32_t opcode, const char *name, uio_
     char *buf = NULL;
 
     if (uio && uio_offset(uio) != 0)
-        return ENOTSUP;
+        return EINVAL;
     if (room) {
         if (!(buf = IOMalloc(room)))
             return ENOMEM;
@@ -2178,6 +2197,8 @@ xattr_get(vnode_t vp, vfs_context_t ctx, uint32_t opcode, const char *name, uio_
         error = EIO;
     if (!error && room)
         error = uiomove(buf, (int)c.datalen, uio);
+    if (!error && !room && uio && out.size)
+        error = ERANGE;
     if (!error && !room && size)
         *size = out.size;
     if (buf)
@@ -2214,7 +2235,7 @@ virtiofs_vnop_setxattr(struct vnop_setxattr_args *ap)
     if (vfs_isrdonly(vnode_mount(vp)))
         return EROFS;
     if (uio_offset(uio) != 0)
-        return ENOTSUP;
+        return EINVAL;
     if (uio_resid(uio) > (user_ssize_t)np->vmp->session.max_io)
         return E2BIG;
     char *buf = len ? IOMalloc(len) : NULL;
