@@ -39,7 +39,7 @@ private:
     void failLocked(bool broken);
     void pauseLocked(void *event);
     void spinLocked(VirtioFSSlot *slot, uint32_t datalen);
-    void reap();
+    void unlockAndReap();
     VirtioFSSlot *takeSlotLocked();
     void putSlotLocked(VirtioFSSlot *slot);
     bool submitLocked(unsigned q, VirtioFSSlot *slot, const VirtIOChainEntry *chain, unsigned count);

@@ -103,8 +103,7 @@ VirtioFSDevice::stop(IOService *provider)
 {
     IOLockLock(fLock);
     failLocked(false);
-    IOLockUnlock(fLock);
-    reap();
+    unlockAndReap();
     fWorkLoop->removeEventSource(fInterruptSource);
     OSSafeReleaseNULL(fInterruptSource);
     fTransport.detach();
@@ -218,8 +217,7 @@ VirtioFSDevice::interruptOccurred(IOInterruptEventSource *source, int)
     IOLockLock(fLock);
     drainLocked(kHiprio);
     drainLocked(kRequests);
-    IOLockUnlock(fLock);
-    reap();
+    unlockAndReap();
 }
 
 void
@@ -292,8 +290,7 @@ void
 VirtioFSDevice::pauseLocked(void *event)
 {
     if (fReaped) {
-        IOLockUnlock(fLock);
-        reap();
+        unlockAndReap();
         IOLockLock(fLock);
         return;
     }
@@ -326,8 +323,7 @@ VirtioFSDevice::spinLocked(VirtioFSSlot *slot, uint32_t datalen)
     limit += mach_absolute_time();
     bool ready = true;
     while (ready && !slot->replied && !fDead) {
-        IOLockUnlock(fLock);
-        reap();
+        unlockAndReap();
         while (!(ready = used->idx != __atomic_load_n(&vq->lastUsedIdx, __ATOMIC_RELAXED)) &&
                !__atomic_load_n(&slot->replied, __ATOMIC_RELAXED) && mach_absolute_time() < limit)
             __builtin_arm_yield();
@@ -555,9 +551,8 @@ VirtioFSDevice::call(struct virtiofs_call *c, uint32_t uid, uint32_t gid, uint32
             putSlotLocked(slot);
         }
     }
-    IOLockUnlock(fLock);
+    unlockAndReap();
     finishData(r.data, c, error);
-    reap();
     return error;
 }
 
@@ -570,19 +565,17 @@ VirtioFSDevice::submit(struct virtiofs_call *c, virtiofs_done_t done, void *arg)
         IOLockLock(fLock);
         if (!startLocked(c, &r, 0, 0, 0, true, done, arg))
             error = EIO;
-        IOLockUnlock(fLock);
+        unlockAndReap();
         if (error)
             finishData(r.data, c, error);
     }
     if (error)
         done(arg, error);
-    reap();
 }
 
 void
-VirtioFSDevice::reap()
+VirtioFSDevice::unlockAndReap()
 {
-    IOLockLock(fLock);
     VirtioFSSlot *list = fReaped;
     fReaped = NULL;
     IOLockUnlock(fLock);
@@ -614,8 +607,7 @@ VirtioFSDevice::forget(uint64_t nodeid, uint64_t nlookup)
         if (!submitLocked(kHiprio, slot, &entry, 1))
             putSlotLocked(slot);
     }
-    IOLockUnlock(fLock);
-    reap();
+    unlockAndReap();
 }
 
 int
