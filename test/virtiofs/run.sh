@@ -228,6 +228,7 @@ forget_exact() {
 check "a file looked up 500 times is released once forgotten" forget_exact
 
 guest /sbin/mount -t virtiofs -o ro kido:data /mnt/data >/dev/null
+guest /tmp/t_virtiofs bench-random /mnt/data/big/32m 1000
 guest /tmp/t_virtiofs bench /mnt/data/big/64m
 guest /tmp/t_virtiofs bench-meta /mnt/data/many 3
 guest /sbin/umount /mnt/data

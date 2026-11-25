@@ -767,6 +767,39 @@ bench(const char *path)
     return 0;
 }
 
+static int
+bench_random(const char *path, int count)
+{
+    struct stat st;
+    int fd = open(path, O_RDONLY);
+    size_t page = (size_t)getpagesize();
+    void *buf = valloc(page);
+    if (count <= 0 || fd < 0 || fstat(fd, &st) != 0 || st.st_size < (off_t)page || !buf ||
+        fcntl(fd, F_NOCACHE, 1) != 0)
+        return 1;
+    size_t pages = (size_t)st.st_size / page;
+    unsigned seed = 1;
+    double t0 = now();
+    for (int i = 0; i < count; i++) {
+        seed = seed * 1103515245u + 12345u;
+        if (pread(fd, buf, page, (off_t)(seed % pages * page)) != (ssize_t)page)
+            return 1;
+    }
+    double direct = (now() - t0) / count * 1e6;
+    char *map = mmap(NULL, (size_t)st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED || madvise(map, (size_t)st.st_size, MADV_RANDOM) != 0)
+        return 1;
+    t0 = now();
+    for (int i = 0; i < count; i++) {
+        seed = seed * 1103515245u + 12345u;
+        (void)((volatile const char *)map)[seed % pages * page];
+    }
+    double touched = (now() - t0) / count * 1e6;
+    printf("%s: %.1f us per uncached %zu KiB read at a random offset, %.1f us per first touch of a random page\n",
+           path, direct, page >> 10, touched);
+    return 0;
+}
+
 static double
 lstat_round(const char *dir, char **names, size_t n)
 {
@@ -830,6 +863,8 @@ main(int argc, char **argv)
         return stress(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (argc == 3 && !strcmp(argv[1], "bench"))
         return bench(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "bench-random"))
+        return bench_random(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "bench-meta"))
         return bench_meta(argv[2], atoi(argv[3]));
     if (argc == 5 && !strcmp(argv[1], "pread-race"))
