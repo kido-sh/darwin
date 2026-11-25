@@ -250,13 +250,20 @@ IOVirtIOTransport::reset()
 }
 
 bool
-IOVirtIOTransport::detach()
+IOVirtIOTransport::quiesce()
 {
     bool quiet = !fCommonCfg || reset();
     if (!quiet)
         IOLog("IOVirtIOTransport: the device did not finish resetting\n");
     if (fPCIDevice)
         fPCIDevice->setBusMasterEnable(false);
+    return quiet;
+}
+
+bool
+IOVirtIOTransport::detach()
+{
+    bool quiet = quiesce();
 
     if (fCommonCfgMap) { fCommonCfgMap->release(); fCommonCfgMap = 0; }
     if (fNotifyCfgMap) { fNotifyCfgMap->release(); fNotifyCfgMap = 0; }

@@ -77,6 +77,7 @@ VirtioFSDevice::start(IOService *provider)
         return false;
     }
     fTransport.setDriverOk();
+    fInterruptSource->enable();
 
     setProperty(kTagKey, tag);
     registerService();
@@ -88,14 +89,12 @@ VirtioFSDevice::start(IOService *provider)
 void
 VirtioFSDevice::stop(IOService *provider)
 {
-    if (fInterruptSource) {
-        fInterruptSource->disable();
-        fWorkLoop->removeEventSource(fInterruptSource);
-        OSSafeReleaseNULL(fInterruptSource);
-    }
     IOLockLock(fLock);
     failLocked(false);
     IOLockUnlock(fLock);
+    fWorkLoop->removeEventSource(fInterruptSource);
+    OSSafeReleaseNULL(fInterruptSource);
+    fTransport.detach();
     fPCIDevice->close(this);
     super::stop(provider);
 }
@@ -191,7 +190,6 @@ VirtioFSDevice::setupInterrupt()
         OSSafeReleaseNULL(fInterruptSource);
         return false;
     }
-    fInterruptSource->enable();
     return true;
 }
 
@@ -250,7 +248,8 @@ VirtioFSDevice::failLocked(bool broken)
     if (broken)
         IOLog("VirtioFS: the device completed a request it was not given, failing it\n");
     fDead = true;
-    fQuiesced = fTransport.detach();
+    fInterruptSource->disable();
+    fQuiesced = fTransport.quiesce();
     for (unsigned i = 0; fQuiesced && i < fSlotCount; i++)
         IOLockWakeup(fLock, &fSlots[i], false);
     IOLockWakeup(fLock, &fFreeSlots, false);
