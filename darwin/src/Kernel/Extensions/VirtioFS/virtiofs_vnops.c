@@ -68,9 +68,6 @@ struct virtiofs_node {
     uint64_t attr_version;
     uint64_t parent;
     uint64_t entry_expire;
-    off_t push_limit;
-    off_t skip_from;
-    off_t skip_to;
     uint64_t name_version;
     char *name;
     uint32_t namelen;
@@ -78,8 +75,6 @@ struct virtiofs_node {
     struct fuse_attr attr;
     uint32_t users;
     uint32_t readers;
-    uint32_t pageouts[2];
-    uint32_t pageout_gen;
     uint32_t push_failures;
     uint32_t wusers;
     uint32_t wopens;
@@ -159,12 +154,6 @@ virtiofs_version(struct virtiofs_mount *vmp)
 }
 
 static off_t
-page_end(off_t offset)
-{
-    return offset > INT64_MAX - (off_t)PAGE_MASK ? INT64_MAX : (off_t)round_page_64(offset);
-}
-
-static off_t
 reader_begin(struct virtiofs_node *np)
 {
     IOLockLock(np->vmp->lock);
@@ -197,40 +186,98 @@ static int handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
 static void handle_put(struct virtiofs_node *np);
 static void file_idle(struct virtiofs_node *np);
 
-static void
-page_drop(struct virtiofs_node *np, off_t page, off_t stale[2][2])
+static int
+page_fill(struct virtiofs_node *np, upl_t upl, off_t page, off_t from, off_t to)
 {
-    vnode_t vp = np->vp;
-    upl_t upl = NULL;
-    upl_page_info_t *pl;
     uint64_t fh;
 
-    ubc_msync(vp, page, page + PAGE_SIZE, NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
-    if (ubc_page_op(vp, page, 0, NULL, NULL) != KERN_SUCCESS)
-        return;
-    bool held = handle_get(np, NULL, &fh) == 0;
-    int error = held ? 0 : EIO;
-    if (ubc_create_upl(vp, page, PAGE_SIZE, &upl, &pl, UPL_SET_LITE | UPL_WILL_MODIFY) != KERN_SUCCESS)
-        upl = NULL;
-    for (int i = 0; upl && !error && upl_valid_page(pl, 0) && i < 2; i++) {
-        off_t from = MAX(stale[i][0], page), to = MIN(stale[i][1], page + PAGE_SIZE);
-        struct fuse_read_in in = { .fh = fh, .offset = (uint64_t)from, .size = (uint32_t)(to - from) };
-        struct virtiofs_call c = {
-            .opcode = FUSE_READ, .flags = VIRTIOFS_ZERO_FILL, .nodeid = np->nodeid,
-            .arg = { &in }, .arglen = { sizeof(in) }, .datalen = (uint32_t)(to - from),
-            .upl = upl, .upl_offset = (uint32_t)(from - page),
-        };
+    if (from >= to)
+        return 0;
+    int error = handle_get(np, NULL, &fh);
+    if (error)
+        return error;
+    struct fuse_read_in in = { .fh = fh, .offset = (uint64_t)from, .size = (uint32_t)(to - from) };
+    struct virtiofs_call c = {
+        .opcode = FUSE_READ, .flags = VIRTIOFS_ZERO_FILL, .nodeid = np->nodeid,
+        .arg = { &in }, .arglen = { sizeof(in) }, .datalen = (uint32_t)(to - from),
+        .upl = upl, .upl_offset = (uint32_t)(from - page),
+    };
+    error = virtiofs_call(np->vmp, NULL, &c);
+    handle_put(np);
+    file_idle(np);
+    return error;
+}
+
+static void
+pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count, bool fresh)
+{
+    for (int i = 0; i < count; i++) {
+        upl_offset_t at = (upl_offset_t)i * PAGE_SIZE;
+        int state = 0;
+        bool wired = ubc_page_op(vp, first + at, 0, NULL, &state) == KERN_SUCCESS && !(state & UPL_POP_BUSY);
+        bool dirty = wired || upl_dirty_page(pl, i);
+        if (fresh && upl_valid_page(pl, i))
+            ubc_upl_commit_range(upl, at, PAGE_SIZE, UPL_COMMIT_FREE_ON_EMPTY | (dirty ? UPL_COMMIT_SET_DIRTY : 0));
+        else
+            ubc_upl_abort_range(upl, at, PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
+    }
+}
+
+static bool
+pages_fresh(struct virtiofs_node *np, upl_t upl, upl_page_info_t *pl, int count, off_t first, off_t at,
+            const char *buf, uint32_t written, uint32_t len, off_t old, off_t size)
+{
+    off_t reach = at + written, tail = old & ~(off_t)PAGE_MASK;
+    vm_offset_t addr = 0;
+    bool cached = false;
+    int error = 0;
+
+    for (int i = 0; i < count; i++)
+        cached |= upl_valid_page(pl, i);
+    if (!cached)
+        return true;
+    if (ubc_upl_map(upl, &addr) != KERN_SUCCESS)
+        return false;
+    for (int i = 0; i < count; i++) {
+        off_t page = first + (off_t)i * PAGE_SIZE, from = MAX(page, at), to = MIN(page + PAGE_SIZE, reach);
+        if (!upl_valid_page(pl, i))
+            continue;
+        if (page == tail && size > old)
+            memset((char *)addr + (old - first), 0, (size_t)(page + PAGE_SIZE - old));
         if (from < to)
-            error = virtiofs_call(np->vmp, NULL, &c);
+            memcpy((char *)addr + (from - first), buf + (from - at), (size_t)(to - from));
     }
-    if (upl)
-        ubc_upl_abort_range(upl, 0, PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
-    if (!upl || error)
-        ubc_msync(vp, page, page + PAGE_SIZE, NULL, UBC_INVALIDATE);
-    if (held) {
-        handle_put(np);
-        file_idle(np);
+    ubc_upl_unmap(upl);
+    for (int i = 0; i < count && !error; i++) {
+        off_t page = first + (off_t)i * PAGE_SIZE, to = MIN(MIN(page + PAGE_SIZE, at + (off_t)len), old);
+        if (upl_valid_page(pl, i))
+            error = page_fill(np, upl, first, MAX(page, reach), to);
     }
+    return !error;
+}
+
+static void
+size_grow(struct virtiofs_node *np, off_t old, off_t size, bool refresh)
+{
+    vnode_t vp = np->vp;
+    off_t page = old & ~(off_t)PAGE_MASK;
+    upl_t upl = NULL;
+    upl_page_info_t *pl = NULL;
+
+    bool tail = old & PAGE_MASK;
+    bool held = tail && ubc_create_upl(vp, page, PAGE_SIZE, &upl, &pl, UPL_SET_LITE | UPL_WILL_MODIFY) == KERN_SUCCESS;
+    off_t from = refresh && held && !upl_dirty_page(pl, 0) ? page : old;
+    int error = held && upl_valid_page(pl, 0) ? page_fill(np, upl, page, from, MIN(page + PAGE_SIZE, size)) : 0;
+    if (held && error)
+        pages_release(vp, upl, pl, page, 1, false);
+    if (tail && (!held || error))
+        ubc_msync(vp, page, page + PAGE_SIZE, NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+    IOLockLock(np->vmp->lock);
+    np->attr.size = (uint64_t)size;
+    IOLockUnlock(np->vmp->lock);
+    ubc_setsize(vp, size);
+    if (held && !error)
+        pages_release(vp, upl, pl, page, 1, true);
 }
 
 static bool
@@ -249,7 +296,6 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     off_t size = (off_t)attr->size, old = (off_t)np->attr.size;
     if (changed) {
         np->flags |= VN_SIZING;
-        np->push_limit = old;
         if (size != old)
             readers_wait_locked(np);
     }
@@ -259,26 +305,21 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         IOLockUnlock(vmp->lock);
         return false;
     }
-    np->push_limit = MIN(old, size);
     np->attr = *attr;
+    if (changed && size > old)
+        np->attr.size = (uint64_t)old;
     np->expire = deadline(sec, nsec);
     np->attr_version = ++vmp->version;
     IOLockUnlock(vmp->lock);
     if (!changed)
         return true;
 
-    if (size != ubc_getsize(vp))
+    if (size < ubc_getsize(vp))
         ubc_setsize(vp, size);
-    bool resident = ubc_pages_resident(vp);
-    if (resident && size > old && (old & PAGE_MASK)) {
-        off_t stale[2][2] = { { 0, 0 }, { old, size } };
-        page_drop(np, old & ~(off_t)PAGE_MASK, stale);
-    }
-    IOLockLock(vmp->lock);
-    np->push_limit = size;
-    IOLockUnlock(vmp->lock);
-    if (resident)
+    if (ubc_pages_resident(vp))
         ubc_msync(vp, 0, size > old ? old & ~(off_t)PAGE_MASK : size, NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+    if (size > old)
+        size_grow(np, old, size, true);
     IOLockLock(vmp->lock);
     wake(np, VN_SIZING);
     IOLockUnlock(vmp->lock);
@@ -325,9 +366,7 @@ static void
 node_resize_locked(struct virtiofs_node *np, off_t size)
 {
     np->flags |= VN_SIZING;
-    np->push_limit = (off_t)np->attr.size;
     readers_wait_locked(np);
-    np->push_limit = MIN((off_t)np->attr.size, size);
     np->attr.size = (uint64_t)size;
     np->attr_version = ++np->vmp->version;
     IOLockUnlock(np->vmp->lock);
@@ -386,55 +425,26 @@ node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
 }
 
 static void
-node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exact)
+node_sized(struct virtiofs_node *np, off_t size)
 {
     struct virtiofs_mount *vmp = np->vmp;
-    vnode_t vp = np->vp;
 
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
-    off_t old = (off_t)np->attr.size, from = MIN(at, old), stop = MIN(to, page_end(old));
-    bool resize = exact ? size != old : size > old, grow = resize && size > old;
+    off_t old = (off_t)np->attr.size;
     np->flags |= VN_SIZING;
-    np->push_limit = old;
-    np->skip_from = from;
-    np->skip_to = stop;
-    if (resize) {
+    if (size != old)
         readers_wait_locked(np);
-        np->push_limit = MIN(old, size);
+    if (size < old)
         np->attr.size = (uint64_t)size;
-    }
     np->attr_version = ++vmp->version;
     np->expire = 0;
     IOLockUnlock(vmp->lock);
-    if (grow)
-        ubc_setsize(vp, size);
-    bool resident = from < stop && ubc_pages_resident(vp);
-    off_t first = from & ~(off_t)PAGE_MASK, last = to & ~(off_t)PAGE_MASK;
-    bool head = resident && (from & PAGE_MASK) && first < old;
-    bool tail = resident && (to & PAGE_MASK) && to < old && !(head && last == first);
-    off_t stale[2][2] = { { from, to }, { grow ? old : 0, grow ? size : 0 } };
-    if (head)
-        page_drop(np, first, stale);
+    if (size > old)
+        size_grow(np, old, size, false);
+    else if (size < old)
+        ubc_setsize(np->vp, size);
     IOLockLock(vmp->lock);
-    if (head)
-        np->skip_from = MAX(np->skip_from, first + PAGE_SIZE);
-    if (grow)
-        np->push_limit = size;
-    IOLockUnlock(vmp->lock);
-    if (tail) {
-        page_drop(np, last, stale);
-        IOLockLock(vmp->lock);
-        np->skip_to = MIN(np->skip_to, last);
-        IOLockUnlock(vmp->lock);
-    }
-    off_t inner = head ? first + PAGE_SIZE : from, end = tail ? last : stop;
-    if (resident && inner < end)
-        ubc_msync(vp, inner, end, NULL, UBC_INVALIDATE);
-    if (resize && !grow)
-        ubc_setsize(vp, size);
-    IOLockLock(vmp->lock);
-    np->skip_from = np->skip_to = 0;
     wake(np, VN_SIZING | VN_TRUNCATING);
     IOLockUnlock(vmp->lock);
 }
@@ -461,36 +471,6 @@ node_size(struct virtiofs_node *np)
     off_t size = (off_t)np->attr.size;
     IOLockUnlock(np->vmp->lock);
     return size;
-}
-
-static void
-node_skip(struct virtiofs_node *np, off_t from, off_t to)
-{
-    IOLockLock(np->vmp->lock);
-    np->skip_from = from;
-    np->skip_to = to;
-    IOLockUnlock(np->vmp->lock);
-}
-
-static void
-pageout_done(struct virtiofs_node *np, uint32_t gen)
-{
-    IOLockLock(np->vmp->lock);
-    if (--np->pageouts[gen] == 0)
-        wake(np, 0);
-    IOLockUnlock(np->vmp->lock);
-}
-
-static void
-pageouts_drain(struct virtiofs_node *np)
-{
-    IOLockLock(np->vmp->lock);
-    uint32_t gen = np->pageout_gen++ & 1;
-    while (np->pageouts[gen]) {
-        np->flags |= VN_WANT;
-        IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
-    }
-    IOLockUnlock(np->vmp->lock);
 }
 
 static bool
@@ -1521,6 +1501,50 @@ write_batch(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, 
 }
 
 static int
+write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, const char *buf, uint32_t len,
+              uint32_t *written)
+{
+    struct virtiofs_mount *vmp = np->vmp;
+    vnode_t vp = np->vp;
+    upl_t upl = NULL;
+    upl_page_info_t *pl = NULL;
+    int flags = UPL_SET_LITE | UPL_WILL_MODIFY;
+
+    IOLockLock(vmp->lock);
+    wait_clear(np, VN_SIZING);
+    np->flags |= VN_SIZING;
+    readers_wait_locked(np);
+    off_t old = (off_t)np->attr.size;
+    IOLockUnlock(vmp->lock);
+    off_t first = MIN(at, old) & ~(off_t)PAGE_MASK;
+    off_t end = MIN((off_t)round_page_64(at + len), (off_t)round_page_64(old));
+    int count = first < end ? (int)((end - first) / PAGE_SIZE) : 0;
+    int error = 0;
+    if (count && ubc_create_upl(vp, first, (int)(end - first), &upl, &pl, flags) != KERN_SUCCESS)
+        error = ENOMEM;
+    *written = 0;
+    if (!error)
+        error = write_batch(np, ctx, fh, at, buf, len, written);
+    off_t size = *written ? MAX(old, at + *written) : old;
+    bool fresh = !upl || pages_fresh(np, upl, pl, count, first, at, buf, *written, len, old, size);
+    IOLockLock(vmp->lock);
+    np->attr.size = (uint64_t)size;
+    np->attr_version = ++vmp->version;
+    np->expire = 0;
+    IOLockUnlock(vmp->lock);
+    if (size > old)
+        ubc_setsize(vp, size);
+    if (upl)
+        pages_release(vp, upl, pl, first, count, fresh);
+    if (!fresh)
+        ubc_msync(vp, first, end, NULL, UBC_INVALIDATE);
+    IOLockLock(vmp->lock);
+    wake(np, VN_SIZING);
+    IOLockUnlock(vmp->lock);
+    return error;
+}
+
+static int
 virtiofs_vnop_write(struct vnop_write_args *ap)
 {
     vnode_t vp = ap->a_vp;
@@ -1555,24 +1579,17 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     off_t start = uio_offset(uio);
     if (!error && uio_resid(uio) > VIRTIOFS_SIZE_MAX - start)
         error = EFBIG;
-    if (!error)
-        error = push_range(vp, start, start + uio_resid(uio));
     uint32_t room = (uint32_t)MIN((user_ssize_t)np->vmp->session.max_io * WRITE_DEPTH, uio_resid(uio));
     char *buf = error ? NULL : IOMalloc(room);
     if (!error && !buf)
         error = ENOMEM;
-    off_t reach = start;
     while (!error && uio_resid(uio) > 0) {
         uint32_t len = (uint32_t)MIN((user_ssize_t)room, uio_resid(uio)), written = 0;
         user_ssize_t resid = uio_resid(uio);
         off_t at = uio_offset(uio);
         error = uiomove(buf, (int)len, uio);
-        if (!error) {
-            node_skip(np, start, at + len);
-            pageouts_drain(np);
-            reach = at + len;
-            error = write_batch(np, ctx, fh, at, buf, len, &written);
-        }
+        if (!error)
+            error = write_through(np, ctx, fh, at, buf, len, &written);
         if (error || written < len) {
             uio_setresid(uio, resid - written);
             uio_setoffset(uio, at + written);
@@ -1581,12 +1598,7 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     }
     if (buf)
         IOFree(buf, room);
-    off_t end = uio_offset(uio);
-    if (reach > start)
-        node_changed(np, start, reach, end > start ? end : 0, false);
-    else
-        node_skip(np, 0, 0);
-    if (end > start)
+    if (uio_offset(uio) > start)
         error = (ap->a_ioflag & IO_SYNC) ? write_sync(np, ctx, fh, FUSE_FSYNC) : 0;
     whandle_put(np);
     IOLockUnlock(np->wlock);
@@ -1669,7 +1681,6 @@ struct virtiofs_io {
     struct virtiofs_node *np;
     uint32_t pending;
     uint32_t chunks;
-    uint32_t gen;
     int error;
     bool write;
     struct virtiofs_part part[];
@@ -1702,7 +1713,6 @@ io_done(void *arg, int error)
             push_failed(np);
         node_stale(np);
         whandle_put(np);
-        pageout_done(np, io->gen);
     } else {
         if (buf_flags(bp) & B_PAGEIO)
             __atomic_sub_fetch(&np->paging, 1, __ATOMIC_RELEASE);
@@ -1712,36 +1722,6 @@ io_done(void *arg, int error)
     buf_seterror(bp, error);
     buf_setresid(bp, error ? buf_count(bp) : 0);
     buf_biodone(bp);
-}
-
-static uint32_t
-write_spans(off_t offset, uint32_t count, off_t cut[2][2], uint32_t span[3][2])
-{
-    off_t at = offset, end = offset + count;
-    uint32_t n = 0;
-
-    if (cut[1][0] < cut[0][0]) {
-        off_t from = cut[0][0], to = cut[0][1];
-        cut[0][0] = cut[1][0];
-        cut[0][1] = cut[1][1];
-        cut[1][0] = from;
-        cut[1][1] = to;
-    }
-    for (int i = 0; i < 2 && at < end; i++) {
-        off_t from = MAX(cut[i][0], at), to = MIN(cut[i][1], end);
-        if (from >= to)
-            continue;
-        if (from > at) {
-            span[n][0] = (uint32_t)(at - offset);
-            span[n++][1] = (uint32_t)(from - at);
-        }
-        at = to;
-    }
-    if (at < end) {
-        span[n][0] = (uint32_t)(at - offset);
-        span[n++][1] = (uint32_t)(end - at);
-    }
-    return n;
 }
 
 static int
@@ -1755,35 +1735,20 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     uint32_t count = buf_count(bp);
     uint32_t max = np->vmp->session.max_io;
     off_t offset = buf_blkno(bp) * vfs_devblocksize(vnode_mount(vp));
-    uint32_t span[3][2] = { { 0, count } }, spans = count ? 1 : 0, gen = 0;
-    bool counted = false;
     uint64_t fh = 0;
 
     int error = write && vfs_isrdonly(vnode_mount(vp)) ? EROFS : 0;
-    if (write && !error) {
-        IOLockLock(np->vmp->lock);
-        off_t size = (off_t)np->attr.size, limit = np->push_limit;
-        bool stale = (np->flags & VN_SIZING) && limit < size;
-        off_t cut[2][2] = { { np->skip_from, np->skip_to },
-                            { stale ? limit : 0, stale ? MIN(page_end(limit), size) : 0 } };
+    if (write) {
+        off_t size = node_size(np);
         count = offset >= size ? 0 : (uint32_t)MIN((off_t)count, size - offset);
-        spans = write_spans(offset, count, cut, span);
-        gen = np->pageout_gen & 1;
-        counted = spans != 0;
-        np->pageouts[gen] += counted;
-        IOLockUnlock(np->vmp->lock);
     }
-    uint32_t chunks = 0;
-    for (uint32_t p = 0; p < spans; p++)
-        chunks += (span[p][1] + max - 1) / max;
+    uint32_t chunks = (count + max - 1) / max;
     if (!error && chunks) {
         io = IOMallocZero(io_size(write, chunks));
         error = !io ? ENOMEM : write ? whandle_get(np, NULL, &fh) : handle_get(np, NULL, &fh);
     }
     if (error && io)
         IOFree(io, io_size(write, chunks));
-    if (error && counted)
-        pageout_done(np, gen);
     if (error && write)
         push_failed(np);
     if (error || !chunks) {
@@ -1797,37 +1762,34 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     io->np = np;
     io->pending = chunks;
     io->chunks = chunks;
-    io->gen = gen;
     io->write = write;
     if (!write && (buf_flags(bp) & B_PAGEIO))
         __atomic_add_fetch(&np->paging, 1, __ATOMIC_RELAXED);
-    for (uint32_t p = 0, i = 0; p < spans; p++) {
-        for (uint32_t done = 0; done < span[p][1]; done += max, i++) {
-            uint32_t at = span[p][0] + done, len = MIN(span[p][1] - done, max);
-            struct fuse_read_in rin = { .fh = fh, .offset = (uint64_t)offset + at, .size = len };
-            struct fuse_write_in win = { .fh = fh, .offset = (uint64_t)offset + at, .size = len };
-            struct virtiofs_call c = {
-                .opcode = write ? FUSE_WRITE : FUSE_READ, .flags = write ? VIRTIOFS_DATA_OUT : VIRTIOFS_ZERO_FILL,
-                .nodeid = np->nodeid, .datalen = len,
-            };
-            if (write) {
-                io->part[i].want = len;
-                c.arg[0] = &win;
-                c.arglen[0] = sizeof(win);
-                c.reply = &io->part[i].out;
-                c.replylen = sizeof(io->part[i].out);
-            } else {
-                c.arg[0] = &rin;
-                c.arglen[0] = sizeof(rin);
-            }
-            if (buf_upl(bp)) {
-                c.upl = buf_upl(bp);
-                c.upl_offset = buf_uploffset(bp) + at;
-            } else {
-                c.data = (void *)(buf_dataptr(bp) + at);
-            }
-            virtiofs_submit(np->vmp, NULL, &c, io_done, io);
+    for (uint32_t i = 0; i < chunks; i++) {
+        uint32_t at = i * max, len = MIN(count - at, max);
+        struct fuse_read_in rin = { .fh = fh, .offset = (uint64_t)offset + at, .size = len };
+        struct fuse_write_in win = { .fh = fh, .offset = (uint64_t)offset + at, .size = len };
+        struct virtiofs_call c = {
+            .opcode = write ? FUSE_WRITE : FUSE_READ, .flags = write ? VIRTIOFS_DATA_OUT : VIRTIOFS_ZERO_FILL,
+            .nodeid = np->nodeid, .datalen = len,
+        };
+        if (write) {
+            io->part[i].want = len;
+            c.arg[0] = &win;
+            c.arglen[0] = sizeof(win);
+            c.reply = &io->part[i].out;
+            c.replylen = sizeof(io->part[i].out);
+        } else {
+            c.arg[0] = &rin;
+            c.arglen[0] = sizeof(rin);
         }
+        if (buf_upl(bp)) {
+            c.upl = buf_upl(bp);
+            c.upl_offset = buf_uploffset(bp) + at;
+        } else {
+            c.data = (void *)(buf_dataptr(bp) + at);
+        }
+        virtiofs_submit(np->vmp, NULL, &c, io_done, io);
     }
     return 0;
 }
@@ -2241,12 +2203,12 @@ virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
                    IFTOVT(out.attr.mode) != vnode_vtype(vp)))
         error = EIO;
     if (!error && truncate) {
-        node_changed(np, vap->va_data_size, vap->va_data_size, vap->va_data_size, true);
+        node_sized(np, (off_t)vap->va_data_size);
     } else if (!error) {
         if (!node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version))
             node_stale(np);
     } else if (truncate) {
-        node_changed(np, was, was, was, true);
+        node_sized(np, was);
     } else {
         node_stale(np);
     }
