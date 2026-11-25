@@ -1925,16 +1925,20 @@ truncate_begin(struct virtiofs_node *np, vfs_context_t ctx, off_t size, uint64_t
         error = whandle_get(np, ctx, fh);
     if (error)
         return error;
-    *was = node_size(np);
+    IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_SIZING);
+    np->flags |= VN_TRUNCATING;
+    *was = (off_t)np->attr.size;
+    IOLockUnlock(np->vmp->lock);
     if (size < *was)
         error = push_dirty(np->vp);
     if (error) {
+        IOLockLock(np->vmp->lock);
+        wake(np, VN_TRUNCATING);
+        IOLockUnlock(np->vmp->lock);
         whandle_put(np);
         return error;
     }
-    IOLockLock(np->vmp->lock);
-    np->flags |= VN_TRUNCATING;
-    IOLockUnlock(np->vmp->lock);
     if (size < *was)
         node_resize(np, size);
     return 0;
