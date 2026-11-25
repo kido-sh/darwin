@@ -983,8 +983,8 @@ whandle_close(struct virtiofs_node *np, bool force)
         IOLockSleep(vmp->lock, np, THREAD_UNINT);
     }
     bool release = (np->flags & VN_WOPEN) &&
-                   (force || !(np->wopens || np->wusers || (np->flags & (VN_WOPENING | VN_MAPPED_WRITE | VN_UNPUSHED)) ||
-                             np->creator));
+                   (force || !(np->wopens || np->wusers || np->pageouts || np->creator ||
+                               (np->flags & (VN_WOPENING | VN_MAPPED_WRITE | VN_UNPUSHED))));
     if (release) {
         np->flags &= ~VN_WOPEN;
         np->creator = NULL;
@@ -1809,7 +1809,6 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
     int kind = (int)((sync ? UPL_UBC_MSYNC : UPL_UBC_PAGEOUT) | UPL_RET_ONLY_DIRTY);
     upl_t upl = NULL;
     upl_page_info_t *pl = NULL;
-    uint64_t fh;
 
     if (ap->a_pl) {
         if (!rdonly)
@@ -1820,7 +1819,6 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
                                  UPL_COMMIT_CLEAR_DIRTY | UPL_COMMIT_FREE_ON_EMPTY);
         return 0;
     }
-    bool held = !rdonly && whandle_hold(np, &fh);
     bool entered = sync && sizing_enter(np);
     IOLockLock(np->vmp->lock);
     np->pageouts++;
@@ -1836,8 +1834,6 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
         error = pageout_pages(vp, upl, pl, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), ap->a_flags & ~UPL_NOCOMMIT);
     else if (!rdonly)
         push_failed(np);
-    if (held)
-        whandle_put(np);
     IOLockLock(np->vmp->lock);
     if (--np->pageouts == 0)
         wake(np, 0);
