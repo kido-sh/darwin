@@ -83,6 +83,7 @@ struct virtiofs_node {
     uint32_t ropens;
     uint32_t releasing;
     uint32_t paging;
+    uint32_t pageouts;
     uint32_t waiters;
     uint32_t flags;
     IOLock *wlock;
@@ -1066,6 +1067,12 @@ push_dirty(vnode_t vp)
     uint32_t failures = np->push_failures;
     IOLockUnlock(np->vmp->lock);
     int error = push_range(vp, 0, ubc_getsize(vp));
+    IOLockLock(np->vmp->lock);
+    while (np->pageouts) {
+        np->flags |= VN_WANT;
+        IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
+    }
+    IOLockUnlock(np->vmp->lock);
     vnode_waitforwrites(vp, 0, 0, 0, "virtiofs_push");
     if (error)
         push_failed(np);
@@ -1721,6 +1728,9 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
                                  UPL_COMMIT_CLEAR_DIRTY | UPL_COMMIT_FREE_ON_EMPTY);
         return 0;
     }
+    IOLockLock(np->vmp->lock);
+    np->pageouts++;
+    IOLockUnlock(np->vmp->lock);
     int refused = rdonly ? 0 : whandle_get(np, NULL, &fh), error = refused ? refused : EINVAL;
     bool entered = sync && sizing_enter(np);
     bool made = ubc_create_upl(vp, ap->a_f_offset, (int)ap->a_size, &upl, &pl, kind) == KERN_SUCCESS;
@@ -1736,6 +1746,10 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
         push_failed(np);
     if (!rdonly && !refused)
         whandle_put(np);
+    IOLockLock(np->vmp->lock);
+    if (--np->pageouts == 0)
+        wake(np, 0);
+    IOLockUnlock(np->vmp->lock);
     return error;
 }
 
