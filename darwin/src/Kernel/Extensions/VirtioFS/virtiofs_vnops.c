@@ -1430,6 +1430,48 @@ virtiofs_vnop_getattr(struct vnop_getattr_args *ap)
     return 0;
 }
 
+static uint32_t
+batch_room(struct virtiofs_node *np, uio_t uio)
+{
+    return (uint32_t)MIN((user_ssize_t)np->vmp->session.max_io * WRITE_DEPTH, uio_resid(uio));
+}
+
+static int
+read_pages(struct virtiofs_node *np, uio_t uio, int ioflag)
+{
+    off_t size = reader_begin(np);
+    int error = cluster_read(np->vp, uio, size, ioflag);
+
+    reader_end(np);
+    return error;
+}
+
+static int
+read_user(struct virtiofs_node *np, uio_t uio, off_t size, int ioflag)
+{
+    uint32_t room = (uint32_t)MIN((off_t)batch_room(np, uio), MAX(size - uio_offset(uio), 1));
+    char *buf = IOMalloc(room);
+    uio_t part = buf ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
+    int error = part ? 0 : ENOMEM;
+
+    while (!error && uio_resid(uio) > 0) {
+        uint32_t len = (uint32_t)MIN((user_ssize_t)room, uio_resid(uio));
+        uio_reset(part, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
+        uio_addiov(part, CAST_USER_ADDR_T(buf), len);
+        error = read_pages(np, part, ioflag);
+        uint32_t got = len - (uint32_t)uio_resid(part);
+        if (!error)
+            error = uiomove(buf, (int)got, uio);
+        if (got < len)
+            break;
+    }
+    if (part)
+        uio_free(part);
+    if (buf)
+        IOFree(buf, room);
+    return error;
+}
+
 static int
 virtiofs_vnop_read(struct vnop_read_args *ap)
 {
@@ -1452,11 +1494,9 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
     int error = opened ? handle_check(np, ap->a_context) : file_open(np, ap->a_context, false);
     if (!error)
         error = node_attr(np, ap->a_context, &attr);
-    if (!error) {
-        off_t size = reader_begin(np);
-        error = cluster_read(vp, uio, size, ap->a_ioflag);
-        reader_end(np);
-    }
+    if (!error)
+        error = uio_isuserspace(uio) ? read_user(np, uio, (off_t)attr.size, ap->a_ioflag)
+                                     : read_pages(np, uio, ap->a_ioflag);
     if (!opened)
         file_idle(np);
     return error;
@@ -1638,7 +1678,7 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     off_t start = uio_offset(uio);
     if (!error && uio_resid(uio) > VIRTIOFS_SIZE_MAX - start)
         error = EFBIG;
-    uint32_t room = (uint32_t)MIN((user_ssize_t)np->vmp->session.max_io * WRITE_DEPTH, uio_resid(uio));
+    uint32_t room = batch_room(np, uio);
     char *buf = error ? NULL : IOMalloc(room);
     if (!error && !buf)
         error = ENOMEM;
