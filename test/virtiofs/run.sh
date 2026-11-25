@@ -227,6 +227,14 @@ synced_map() {
   echo "sync(2) with a store in a live mapping: this Mac reads $seen"
   [[ $seen == synced ]]
 }
+closed_released() {
+  local writers
+  guest /tmp/t_virtiofs close-stat /mnt/rw/closing 3 || return 1
+  sleep 0.5
+  writers=$(host_writing "$rw/closing/")
+  echo "after that, the Mac holds $writers of those files open for writing"
+  [[ $writers == 0 ]]
+}
 removed_released() {
   local held
   held=$(host_open "$rw/gone\$")
@@ -360,9 +368,9 @@ refused_kept() {
   room
   wait $holder
   status=$?
-  byte=$(dd if="$full/stored" bs=1 skip=$((16384 + 5000 + (127 << 14))) count=1 2>/dev/null)
-  echo "on a volume of this Mac that ran full: $(cat "$work/map-fail.out"), and this Mac reads $byte for the last"
-  [[ $status == 0 && $byte == $(sed -n 's/.*the last reads \(.\),.*/\1/p' "$work/map-fail.out") ]]
+  byte=$(for page in 0 64 127; do dd if="$full/stored" bs=1 skip=$((16384 + 5000 + (page << 14))) count=1 2>/dev/null; done)
+  echo "on a volume of this Mac that ran full: $(cat "$work/map-fail.out"), and this Mac reads $byte for those three"
+  [[ $status == 0 && $byte == $(sed -n 's/.*the last read \(...\),.*/\1/p' "$work/map-fail.out") ]]
 }
 unpushed_kept() {
   local holder status byte mode
@@ -587,7 +595,8 @@ check "a page stored to through a mapping does not overwrite what this Mac appen
 check "sync(2) pushes stores of a live mapping to this Mac" synced_map
 check "an open with O_RDONLY and O_TRUNC leaves nothing open for writing" trunc_reader
 check "a program this Mac makes unreadable cannot run while it is open for writing" exec_beside_writer
-check "stores through a mapping twice the guest's memory reach the host" guest /tmp/t_virtiofs map-pressure /mnt/rw/big 2048
+check "stores through a mapping twice the guest's memory reach the host, also beside reads into that mapping" \
+  guest /tmp/t_virtiofs map-pressure /mnt/rw/big 2048
 check "setuid and setgid bits set in the guest do not reach this Mac" setuid_dropped
 check "a write handle kept for a closed writer does not open or truncate a file this Mac made read-only" \
   write_revoked hold
@@ -596,6 +605,9 @@ guest /bin/sh -c 'cp /tmp/t_virtiofs /mnt/rw/gone && cat /mnt/rw/gone > /dev/nul
 check "concurrent creates, writes, renames, unlinks and appends" guest /tmp/t_virtiofs rw-stress /mnt/rw/stress 8 5
 check "writes, stores, reads into the file's own mapping, truncations and syncs on one file all keep going" \
   guest /tmp/t_virtiofs chaos /mnt/rw/chaos 10
+check "twelve threads that store and sync, and a read into fresh pages of a mapping of the same file, keep going" \
+  guest /tmp/t_virtiofs syncers /mnt/rw/syncers 6 12
+check "files written and closed beside stats of them are closed on this Mac" closed_released
 check "flock and fcntl locks hold between descriptors and processes of the guest" guest /tmp/t_virtiofs locks /mnt/rw/locked
 check "a file removed in the guest is released on this Mac" removed_released
 sleep 0.5
