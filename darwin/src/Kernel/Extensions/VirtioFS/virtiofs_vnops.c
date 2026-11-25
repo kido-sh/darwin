@@ -1519,9 +1519,9 @@ batch_put(struct virtiofs_mount *vmp, char *buf, uint32_t room)
 }
 
 static int
-read_pages(struct virtiofs_node *np, uio_t uio, int ioflag)
+read_pages(struct virtiofs_node *np, uio_t uio, int ioflag, off_t *end)
 {
-    off_t size = reader_begin(np);
+    off_t size = *end = reader_begin(np);
     int error = cluster_read(np->vp, uio, size, ioflag);
 
     reader_end(np);
@@ -1531,20 +1531,21 @@ read_pages(struct virtiofs_node *np, uio_t uio, int ioflag)
 static int
 read_user(struct virtiofs_node *np, uio_t uio, off_t size, int ioflag)
 {
-    uint32_t room = (uint32_t)MIN((off_t)batch_room(np, uio), MAX(size - uio_offset(uio), 1));
+    uint32_t room = (uint32_t)MIN((off_t)batch_room(np, uio), MAX(size - uio_offset(uio), (off_t)PAGE_SIZE));
     char *buf = batch_get(np->vmp, room);
     uio_t part = buf ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
     int error = part ? 0 : ENOMEM;
 
     while (!error && uio_resid(uio) > 0) {
         uint32_t len = (uint32_t)MIN((user_ssize_t)room, uio_resid(uio));
+        off_t end = 0;
         uio_reset(part, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
         uio_addiov(part, CAST_USER_ADDR_T(buf), len);
-        error = read_pages(np, part, ioflag);
+        error = read_pages(np, part, ioflag, &end);
         uint32_t got = len - (uint32_t)uio_resid(part);
         if (!error)
             error = uiomove(buf, (int)got, uio);
-        if (got < len)
+        if (got < len || uio_offset(uio) >= end)
             break;
     }
     if (part)
@@ -1560,6 +1561,7 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
     uio_t uio = ap->a_uio;
     struct virtiofs_node *np = VTON(vp);
     struct fuse_attr attr;
+    off_t end;
 
     if (vnode_isdir(vp))
         return EISDIR;
@@ -1577,7 +1579,7 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
         error = node_attr(np, ap->a_context, &attr);
     if (!error)
         error = uio_isuserspace(uio) ? read_user(np, uio, (off_t)attr.size, ap->a_ioflag)
-                                     : read_pages(np, uio, ap->a_ioflag);
+                                     : read_pages(np, uio, ap->a_ioflag, &end);
     if (!opened)
         file_idle(np);
     return error;
