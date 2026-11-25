@@ -253,13 +253,13 @@ page_fill(struct virtiofs_node *np, upl_t upl, off_t page, off_t from, off_t to)
 }
 
 static void
-pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count, bool changed)
+pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count, int changed)
 {
     for (int i = 0, run = 1; i < count; i += run) {
         upl_offset_t at = (upl_offset_t)i * PAGE_SIZE;
-        bool keep = changed && upl_valid_page(pl, i), dirty = keep && upl_dirty_page(pl, i);
+        bool keep = i < changed && upl_valid_page(pl, i), dirty = keep && upl_dirty_page(pl, i);
         int state = 0;
-        for (run = 1; !keep && i + run < count && !(changed && upl_valid_page(pl, i + run)); run++)
+        for (run = 1; !keep && i + run < count && !(i + run < changed && upl_valid_page(pl, i + run)); run++)
             ;
         if (keep && !dirty)
             dirty = ubc_page_op(vp, first + at, 0, NULL, &state) == KERN_SUCCESS && !(state & UPL_POP_BUSY);
@@ -1654,6 +1654,7 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     if (!error)
         error = write_batch(np, ctx, fh, at, buf, len, written);
     off_t reach = at + *written, size = *written ? MAX(old, reach) : old;
+    int changed = *written ? (int)(((off_t)round_page_64(reach) - first) / PAGE_SIZE) : 0;
     for (int i = 0; addr && i < count; i++) {
         off_t page = first + (off_t)i * PAGE_SIZE, from = MAX(page, at), to = MIN(page + PAGE_SIZE, reach);
         if (upl_valid_page(pl, i) && from < to)
@@ -1669,7 +1670,7 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     if (size > old)
         ubc_setsize(vp, size);
     if (upl)
-        pages_release(vp, upl, pl, first, count, *written != 0);
+        pages_release(vp, upl, pl, first, count, changed);
     IOLockLock(vmp->lock);
     sizing_done(np, 0);
     IOLockUnlock(vmp->lock);
