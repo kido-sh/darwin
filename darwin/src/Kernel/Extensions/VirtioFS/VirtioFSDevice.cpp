@@ -495,7 +495,8 @@ parseReply(VirtioFSSlot *slot, struct virtiofs_call *c)
 
     uint32_t payload = reply.len - (uint32_t)sizeof(reply);
     uint32_t fixed = payload < c->replylen ? payload : c->replylen;
-    memcpy(c->reply, slot->out + sizeof(reply), fixed);
+    if (fixed)
+        memcpy(c->reply, slot->out + sizeof(reply), fixed);
     c->replylen = fixed;
     if (!out)
         c->datalen = payload - fixed;
