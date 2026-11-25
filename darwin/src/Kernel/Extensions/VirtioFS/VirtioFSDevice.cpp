@@ -39,8 +39,20 @@ struct VirtioFSSlot {
     uint64_t inPhys;
     uint64_t outPhys;
     VirtioFSSlot *next;
+    struct virtiofs_call *call;
+    IOMemoryDescriptor *data;
+    virtiofs_done_t done;
+    void *arg;
     uint32_t used;
-    bool done;
+    bool replied;
+    bool async;
+};
+
+struct VirtioFSRequest {
+    VirtIOChainEntry chain[kMaxSegments];
+    unsigned count;
+    unsigned replyAt;
+    IOMemoryDescriptor *data;
 };
 
 bool
@@ -92,6 +104,7 @@ VirtioFSDevice::stop(IOService *provider)
     IOLockLock(fLock);
     failLocked(false);
     IOLockUnlock(fLock);
+    reap();
     fWorkLoop->removeEventSource(fInterruptSource);
     OSSafeReleaseNULL(fInterruptSource);
     fTransport.detach();
@@ -202,6 +215,7 @@ VirtioFSDevice::interruptOccurred(IOInterruptEventSource *, int)
     drainLocked(kHiprio);
     drainLocked(kRequests);
     IOLockUnlock(fLock);
+    reap();
 }
 
 void
@@ -230,9 +244,14 @@ VirtioFSDevice::drainLocked(unsigned q)
         freed = true;
         if (q == kHiprio) {
             putSlotLocked(slot);
+        } else if (slot->async) {
+            slot->used = used;
+            slot->replied = true;
+            slot->next = fReaped;
+            fReaped = slot;
         } else {
             slot->used = used;
-            slot->done = true;
+            slot->replied = true;
             IOLockWakeup(fLock, slot, true);
         }
     }
@@ -250,6 +269,14 @@ VirtioFSDevice::failLocked(bool broken)
     fDead = true;
     fInterruptSource->disable();
     fQuiesced = fTransport.quiesce();
+    for (unsigned i = 0; fQuiesced && i < fQueues[kRequests].queueSize; i++) {
+        VirtioFSSlot *slot = fInFlight[kRequests][i];
+        if (slot && slot->async) {
+            fInFlight[kRequests][i] = NULL;
+            slot->next = fReaped;
+            fReaped = slot;
+        }
+    }
     for (unsigned i = 0; fQuiesced && i < fSlotCount; i++)
         IOLockWakeup(fLock, &fSlots[i], false);
     IOLockWakeup(fLock, &fFreeSlots, false);
@@ -260,6 +287,12 @@ VirtioFSDevice::failLocked(bool broken)
 void
 VirtioFSDevice::pauseLocked(void *event)
 {
+    if (fReaped) {
+        IOLockUnlock(fLock);
+        reap();
+        IOLockLock(fLock);
+        return;
+    }
     AbsoluteTime deadline;
     clock_interval_to_deadline(kWaitSliceMs, kMillisecondScale, &deadline);
     if (IOLockSleepDeadline(fLock, event, deadline, THREAD_UNINT) != THREAD_TIMED_OUT)
@@ -279,7 +312,7 @@ VirtioFSDevice::spinLocked(VirtioFSSlot *slot, uint32_t datalen)
 {
     VirtQueue *vq = &fQueues[kRequests];
     volatile VRingUsedHdr *used = (volatile VRingUsedHdr *)vq->used;
-    volatile bool *done = &slot->done;
+    volatile bool *replied = &slot->replied;
     int spin = __atomic_load_n(&virtiofs_spin_us, __ATOMIC_RELAXED);
     uint64_t limit;
 
@@ -289,9 +322,10 @@ VirtioFSDevice::spinLocked(VirtioFSSlot *slot, uint32_t datalen)
     nanoseconds_to_absolutetime(((uint64_t)spin + datalen / 2048) * 1000, &limit);
     limit += mach_absolute_time();
     bool ready = true;
-    while (ready && !slot->done && !fDead) {
+    while (ready && !slot->replied && !fDead) {
         IOLockUnlock(fLock);
-        while (!(ready = used->idx != vq->lastUsedIdx) && !*done && mach_absolute_time() < limit)
+        reap();
+        while (!(ready = used->idx != vq->lastUsedIdx) && !*replied && mach_absolute_time() < limit)
             __builtin_arm_yield();
         IOLockLock(fLock);
         if (ready)
@@ -312,7 +346,8 @@ VirtioFSDevice::takeSlotLocked()
         return NULL;
     VirtioFSSlot *slot = fFreeSlots;
     fFreeSlots = slot->next;
-    slot->done = false;
+    slot->replied = false;
+    slot->async = false;
     slot->used = 0;
     return slot;
 }
@@ -402,6 +437,41 @@ dataDescriptor(const struct virtiofs_call *c)
     return md;
 }
 
+static void
+finishData(IOMemoryDescriptor *data, const struct virtiofs_call *c, int error)
+{
+    if (!data)
+        return;
+    if (!error && !(c->flags & VIRTIOFS_DATA_OUT) && (c->flags & VIRTIOFS_ZERO_FILL) &&
+        c->datalen < data->getLength())
+        data->writeBytes(c->datalen, NULL, data->getLength() - c->datalen);
+    data->complete();
+    data->release();
+}
+
+static int
+buildRequest(const struct virtiofs_call *c, VirtioFSRequest *r)
+{
+    bool out = (c->flags & VIRTIOFS_DATA_OUT) != 0;
+    uint32_t args = c->arglen[0] + c->arglen[1];
+    if (args < c->arglen[0] || args > kInBytes - sizeof(struct fuse_in_header) ||
+        c->replylen > kOutBytes - sizeof(struct fuse_out_header) || c->datalen > kMaxIO)
+        return EINVAL;
+
+    r->data = NULL;
+    if (c->datalen && !(r->data = dataDescriptor(c)))
+        return ENOMEM;
+    r->count = 1;
+    bool fits = !r->data || !out || addSegments(r->chain, &r->count, r->data, c->datalen, false);
+    fits = fits && r->count < kMaxSegments;
+    r->replyAt = r->count++;
+    fits = fits && (!r->data || out || addSegments(r->chain, &r->count, r->data, c->datalen, true));
+    if (fits)
+        return 0;
+    finishData(r->data, c, EIO);
+    return EIO;
+}
+
 static int
 parseReply(VirtioFSSlot *slot, struct virtiofs_call *c)
 {
@@ -428,60 +498,107 @@ parseReply(VirtioFSSlot *slot, struct virtiofs_call *c)
     return 0;
 }
 
+VirtioFSSlot *
+VirtioFSDevice::startLocked(struct virtiofs_call *c, VirtioFSRequest *r, uint32_t uid, uint32_t gid, uint32_t pid,
+                            bool async, virtiofs_done_t done, void *arg)
+{
+    uint32_t inLen = (uint32_t)sizeof(struct fuse_in_header) + c->arglen[0] + c->arglen[1];
+    uint32_t dataOut = (c->flags & VIRTIOFS_DATA_OUT) ? c->datalen : 0;
+    VirtioFSSlot *slot = fillHeaderLocked(c->opcode, c->nodeid, inLen + dataOut);
+    if (!slot)
+        return NULL;
+
+    struct fuse_in_header *in = (struct fuse_in_header *)slot->in;
+    in->uid = uid;
+    in->gid = gid;
+    in->pid = pid;
+    if (c->arglen[0])
+        memcpy(in + 1, c->arg[0], c->arglen[0]);
+    if (c->arglen[1])
+        memcpy((uint8_t *)(in + 1) + c->arglen[0], c->arg[1], c->arglen[1]);
+    r->chain[0] = { slot->inPhys, inLen, false, false };
+    r->chain[r->replyAt] = { slot->outPhys, (uint32_t)(sizeof(struct fuse_out_header) + c->replylen), true, false };
+    slot->call = done ? c : NULL;
+    slot->data = r->data;
+    slot->done = done;
+    slot->arg = arg;
+    slot->async = async;
+    if (submitLocked(kRequests, slot, r->chain, r->count))
+        return slot;
+    putSlotLocked(slot);
+    return NULL;
+}
+
 int
 VirtioFSDevice::call(struct virtiofs_call *c, uint32_t uid, uint32_t gid, uint32_t pid)
 {
-    bool out = (c->flags & VIRTIOFS_DATA_OUT) != 0;
-    uint32_t args = c->arglen[0] + c->arglen[1];
-    if (args < c->arglen[0] || args > kInBytes - sizeof(struct fuse_in_header) ||
-        c->replylen > kOutBytes - sizeof(struct fuse_out_header) || c->datalen > kMaxIO)
-        return EINVAL;
+    VirtioFSRequest r;
+    int error = buildRequest(c, &r);
+    if (error)
+        return error;
 
-    IOMemoryDescriptor *data = NULL;
-    if (c->datalen && !(data = dataDescriptor(c)))
-        return ENOMEM;
-
-    VirtIOChainEntry chain[kMaxSegments];
-    unsigned count = 1;
-    bool fits = !data || !out || addSegments(chain, &count, data, c->datalen, false);
-    fits = fits && count < kMaxSegments;
-    unsigned replyAt = count++;
-    fits = fits && (!data || out || addSegments(chain, &count, data, c->datalen, true));
-
-    int error = EIO;
-    uint32_t inLen = (uint32_t)sizeof(struct fuse_in_header) + args;
+    error = EIO;
     IOLockLock(fLock);
-    VirtioFSSlot *slot = fits ? fillHeaderLocked(c->opcode, c->nodeid, inLen + (out ? c->datalen : 0)) : NULL;
+    VirtioFSSlot *slot = startLocked(c, &r, uid, gid, pid, false, NULL, NULL);
     if (slot) {
-        struct fuse_in_header *in = (struct fuse_in_header *)slot->in;
-        in->uid = uid;
-        in->gid = gid;
-        in->pid = pid;
-        if (c->arglen[0])
-            memcpy(in + 1, c->arg[0], c->arglen[0]);
-        if (c->arglen[1])
-            memcpy((uint8_t *)(in + 1) + c->arglen[0], c->arg[1], c->arglen[1]);
-        chain[0] = { slot->inPhys, inLen, false, false };
-        chain[replyAt] = { slot->outPhys, (uint32_t)(sizeof(struct fuse_out_header) + c->replylen), true, false };
-        bool submitted = submitLocked(kRequests, slot, chain, count);
-        if (submitted)
-            spinLocked(slot, c->datalen);
-        while (submitted && !slot->done && !fQuiesced)
+        spinLocked(slot, c->datalen);
+        while (!slot->replied && !fQuiesced)
             pauseLocked(slot);
-        if (slot->done)
+        if (slot->replied) {
             error = parseReply(slot, c);
-        if (slot->done || !submitted)
             putSlotLocked(slot);
+        }
     }
     IOLockUnlock(fLock);
-
-    if (data) {
-        if (!error && !out && (c->flags & VIRTIOFS_ZERO_FILL) && c->datalen < data->getLength())
-            data->writeBytes(c->datalen, NULL, data->getLength() - c->datalen);
-        data->complete();
-        data->release();
-    }
+    finishData(r.data, c, error);
+    reap();
     return error;
+}
+
+void
+VirtioFSDevice::submit(struct virtiofs_call *c, virtiofs_done_t done, void *arg)
+{
+    VirtioFSRequest r;
+    int error = done || (!c->replylen && !c->datalen) ? buildRequest(c, &r) : EINVAL;
+    if (!error) {
+        IOLockLock(fLock);
+        if (!startLocked(c, &r, 0, 0, 0, true, done, arg))
+            error = EIO;
+        IOLockUnlock(fLock);
+        if (error)
+            finishData(r.data, c, error);
+    }
+    if (error && done)
+        done(arg, error);
+    reap();
+}
+
+void
+VirtioFSDevice::reap()
+{
+    if (!fReaped)
+        return;
+    IOLockLock(fLock);
+    VirtioFSSlot *list = fReaped;
+    fReaped = NULL;
+    IOLockUnlock(fLock);
+
+    while (list) {
+        VirtioFSSlot *slot = list;
+        virtiofs_done_t done = slot->done;
+        void *arg = slot->arg;
+        int error = 0;
+        list = slot->next;
+        if (done) {
+            error = slot->replied ? parseReply(slot, slot->call) : EIO;
+            finishData(slot->data, slot->call, error);
+        }
+        IOLockLock(fLock);
+        putSlotLocked(slot);
+        IOLockUnlock(fLock);
+        if (done)
+            done(arg, error);
+    }
 }
 
 void
@@ -498,6 +615,7 @@ VirtioFSDevice::forget(uint64_t nodeid, uint64_t nlookup)
             putSlotLocked(slot);
     }
     IOLockUnlock(fLock);
+    reap();
 }
 
 int
@@ -583,6 +701,12 @@ int
 virtiofs_dev_call(struct virtiofs_dev *dev, struct virtiofs_call *call, uint32_t uid, uint32_t gid, uint32_t pid)
 {
     return ((VirtioFSDevice *)dev)->call(call, uid, gid, pid);
+}
+
+void
+virtiofs_dev_submit(struct virtiofs_dev *dev, struct virtiofs_call *call, virtiofs_done_t done, void *arg)
+{
+    ((VirtioFSDevice *)dev)->submit(call, done, arg);
 }
 
 void

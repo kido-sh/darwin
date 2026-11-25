@@ -28,6 +28,8 @@ struct virtiofs_call {
     uint32_t upl_offset;
 };
 
+typedef void (*virtiofs_done_t)(void *arg, int error);
+
 struct virtiofs_session {
     uint32_t max_io;
     uint32_t flags;
@@ -37,6 +39,7 @@ struct virtiofs_dev *virtiofs_dev_find(const char *tag);
 void virtiofs_dev_release(struct virtiofs_dev *dev);
 int virtiofs_dev_start(struct virtiofs_dev *dev, struct virtiofs_session *session);
 int virtiofs_dev_call(struct virtiofs_dev *dev, struct virtiofs_call *call, uint32_t uid, uint32_t gid, uint32_t pid);
+void virtiofs_dev_submit(struct virtiofs_dev *dev, struct virtiofs_call *call, virtiofs_done_t done, void *arg);
 void virtiofs_dev_forget(struct virtiofs_dev *dev, uint64_t nodeid, uint64_t nlookup);
 
 __END_DECLS
