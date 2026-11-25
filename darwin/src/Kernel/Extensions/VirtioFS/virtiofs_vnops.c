@@ -68,7 +68,7 @@ int (**virtiofs_fifoop_p)(void *);
 static struct virtiofs_bucket *
 bucket(struct virtiofs_mount *vmp, uint64_t nodeid)
 {
-    return &vmp->hash[(nodeid * 0x9e3779b97f4a7c15ULL) >> (64 - VIRTIOFS_HASH_BITS)];
+    return &vmp->hash[(nodeid * 0x9e3779b97f4a7c15ULL) >> (64 - vmp->hash_bits)];
 }
 
 static uint64_t
@@ -441,7 +441,7 @@ name_bucket(struct virtiofs_mount *vmp, uint64_t parent, const char *name, uint3
     uint64_t h = parent ^ 0xcbf29ce484222325ULL;
     for (uint32_t i = 0; i < len; i++)
         h = (h ^ (uint8_t)name[i]) * 0x100000001b3ULL;
-    return &vmp->names[(h * 0x9e3779b97f4a7c15ULL) >> (64 - VIRTIOFS_HASH_BITS)];
+    return &vmp->names[(h * 0x9e3779b97f4a7c15ULL) >> (64 - vmp->hash_bits)];
 }
 
 static bool

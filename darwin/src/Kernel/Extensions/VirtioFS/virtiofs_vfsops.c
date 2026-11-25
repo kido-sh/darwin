@@ -95,6 +95,23 @@ copyin_spec(user_addr_t data, vfs_context_t ctx, char *spec, size_t size)
     return error ? error : copyinstr(fspec, spec, size, &len);
 }
 
+static void
+mount_free(struct virtiofs_mount *vmp)
+{
+    size_t buckets = sizeof(*vmp->hash) << vmp->hash_bits;
+
+    if (vmp->hash)
+        IOFree(vmp->hash, buckets);
+    if (vmp->names)
+        IOFree(vmp->names, buckets);
+    if (vmp->lock)
+        IOLockFree(vmp->lock);
+    if (vmp->move_lock)
+        IOLockFree(vmp->move_lock);
+    virtiofs_dev_release(vmp->dev);
+    IOFree(vmp, sizeof(*vmp));
+}
+
 static int
 virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context_t ctx)
 {
@@ -126,19 +143,25 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
     if (!dev)
         return ENXIO;
     struct virtiofs_mount *vmp = IOMallocZero(sizeof(*vmp));
-    IOLock *lock = IOLockAlloc();
-    IOLock *move_lock = IOLockAlloc();
+    if (!vmp) {
+        virtiofs_dev_release(dev);
+        return ENOMEM;
+    }
+    vmp->mp = mp;
+    vmp->dev = dev;
+    vmp->lock = IOLockAlloc();
+    vmp->move_lock = IOLockAlloc();
+    vmp->hash_bits = 10;
+    while (vmp->hash_bits < 20 && (1 << vmp->hash_bits) < desiredvnodes / 8)
+        vmp->hash_bits++;
+    vmp->hash = IOMallocZero(sizeof(*vmp->hash) << vmp->hash_bits);
+    vmp->names = IOMallocZero(sizeof(*vmp->names) << vmp->hash_bits);
     struct fuse_entry_out entry = {};
     uint64_t version = 0;
     vnode_t root = NULLVP;
-    error = vmp && lock && move_lock ? 0 : ENOMEM;
-    if (!error) {
-        vmp->mp = mp;
-        vmp->dev = dev;
-        vmp->lock = lock;
-        vmp->move_lock = move_lock;
+    error = vmp->lock && vmp->move_lock && vmp->hash && vmp->names ? 0 : ENOMEM;
+    if (!error)
         error = virtiofs_dev_start(dev, &vmp->session);
-    }
     if (!error)
         error = root_entry(vmp, share, ctx, &entry, &version);
     if (!error) {
@@ -148,13 +171,7 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
     }
     if (error) {
         vfs_setfsprivate(mp, NULL);
-        if (lock)
-            IOLockFree(lock);
-        if (move_lock)
-            IOLockFree(move_lock);
-        if (vmp)
-            IOFree(vmp, sizeof(*vmp));
-        virtiofs_dev_release(dev);
+        mount_free(vmp);
         return error;
     }
     vnode_ref(root);
@@ -193,10 +210,7 @@ virtiofs_unmount(mount_t mp, int mntflags, __unused vfs_context_t ctx)
     vflush(mp, NULLVP, FORCECLOSE);
 
     vfs_setfsprivate(mp, NULL);
-    virtiofs_dev_release(vmp->dev);
-    IOLockFree(vmp->lock);
-    IOLockFree(vmp->move_lock);
-    IOFree(vmp, sizeof(*vmp));
+    mount_free(vmp);
     return 0;
 }
 

@@ -12,8 +12,6 @@
 #include "fuse.h"
 #include "virtiofs_dev.h"
 
-#define VIRTIOFS_HASH_BITS 10
-
 struct virtiofs_node;
 LIST_HEAD(virtiofs_bucket, virtiofs_node);
 
@@ -26,8 +24,9 @@ struct virtiofs_mount {
     uint64_t rootid;
     uint64_t version;
     vnode_t root;
-    struct virtiofs_bucket hash[1 << VIRTIOFS_HASH_BITS];
-    struct virtiofs_bucket names[1 << VIRTIOFS_HASH_BITS];
+    uint32_t hash_bits;
+    struct virtiofs_bucket *hash;
+    struct virtiofs_bucket *names;
 };
 
 #define VFSTOVMP(mp) ((struct virtiofs_mount *)vfs_fsprivate(mp))
