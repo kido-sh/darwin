@@ -146,6 +146,26 @@ virtiofs_version(struct virtiofs_mount *vmp)
     return version;
 }
 
+static off_t
+reader_begin(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_SIZING);
+    np->readers++;
+    off_t size = (off_t)np->attr.size;
+    IOLockUnlock(np->vmp->lock);
+    return size;
+}
+
+static void
+reader_end(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    if (--np->readers == 0)
+        wake(np, 0);
+    IOLockUnlock(np->vmp->lock);
+}
+
 static void
 readers_wait_locked(struct virtiofs_node *np)
 {
@@ -1222,18 +1242,11 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
     int error = opened ? handle_check(np, ap->a_context, false) : file_open(np, ap->a_context, false);
     if (!error)
         error = node_attr(np, ap->a_context, &attr);
-    if (error)
-        return error;
-    IOLockLock(np->vmp->lock);
-    wait_clear(np, VN_SIZING);
-    np->readers++;
-    off_t size = (off_t)np->attr.size;
-    IOLockUnlock(np->vmp->lock);
-    error = cluster_read(vp, uio, size, ap->a_ioflag);
-    IOLockLock(np->vmp->lock);
-    if (--np->readers == 0)
-        wake(np, 0);
-    IOLockUnlock(np->vmp->lock);
+    if (!error) {
+        off_t size = reader_begin(np);
+        error = cluster_read(vp, uio, size, ap->a_ioflag);
+        reader_end(np);
+    }
     if (!opened)
         file_idle(np);
     return error;
@@ -1652,6 +1665,7 @@ static int
 virtiofs_vnop_ioctl(struct vnop_ioctl_args *ap)
 {
     vnode_t vp = ap->a_vp;
+    struct virtiofs_node *np = VTON(vp);
     struct radvisory *ra = (struct radvisory *)ap->a_data;
     struct fuse_attr attr;
 
@@ -1661,12 +1675,20 @@ virtiofs_vnop_ioctl(struct vnop_ioctl_args *ap)
         return ENOTSUP;
     if (!vnode_isreg(vp))
         return EINVAL;
-    int error = node_attr(VTON(vp), ap->a_context, &attr);
-    if (error)
-        return error;
-    if (ra->ra_offset >= (off_t)attr.size)
-        return EFBIG;
-    return advisory_read(vp, (off_t)attr.size, ra->ra_offset, ra->ra_count);
+    IOLockLock(np->vmp->lock);
+    bool opened = node_used_locked(np);
+    IOLockUnlock(np->vmp->lock);
+    int error = opened ? 0 : file_open(np, ap->a_context, false);
+    if (!error)
+        error = node_attr(np, ap->a_context, &attr);
+    if (!error) {
+        off_t size = reader_begin(np);
+        error = ra->ra_offset >= size ? EFBIG : advisory_read(vp, size, ra->ra_offset, ra->ra_count);
+        reader_end(np);
+    }
+    if (!opened)
+        file_idle(np);
+    return error;
 }
 
 static uint8_t
