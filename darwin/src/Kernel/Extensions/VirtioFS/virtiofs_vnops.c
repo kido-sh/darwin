@@ -29,6 +29,7 @@
 #define DIRENT_LEN(namlen)   ((sizeof(struct dirent) + (namlen) + 1 - (__DARWIN_MAXNAMLEN + 1) + 3) & ~3)
 #define DIRENT64_LEN(namlen) ((sizeof(struct direntry) + (namlen) - (MAXPATHLEN - 1) + 7) & ~7)
 #define READDIR_MIN          4096
+#define WRITE_DEPTH          8
 
 enum {
     VN_BUILDING = 0x01,
@@ -1068,22 +1069,77 @@ write_sync(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh)
     return error == ENOSYS ? 0 : error;
 }
 
-static int
-write_part(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, const char *buf, uint32_t len,
-           uint32_t *written)
-{
-    struct fuse_write_in in = { .fh = fh, .offset = (uint64_t)at, .size = len };
-    struct fuse_write_out out = {};
-    struct virtiofs_call c = {
-        .opcode = FUSE_WRITE, .flags = VIRTIOFS_DATA_OUT, .nodeid = np->nodeid,
-        .arg = { &in }, .arglen = { sizeof(in) }, .reply = &out, .replylen = sizeof(out),
-        .data = (void *)(uintptr_t)buf, .datalen = len,
-    };
-    int error = virtiofs_call(np->vmp, ctx, &c);
+struct write_batch;
 
-    if (!error && (c.replylen != sizeof(out) || out.size > len))
-        error = EIO;
-    *written = error ? 0 : out.size;
+struct write_part {
+    struct write_batch *batch;
+    struct fuse_write_in in;
+    struct fuse_write_out out;
+    int error;
+};
+
+struct write_batch {
+    struct virtiofs_mount *vmp;
+    uint32_t pending;
+    struct write_part part[WRITE_DEPTH];
+};
+
+static void
+write_part_done(void *arg, int error)
+{
+    struct write_part *part = arg;
+    struct write_batch *batch = part->batch;
+    IOLock *lock = batch->vmp->lock;
+
+    part->error = error;
+    IOLockLock(lock);
+    if (__atomic_sub_fetch(&batch->pending, 1, __ATOMIC_RELEASE) == 0)
+        IOLockWakeup(lock, batch, false);
+    IOLockUnlock(lock);
+}
+
+static bool
+write_batch_done(void *arg)
+{
+    return __atomic_load_n(&((struct write_batch *)arg)->pending, __ATOMIC_ACQUIRE) == 0;
+}
+
+static int
+write_batch(struct virtiofs_node *np, uint64_t fh, off_t at, const char *buf, uint32_t len, uint32_t *written)
+{
+    struct virtiofs_mount *vmp = np->vmp;
+    uint32_t max = vmp->session.max_io, parts = (len + max - 1) / max;
+    struct write_batch batch = { .vmp = vmp, .pending = parts };
+
+    for (uint32_t i = 0; i < parts; i++) {
+        struct write_part *part = &batch.part[i];
+        uint32_t size = MIN(len - i * max, max);
+        part->batch = &batch;
+        part->in = (struct fuse_write_in){ .fh = fh, .offset = (uint64_t)at + i * max, .size = size };
+        struct virtiofs_call c = {
+            .opcode = FUSE_WRITE, .flags = VIRTIOFS_DATA_OUT, .nodeid = np->nodeid,
+            .arg = { &part->in }, .arglen = { sizeof(part->in) }, .reply = &part->out, .replylen = sizeof(part->out),
+            .data = (void *)(uintptr_t)(buf + i * max), .datalen = size,
+        };
+        virtiofs_dev_submit(vmp->dev, &c, write_part_done, part);
+    }
+    virtiofs_dev_poll(vmp->dev, write_batch_done, &batch, len);
+    IOLockLock(vmp->lock);
+    while (batch.pending)
+        IOLockSleep(vmp->lock, &batch, THREAD_UNINT);
+    IOLockUnlock(vmp->lock);
+
+    int error = 0;
+    *written = 0;
+    for (uint32_t i = 0; i < parts && !error; i++) {
+        uint32_t size = MIN(len - i * max, max), done = batch.part[i].out.size;
+        error = batch.part[i].error ? batch.part[i].error : done > size ? EIO : 0;
+        if (error)
+            break;
+        *written += done;
+        if (done < size)
+            break;
+    }
     return error;
 }
 
@@ -1122,7 +1178,7 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     off_t start = uio_offset(uio);
     if (!error)
         error = push_range(vp, start, start + uio_resid(uio));
-    uint32_t room = (uint32_t)MIN((user_ssize_t)np->vmp->session.max_io, uio_resid(uio));
+    uint32_t room = (uint32_t)MIN((user_ssize_t)np->vmp->session.max_io * WRITE_DEPTH, uio_resid(uio));
     char *buf = error ? NULL : IOMalloc(room);
     if (!error && !buf)
         error = ENOMEM;
@@ -1134,7 +1190,7 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
         error = uiomove(buf, (int)len, uio);
         if (!error) {
             reach = at + len;
-            error = write_part(np, ctx, fh, at, buf, len, &written);
+            error = write_batch(np, fh, at, buf, len, &written);
         }
         if (error || written < len) {
             uio_setresid(uio, resid - written);
