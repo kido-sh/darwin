@@ -2209,7 +2209,12 @@ virtiofs_vnop_rename(struct vnop_rename_args *ap)
     dir_changed(tdnp, tcnp, 0, NULL);
     if (!error) {
         node_stale(VTON(ap->a_fvp));
-        node_place(ap->a_fvp, ap->a_tdvp, tcnp);
+        if (node_place(ap->a_fvp, ap->a_tdvp, tcnp)) {
+            IOLockLock(fdnp->vmp->move_lock);
+            vnode_update_identity(ap->a_fvp, NULLVP, tcnp->cn_nameptr, tcnp->cn_namelen, tcnp->cn_hash,
+                                  VNODE_UPDATE_PARENT | VNODE_UPDATE_NAME);
+            IOLockUnlock(fdnp->vmp->move_lock);
+        }
         if (ap->a_tvp && ap->a_tvp != ap->a_fvp)
             node_gone(ap->a_tvp);
     }
