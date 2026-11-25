@@ -254,6 +254,14 @@ pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count
     }
 }
 
+static bool
+pages_cached(vnode_t vp, off_t from, off_t to)
+{
+    int absent = 0;
+
+    return from < to && ubc_range_op(vp, from, to, UPL_ROP_ABSENT, &absent) == KERN_SUCCESS && absent < to - from;
+}
+
 static int
 size_grow(struct virtiofs_node *np, off_t old, off_t size)
 {
@@ -1545,15 +1553,17 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     sizing_set(np);
     readers_wait_locked(np);
     off_t old = (off_t)np->attr.size;
+    bool mapped = np->flags & VN_MAPPED;
     IOLockUnlock(vmp->lock);
     off_t first = MIN(at, old) & ~(off_t)PAGE_MASK;
-    off_t end = MIN((off_t)round_page_64(at + len), (off_t)round_page_64(old));
+    off_t past = (off_t)round_page_64(old), last = (off_t)round_page_64(at + len);
+    off_t end = mapped && at <= past && pages_cached(vp, past, last) ? last : MIN(last, past);
     int count = first < end ? (int)((end - first) / PAGE_SIZE) : 0;
     if (count && ubc_create_upl(vp, first, (int)(end - first), &upl, &pl, HOLD_PAGES) != KERN_SUCCESS)
         error = ENOMEM;
     for (int i = 0; upl && i < count; i++)
         cached |= upl_valid_page(pl, i);
-    if (cached && at > old)
+    if (at > old && upl && upl_valid_page(pl, 0))
         error = page_fill(np, upl, first, old, MIN(first + PAGE_SIZE, at));
     if (!error && cached && ubc_upl_map(upl, &addr) != KERN_SUCCESS)
         error = ENOMEM;
