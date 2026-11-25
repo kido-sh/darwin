@@ -593,7 +593,10 @@ VirtioFSDevice::unlockAndReap()
         virtiofs_done_t done = slot->done;
         void *arg = slot->arg;
         list = slot->next;
+        uint32_t want = slot->call.replylen;
         int error = slot->replied ? parseReply(slot, &slot->call) : EIO;
+        if (!error && slot->call.replylen != want)
+            error = EIO;
         finishData(slot->data, &slot->call, error);
         IOLockLock(fLock);
         putSlotLocked(slot);
