@@ -560,14 +560,16 @@ handle_current_locked(struct virtiofs_node *np, const struct fuse_attr *attr)
 static void
 opened_locked(struct virtiofs_node *np, bool count)
 {
-    if (count)
+    if (count) {
         np->ropens++;
+        wake(np, 0);
+    }
 }
 
 static bool
 handle_kept_locked(struct virtiofs_node *np)
 {
-    return (np->flags & VN_IDLE) && __atomic_load_n(&virtiofs_idle_files, __ATOMIC_RELAXED) <= 0;
+    return !node_used_locked(np) && __atomic_load_n(&virtiofs_idle_files, __ATOMIC_RELAXED) <= 0;
 }
 
 static int
@@ -862,6 +864,10 @@ file_idle(struct virtiofs_node *np)
     uint64_t fh;
 
     IOLockLock(vmp->lock);
+    while (!keep && np->users && (np->flags & VN_OPEN) && !node_used_locked(np)) {
+        np->flags |= VN_WANT;
+        IOLockSleep(vmp->lock, np, THREAD_UNINT);
+    }
     if ((np->flags & (VN_OPEN | VN_IDLE)) == VN_OPEN && !node_used_locked(np)) {
         TAILQ_INSERT_TAIL(&vmp->idle, np, idle);
         vmp->nidle++;
@@ -1187,6 +1193,8 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
     if (--np->readers == 0)
         wake(np, 0);
     IOLockUnlock(np->vmp->lock);
+    if (!opened)
+        file_idle(np);
     return error;
 }
 
@@ -1531,6 +1539,7 @@ virtiofs_vnop_mmap(struct vnop_mmap_args *ap)
     if (vnode_isreg(vp)) {
         IOLockLock(VTON(vp)->vmp->lock);
         VTON(vp)->flags |= VN_MAPPED | ((ap->a_fflags & PROT_WRITE) ? VN_MAPPED_WRITE : 0);
+        wake(VTON(vp), 0);
         IOLockUnlock(VTON(vp)->vmp->lock);
     }
     return 0;
