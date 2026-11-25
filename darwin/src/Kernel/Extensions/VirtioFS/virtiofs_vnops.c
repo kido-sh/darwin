@@ -264,17 +264,19 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     if (!changed)
         return true;
 
-    off_t cached = ubc_getsize(vp);
-    if (size != cached)
+    if (size != ubc_getsize(vp))
         ubc_setsize(vp, size);
-    if (ubc_pages_resident(vp)) {
-        ubc_msync(vp, 0, MAX(cached, size), NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+    bool resident = ubc_pages_resident(vp);
+    if (resident && size > old && (old & PAGE_MASK)) {
         off_t stale[2][2] = { { 0, 0 }, { old, size } };
-        if (size > old && (old & PAGE_MASK))
-            page_drop(np, old & ~(off_t)PAGE_MASK, stale);
+        page_drop(np, old & ~(off_t)PAGE_MASK, stale);
     }
     IOLockLock(vmp->lock);
     np->push_limit = size;
+    IOLockUnlock(vmp->lock);
+    if (resident)
+        ubc_msync(vp, 0, size > old ? old & ~(off_t)PAGE_MASK : size, NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+    IOLockLock(vmp->lock);
     wake(np, VN_SIZING);
     IOLockUnlock(vmp->lock);
     return true;
