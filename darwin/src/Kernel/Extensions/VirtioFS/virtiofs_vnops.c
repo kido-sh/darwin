@@ -404,24 +404,25 @@ handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
 static void
 handle_put(struct virtiofs_node *np, bool close)
 {
-    IOLockLock(np->vmp->lock);
+    struct virtiofs_mount *vmp = np->vmp;
+    struct fuse_release_in in = {};
+    struct virtiofs_call c = { .arg = { &in }, .arglen = { sizeof(in) } };
+
+    IOLockLock(vmp->lock);
     if (!close)
         np->users--;
     else if (np->flags & VN_OPEN)
         np->flags |= VN_CLOSING;
     bool release = np->users == 0 && (np->flags & VN_CLOSING);
-    struct fuse_release_in in = { .fh = np->fh };
-    if (release)
+    if (release) {
         np->flags &= ~(VN_OPEN | VN_CLOSING);
-    IOLockUnlock(np->vmp->lock);
-    if (!release)
-        return;
-
-    struct virtiofs_call c = {
-        .opcode = vnode_isdir(np->vp) ? FUSE_RELEASEDIR : FUSE_RELEASE, .nodeid = np->nodeid,
-        .arg = { &in }, .arglen = { sizeof(in) },
-    };
-    (void)virtiofs_call(np->vmp, NULL, &c);
+        in.fh = np->fh;
+        c.opcode = vnode_isdir(np->vp) ? FUSE_RELEASEDIR : FUSE_RELEASE;
+        c.nodeid = np->nodeid;
+    }
+    IOLockUnlock(vmp->lock);
+    if (release)
+        virtiofs_dev_submit(vmp->dev, &c, NULL, NULL);
 }
 
 static int
