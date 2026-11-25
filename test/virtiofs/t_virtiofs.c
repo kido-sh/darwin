@@ -14,11 +14,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/event.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <sys/xattr.h>
 #include <time.h>
 #include <unistd.h>
@@ -901,6 +903,292 @@ chaos_run(const char *path, int seconds)
 }
 
 static int
+locks_child(const char *path, off_t start, bool free)
+{
+    pid_t child = fork();
+    int status = 0;
+    if (child == 0) {
+        struct flock want = { .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = start, .l_len = 100 }, seen = want;
+        int fd = open(path, O_RDWR), got = fcntl(fd, F_GETLK, &seen), taken = fcntl(fd, F_SETLK, &want);
+        bool held = got == 0 && seen.l_type == F_WRLCK && seen.l_pid == getppid();
+        _exit(free ? taken != 0 : !(taken == -1 && (errno == EAGAIN || errno == EACCES) && held));
+    }
+    return child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+static int
+locks_run(const char *path)
+{
+    struct flock range = { .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 100 };
+    int a = open(path, O_RDWR | O_CREAT, 0644), b = open(path, O_RDWR);
+    CHECK(a >= 0 && b >= 0 && flock(a, LOCK_EX) == 0, "open and flock %s: %s", path, strerror(errno));
+    CHECK(flock(b, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK, "a second descriptor took the flock: %s", strerror(errno));
+    CHECK(flock(a, LOCK_UN) == 0 && flock(b, LOCK_EX | LOCK_NB) == 0 && flock(b, LOCK_UN) == 0,
+          "the flock was not free after its release: %s", strerror(errno));
+    CHECK(fcntl(a, F_SETLK, &range) == 0, "fcntl F_SETLK: %s", strerror(errno));
+    CHECK(locks_child(path, 50, false) == 0, "another process took or did not see a write lock over bytes 0 to 100");
+    CHECK(locks_child(path, 100, true) == 0, "another process could not lock the bytes beside it");
+    CHECK(close(b) == 0 && locks_child(path, 50, true) == 0, "the lock outlived the close of a descriptor of its process");
+    close(a);
+    printf("flock and fcntl locks: %d failures\n", failures);
+    return failures ? 1 : 0;
+}
+
+enum { OWNERS = 6, OWNED = 50000, OWNED_TAIL = 100000 };
+
+struct owned {
+    const char *path;
+    volatile unsigned char *map;
+    unsigned char *good;
+    off_t base;
+    unsigned seed;
+    long steps;
+    char why[200];
+};
+
+static atomic_int owned_stop;
+
+static void
+owned_differs(struct owned *r, const char *what, const unsigned char *got, size_t off, size_t len)
+{
+    for (size_t i = 0; i < len && !r->why[0]; i++) {
+        if (got[i] != r->good[off + i])
+            snprintf(r->why, sizeof(r->why), "step %ld, %s at %lld for %zu: byte %lld is %d, its writer last put %d there",
+                     r->steps, what, (long long)r->base + (long long)off, len, (long long)r->base + (long long)(off + i),
+                     got[i], r->good[off + i]);
+    }
+}
+
+static void *
+owned_work(void *arg)
+{
+    struct owned *r = arg;
+    unsigned char *buf = malloc(OWNED);
+    int fd = open(r->path, O_RDWR);
+    if (fd < 0 || !buf)
+        snprintf(r->why, sizeof(r->why), "open: %s", strerror(errno));
+    while (!atomic_load(&owned_stop) && !r->why[0]) {
+        size_t off = (size_t)rand_r(&r->seed) % OWNED, len = 1 + (size_t)rand_r(&r->seed) % 20000;
+        int kind = rand_r(&r->seed) % 100;
+        unsigned char mark = (unsigned char)(r->steps % 251 + 1);
+        len = off + len > OWNED ? OWNED - off : len;
+        if (kind < 25) {
+            memset(buf, mark, len);
+            if (pwrite(fd, buf, len, r->base + (off_t)off) != (ssize_t)len)
+                snprintf(r->why, sizeof(r->why), "step %ld, write: %s", r->steps, strerror(errno));
+            memset(r->good + off, mark, len);
+        } else if (kind < 50) {
+            memset((void *)(r->map + r->base + off), mark, len);
+            memset(r->good + off, mark, len);
+        } else if (kind < 70) {
+            if (pread(fd, buf, len, r->base + (off_t)off) != (ssize_t)len)
+                snprintf(r->why, sizeof(r->why), "step %ld, read: %s", r->steps, strerror(errno));
+            owned_differs(r, "read", buf, off, len);
+        } else if (kind < 90) {
+            memcpy(buf, (const void *)(r->map + r->base + off), len);
+            owned_differs(r, "the mapping", buf, off, len);
+        } else {
+            off_t first = (r->base + (off_t)off) & ~(off_t)16383;
+            off_t last = (r->base + (off_t)(off + len) + 16383) & ~(off_t)16383;
+            if (msync((void *)(r->map + first), (size_t)(last - first), MS_SYNC) != 0)
+                snprintf(r->why, sizeof(r->why), "step %ld, msync: %s", r->steps, strerror(errno));
+        }
+        r->steps++;
+    }
+    close(fd);
+    free(buf);
+    return NULL;
+}
+
+static void *
+owned_others(void *arg)
+{
+    struct owned *r = arg;
+    struct stat st;
+    int fd = open(r->path, O_RDWR);
+    while (!atomic_load(&owned_stop) && fd >= 0) {
+        int kind = rand_r(&r->seed) % 3;
+        off_t size = (off_t)OWNERS * OWNED + rand_r(&r->seed) % OWNED_TAIL;
+        if ((kind == 0 && fsync(fd) != 0) || (kind == 1 && fstat(fd, &st) != 0) || (kind == 2 && ftruncate(fd, size) != 0))
+            snprintf(r->why, sizeof(r->why), "step %ld, fsync, stat or truncate: %s", r->steps, strerror(errno));
+        r->steps++;
+        usleep(200);
+    }
+    close(fd);
+    return NULL;
+}
+
+static int
+owned_run(const char *path, const char *other, int seconds)
+{
+    static struct owned work[OWNERS], rest[2];
+    static unsigned char back[OWNED];
+    pthread_t t[OWNERS + 2];
+    size_t span = (size_t)OWNERS * OWNED;
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644), bad = fd < 0 || ftruncate(fd, (off_t)span) != 0;
+    volatile unsigned char *map = bad ? MAP_FAILED : mmap(NULL, span, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    long steps = 0;
+    if (map == MAP_FAILED) {
+        printf("create and map %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    for (int i = 0; i < OWNERS + 2; i++) {
+        struct owned *r = i < OWNERS ? &work[i] : &rest[i - OWNERS];
+        *r = (struct owned){ .path = path, .map = map, .good = calloc(1, OWNED), .base = (off_t)i * OWNED,
+                              .seed = (unsigned)i + 1 };
+        pthread_create(&t[i], NULL, i < OWNERS ? owned_work : owned_others, r);
+    }
+    sleep((unsigned)seconds);
+    atomic_store(&owned_stop, 1);
+    for (int i = 0; i < OWNERS + 2; i++)
+        pthread_join(t[i], NULL);
+    bad = fsync(fd) != 0;
+    int held = open(other, O_RDONLY), host = open(other, O_RDONLY);
+    for (int i = 0; i < OWNERS; i++) {
+        struct owned *r = &work[i];
+        if (!r->why[0] && pread(fd, back, OWNED, r->base) == OWNED)
+            owned_differs(r, "the last read", back, 0, OWNED);
+        if (!r->why[0]) {
+            memcpy(back, (const void *)(map + r->base), OWNED);
+            owned_differs(r, "the mapping at the end", back, 0, OWNED);
+        }
+        if (!r->why[0] && pread(host, back, OWNED, r->base) == OWNED)
+            owned_differs(r, "the Mac", back, 0, OWNED);
+        if (r->why[0])
+            printf("region %d: %s\n", i, r->why);
+        bad |= r->why[0] != 0;
+        steps += r->steps;
+    }
+    for (int i = 0; i < 2; i++) {
+        if (rest[i].why[0])
+            printf("beside the regions: %s\n", rest[i].why);
+        bad |= rest[i].why[0] != 0;
+    }
+    printf("%d threads worked %d s on their own regions of one file, %ld writes, stores, reads and msyncs beside %ld "
+           "fsyncs, stats and truncations of the tail: %s\n", OWNERS, seconds, steps, rest[0].steps + rest[1].steps,
+           bad ? "FAILED" : "every byte is what its writer last put there, in the guest and on the Mac");
+    close(host);
+    close(held);
+    munmap((void *)map, span);
+    close(fd);
+    return bad;
+}
+
+enum { MODEL_MAX = 262144 };
+
+static int
+model_differs(const char *what, int step, const unsigned char *got, const unsigned char *good, size_t off, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (got[i] != good[i]) {
+            printf("step %d, %s at %zu for %zu: byte %zu is %d, the model says %d\n", step, what, off, len, off + i, got[i],
+                   good[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int
+model_host(const char *other, int step, const unsigned char *good, size_t size)
+{
+    static unsigned char back[MODEL_MAX];
+    struct stat st;
+    int held = open(other, O_RDONLY), fd = open(other, O_RDONLY);
+    int bad = fd < 0 || fstat(fd, &st) != 0 || (size_t)st.st_size != size || pread(fd, back, MODEL_MAX, 0) != (ssize_t)size;
+    if (bad)
+        printf("step %d, the Mac: %lld bytes, the model says %zu: %s\n", step, fd < 0 ? -1LL : (long long)st.st_size, size,
+               strerror(errno));
+    bad = bad || model_differs("the Mac", step, back, good, 0, size);
+    close(fd);
+    close(held);
+    return bad;
+}
+
+static int
+model_run(const char *path, const char *other, int steps, unsigned seed)
+{
+    static unsigned char good[MODEL_MAX], buf[MODEL_MAX];
+    size_t size = 0;
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644), bad = fd < 0, step = 0;
+    volatile unsigned char *map = bad ? MAP_FAILED : mmap(NULL, MODEL_MAX, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    long counts[10] = { 0 };
+    bad = bad || map == MAP_FAILED;
+    srandom(seed);
+    for (step = 1; step <= steps && !bad; step++) {
+        int kind = (int)(random() % 100);
+        size_t off = (size_t)random() % MODEL_MAX, len = 1 + (size_t)random() % 40000;
+        unsigned char mark = (unsigned char)(step % 251 + 1);
+        len = off + len > MODEL_MAX ? MODEL_MAX - off : len;
+        if (kind < 30) {
+            memset(buf, mark, len);
+            bad = pwrite(fd, buf, len, (off_t)off) != (ssize_t)len;
+            if (off > size)
+                memset(good + size, 0, off - size);
+            memset(good + off, mark, len);
+            size = off + len > size ? off + len : size;
+            counts[0]++;
+        } else if (kind < 50) {
+            size_t want = off >= size ? 0 : len < size - off ? len : size - off;
+            bad = pread(fd, buf, len, (off_t)off) != (ssize_t)want || model_differs("read", step, buf, good + off, off, want);
+            counts[1]++;
+        } else if (kind < 60) {
+            bad = ftruncate(fd, (off_t)off) != 0;
+            if (off > size)
+                memset(good + size, 0, off - size);
+            size = off;
+            counts[2]++;
+        } else if (kind < 75 && size) {
+            off %= size;
+            len = len < size - off ? len : size - off;
+            memcpy(buf, (const void *)(map + off), len);
+            bad = model_differs("mapping", step, buf, good + off, off, len);
+            counts[3]++;
+        } else if (kind < 90 && size) {
+            off %= size;
+            len = len < size - off ? len : size - off;
+            memset((void *)(map + off), mark, len);
+            memset(good + off, mark, len);
+            bad = (random() & 1) && msync((void *)map, size, MS_SYNC) != 0;
+            counts[4]++;
+        } else if (kind < 92) {
+            bad = close(fd) != 0 || (fd = open(path, O_RDWR)) < 0;
+            counts[5]++;
+        } else if (kind < 94) {
+            bad = fsync(fd) != 0;
+            counts[6]++;
+        } else if (kind >= 94 && kind < 96) {
+            bad = fsync(fd) != 0 || model_host(other, step, good, size);
+            counts[7]++;
+        } else if (kind >= 96) {
+            int host = fsync(fd) == 0 ? open(other, O_WRONLY | (kind < 98 ? O_APPEND : 0)) : -1;
+            len = len < MODEL_MAX - size ? len : MODEL_MAX - size;
+            memset(buf, mark, len);
+            bad = host < 0 || (kind < 98 ? write(host, buf, len) != (ssize_t)len : ftruncate(host, (off_t)off) != 0);
+            if (kind < 98) {
+                memset(good + size, mark, len);
+                size += len;
+            } else {
+                if (off > size)
+                    memset(good + size, 0, off - size);
+                size = off;
+            }
+            bad = close(host) != 0 || bad || close(fd) != 0 || (fd = open(path, O_RDWR)) < 0;
+            counts[kind < 98 ? 8 : 9]++;
+        }
+        if (bad)
+            printf("step %d of seed %u failed, kind %d, at %zu for %zu, with %zu bytes: %s\n", step, seed, kind, off, len,
+                   size, strerror(errno));
+    }
+    bad = bad || fsync(fd) != 0 || model_host(other, step, good, size);
+    printf("%d steps of seed %u against a model: %ld writes, %ld reads, %ld truncations, %ld reads and %ld stores through "
+           "a mapping, %ld reopens, %ld fsyncs, %ld comparisons with the Mac, %ld appends and %ld truncations on the Mac, "
+           "%s\n", step - 1, seed, counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7],
+           counts[8], counts[9], bad ? "FAILED" : "all equal");
+    return bad;
+}
+
+static int
 short_write(const char *path, int seconds)
 {
     size_t size = 1 << 20;
@@ -1235,6 +1523,26 @@ lstat_round(const char *dir, char **names, size_t n)
 }
 
 static int
+bench_cold(const char *path, int count)
+{
+    struct stat st;
+    int fd = open(path, O_RDONLY);
+    size_t page = (size_t)getpagesize();
+    void *buf = valloc(page);
+    if (fd < 0 || fstat(fd, &st) != 0 || !buf || count <= 0 || (off_t)count * (off_t)page > st.st_size ||
+        fcntl(fd, F_RDAHEAD, 0) != 0)
+        return 1;
+    size_t pages = (size_t)st.st_size / page;
+    double t0 = now();
+    for (int i = 0; i < count; i++) {
+        if (pread(fd, buf, page, (off_t)(((size_t)i * 769 + 13) % pages * page)) != (ssize_t)page)
+            return 1;
+    }
+    printf("%s: %.1f us per first read of %zu KiB at a random offset\n", path, (now() - t0) / count * 1e6, page >> 10);
+    return 0;
+}
+
+static int
 bench_meta(const char *dir, int rounds)
 {
     DIR *d = opendir(dir);
@@ -1266,9 +1574,22 @@ bench_meta(const char *dir, int rounds)
         if (fd >= 0)
             close(fd);
     }
-    double opened = (now() - t0) / (double)n * 1e6;
+    double opened = (now() - t0) / (double)n * 1e6, reads[2];
+    static char small[65536];
+    for (int pass = 0; pass < 2; pass++) {
+        t0 = now();
+        for (size_t i = 0; i < n; i++) {
+            snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
+            int fd = open(path, O_RDONLY);
+            if (fd >= 0 && read(fd, small, sizeof(small)) < 0)
+                printf("read %s: %s\n", path, strerror(errno));
+            close(fd);
+        }
+        reads[pass] = (now() - t0) / (double)n * 1e6;
+    }
     printf("%s: readdir of %zu entries %.2f ms, lstat %.1f us each first, then %.1f us at %.2f CPUs busy, "
-           "open+close %.1f us each\n", dir, n, listed * 1e3, cold, warm, busy, opened);
+           "open+close %.1f us each, open+read+close %.1f us each first and then %.1f us\n", dir, n, listed * 1e3, cold,
+           warm, busy, opened, reads[0], reads[1]);
     return 0;
 }
 
@@ -2788,6 +3109,8 @@ main(int argc, char **argv)
         return stress(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (argc == 3 && !strcmp(argv[1], "bench"))
         return bench(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "bench-cold"))
+        return bench_cold(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "bench-random"))
         return bench_random(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "bench-meta"))
@@ -2847,6 +3170,12 @@ main(int argc, char **argv)
         return map_unpushed(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "chaos"))
         return chaos_run(argv[2], atoi(argv[3]));
+    if (argc == 3 && !strcmp(argv[1], "locks"))
+        return locks_run(argv[2]);
+    if (argc == 5 && !strcmp(argv[1], "owned"))
+        return owned_run(argv[2], argv[3], atoi(argv[4]));
+    if (argc == 6 && !strcmp(argv[1], "model"))
+        return model_run(argv[2], argv[3], atoi(argv[4]), (unsigned)atoi(argv[5]));
     if (argc == 5 && !strcmp(argv[1], "hold-readers"))
         return hold_readers(argv[2], argv[3], atoi(argv[4]));
     if (argc == 4 && !strcmp(argv[1], "advise-append"))

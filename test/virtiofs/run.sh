@@ -440,6 +440,7 @@ for n in 1 4095 4096 4097 16383 16384 16385 131071 131072 131073 1048583; do
 done
 head -c $((64 << 20)) /dev/urandom > "$share/big/64m"
 head -c $((32 << 20)) /dev/urandom > "$share/big/32m"
+head -c $((16 << 20)) /dev/urandom > "$share/big/16m"
 for i in $(seq 1 3000); do printf '%d\n' $i > "$share/many/f$i"; done
 printf 'deep\n' > "$share/deep/1/2/3/4/5/leaf"
 name255=$(printf 'n%.0s' $(seq 1 255))
@@ -567,6 +568,10 @@ check "beside a writer, read advice opens nothing and a closed reader's handle i
 check "read advice beside appends never caches zeros inside the file" guest /tmp/t_virtiofs advise-append /mnt/rw/aa 3
 check "a counter stored to in a tight loop beside appends loses no store" \
   guest /tmp/t_virtiofs store-loop /mnt/rw/sl /mnt/peer/sl 3
+check "random writes, truncations and mapped stores on one file, and changes on this Mac, match a model" \
+  guest /tmp/t_virtiofs model /mnt/rw/model /mnt/peer/model 30000 1
+check "six writers on their own parts of one file, sharing pages, find every byte as they left it" \
+  guest /tmp/t_virtiofs owned /mnt/rw/owned /mnt/peer/owned 10
 check "unmount the second mount of kido:rw" guest /sbin/umount /mnt/peer
 check "mount kido:full" guest /bin/sh -c 'mkdir -p /mnt/full && /sbin/mount -t virtiofs kido:full /mnt/full'
 check "a write and a push this Mac has no room for fail, and the store they met is pushed once there is room" refused_kept
@@ -591,6 +596,7 @@ guest /bin/sh -c 'cp /tmp/t_virtiofs /mnt/rw/gone && cat /mnt/rw/gone > /dev/nul
 check "concurrent creates, writes, renames, unlinks and appends" guest /tmp/t_virtiofs rw-stress /mnt/rw/stress 8 5
 check "writes, stores, reads into the file's own mapping, truncations and syncs on one file all keep going" \
   guest /tmp/t_virtiofs chaos /mnt/rw/chaos 10
+check "flock and fcntl locks hold between descriptors and processes of the guest" guest /tmp/t_virtiofs locks /mnt/rw/locked
 check "a file removed in the guest is released on this Mac" removed_released
 sleep 0.5
 check "no file stays open for writing on this Mac once the guest closed it" test "$(host_writing "$rw")" == 0
@@ -620,6 +626,7 @@ check "a file looked up 500 times is released once forgotten" forget_exact
 
 guest /sbin/mount -t virtiofs -o ro kido:data /mnt/data >/dev/null
 guest /tmp/t_virtiofs bench-random /mnt/data/big/32m 1000
+guest /tmp/t_virtiofs bench-cold /mnt/data/big/16m 1000
 guest /tmp/t_virtiofs bench /mnt/data/big/64m
 guest /tmp/t_virtiofs bench-meta /mnt/data/many 3
 guest /sbin/umount /mnt/data
