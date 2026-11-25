@@ -1757,18 +1757,16 @@ virtiofs_vnop_ioctl(struct vnop_ioctl_args *ap)
     if (!vnode_isreg(vp))
         return EINVAL;
     IOLockLock(np->vmp->lock);
-    bool opened = node_used_locked(np);
+    bool reading = node_used_locked(np) && (np->flags & VN_OPEN);
     IOLockUnlock(np->vmp->lock);
-    int error = opened ? 0 : file_open(np, ap->a_context, false);
-    if (!error)
-        error = node_attr(np, ap->a_context, &attr);
+    if (!reading)
+        return 0;
+    int error = node_attr(np, ap->a_context, &attr);
     if (!error) {
         off_t size = reader_begin(np);
         error = ra->ra_offset >= size ? EFBIG : advisory_read(vp, size, ra->ra_offset, ra->ra_count);
         reader_end(np);
     }
-    if (!opened)
-        file_idle(np);
     return error;
 }
 
