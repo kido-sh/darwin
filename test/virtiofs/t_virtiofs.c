@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
@@ -551,6 +552,8 @@ exec_fail(const char *path)
 struct advised_append {
     int fd;
     atomic_int stop;
+    long appends;
+    int failed;
 };
 
 static void *
@@ -559,9 +562,10 @@ append_forever(void *arg)
     struct advised_append *a = arg;
     char chunk[3000];
     memset(chunk, 'y', sizeof(chunk));
-    while (!atomic_load(&a->stop))
-        if (write(a->fd, chunk, sizeof(chunk)) != (ssize_t)sizeof(chunk))
-            break;
+    while (!atomic_load(&a->stop) && !a->failed) {
+        a->failed = write(a->fd, chunk, sizeof(chunk)) != (ssize_t)sizeof(chunk);
+        a->appends++;
+    }
     return NULL;
 }
 
@@ -602,18 +606,19 @@ advise_append(const char *path, int seconds)
     pthread_join(t, NULL);
     close(a.fd);
     close(fd);
-    printf("read advice beside appends: %ld rounds, %ld read zeros inside the file, %ld calls failed\n", rounds, zeros,
-           failed);
-    return zeros != 0 || failed != 0 || rounds == 0;
+    failed += a.failed;
+    printf("read advice beside %ld appends: %ld rounds, %ld read zeros inside the file, %ld calls failed\n", a.appends,
+           rounds, zeros, failed);
+    return zeros != 0 || failed != 0 || rounds == 0 || a.appends == 0;
 }
 
 static void *
 append_bytes(void *arg)
 {
     struct advised_append *a = arg;
-    while (!atomic_load(&a->stop)) {
-        if (write(a->fd, "a", 1) != 1)
-            break;
+    while (!atomic_load(&a->stop) && !a->failed) {
+        a->failed = (a->appends && a->appends % 8000 == 0 && ftruncate(a->fd, 4000) != 0) || write(a->fd, "a", 1) != 1;
+        a->appends++;
         usleep(50);
     }
     return NULL;
@@ -633,7 +638,12 @@ store_loop(const char *path, int seconds)
         return 1;
     }
     pthread_t t;
-    pthread_create(&t, NULL, append_bytes, &a);
+    if (pthread_create(&t, NULL, append_bytes, &a) != 0) {
+        munmap((void *)counter, 16384);
+        close(a.fd);
+        close(fd);
+        return 1;
+    }
     uint32_t done = 0, onfile = 0;
     for (time_t end = time(NULL) + seconds; time(NULL) < end;) {
         for (int i = 0; i < 1000; i++)
@@ -642,14 +652,22 @@ store_loop(const char *path, int seconds)
     }
     atomic_store(&a.stop, 1);
     pthread_join(t, NULL);
-    int rc = msync((void *)counter, 16384, MS_SYNC) != 0 || pread(fd, &onfile, sizeof(onfile), 100) != sizeof(onfile);
+    int rc = msync((void *)counter, 16384, MS_SYNC) != 0;
     uint32_t held = counter[25];
-    printf("a counter stored to in a tight loop beside appends: %u stores, %u in memory, %u in the file\n", done,
-           held, onfile);
+    rc |= msync((void *)counter, 16384, MS_INVALIDATE) != 0 || pread(fd, &onfile, sizeof(onfile), 100) != sizeof(onfile);
+    struct stat st;
+    size_t appended = fstat(fd, &st) == 0 && st.st_size > (off_t)sizeof(page) ? (size_t)st.st_size - sizeof(page) : 0;
+    char *tail = malloc(appended + 1);
+    size_t wrong = !tail || pread(fd, tail, appended, sizeof(page)) != (ssize_t)appended;
+    for (size_t i = 0; !wrong && i < appended; i++)
+        wrong += tail[i] != 'a';
+    free(tail);
+    printf("a counter stored to in a tight loop beside %ld appends: %u stores, %u in memory, %u on the Mac, %zu bytes "
+           "appended since the last truncation, %zu of them wrong\n", a.appends, done, held, onfile, appended, wrong);
     munmap((void *)counter, 16384);
     close(a.fd);
     close(fd);
-    return rc || held != done || onfile != done;
+    return rc || a.failed || a.appends == 0 || held != done || onfile != done || appended == 0 || wrong != 0;
 }
 
 static int
@@ -1522,6 +1540,148 @@ store_race(const char *name, off_t at)
           r.rounds, lost, wrote, stale);
 }
 
+struct seer {
+    int fd;
+    int rounds;
+    size_t size;
+    off_t at;
+    volatile uint32_t *counter;
+    atomic_int go;
+    atomic_int done;
+    atomic_int stop;
+    atomic_int failed;
+};
+
+static void *
+seen_store(void *arg)
+{
+    struct seer *s = arg;
+    while (!atomic_load(&s->stop))
+        s->counter[25]++;
+    return NULL;
+}
+
+static void *
+seen_write(void *arg)
+{
+    struct seer *s = arg;
+    char *data = malloc(s->size);
+    for (int i = 1; i <= s->rounds; i++) {
+        while (atomic_load(&s->go) != i)
+            sched_yield();
+        if (data)
+            memset(data, 'A' + i % 26, s->size);
+        if (!data || pwrite(s->fd, data, s->size, s->at) != (ssize_t)s->size)
+            atomic_store(&s->failed, 1);
+        atomic_store(&s->done, i);
+    }
+    free(data);
+    return NULL;
+}
+
+static bool
+on_host(int fd, volatile char *map, off_t at, char want)
+{
+    char back = 0;
+    off_t page = at & ~(off_t)16383;
+    return msync((void *)(map + page), 16384, MS_INVALIDATE) == 0 && pread(fd, &back, 1, at) == 1 && back == want;
+}
+
+static void
+seen_race(const char *name)
+{
+    static char page[20000];
+    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
+    memset(page, 'x', sizeof(page));
+    CHECK(fd >= 0 && write(fd, page, sizeof(page)) == (ssize_t)sizeof(page), "create %s: %s", name, strerror(errno));
+    volatile char *map = fd < 0 ? MAP_FAILED : mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    struct seer s = { .fd = fd, .rounds = 1000, .size = 20000, .at = 4000, .counter = (volatile uint32_t *)map };
+    struct kevent ev, got;
+    struct timespec now = { 0, 0 }, wait = { 2, 0 };
+    int kq = kqueue();
+    EV_SET(&ev, fd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_EXTEND, 0, NULL);
+    pthread_t t, u;
+    bool ready = map != MAP_FAILED && kq >= 0 && kevent(kq, &ev, 1, NULL, 0, NULL) == 0 &&
+                 pthread_create(&t, NULL, seen_write, &s) == 0;
+    CHECK(ready, "map and watch %s: %s", name, strerror(errno));
+    if (!ready)
+        return;
+    bool storing = pthread_create(&u, NULL, seen_store, &s) == 0;
+    int seen = 0, lost = 0, failed = !storing;
+    for (int i = 1; i <= s.rounds; i++) {
+        char want = (char)('A' + i % 26);
+        while (kevent(kq, NULL, 0, &got, 1, &now) > 0)
+            ;
+        atomic_store(&s.go, i);
+        kevent(kq, NULL, 0, &got, 1, &wait);
+        uint64_t until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + 2000000000;
+        while (map[16484] != want && clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < until)
+            ;
+        bool saw = map[16484] == want;
+        if (saw) {
+            map[16584] = 'M';
+            map[22100] = 'N';
+            failed += msync((void *)(map + 16384), 16384, MS_SYNC) != 0;
+        }
+        while (atomic_load(&s.done) != i)
+            sched_yield();
+        seen += saw;
+        lost += saw && !(on_host(fd, map, 16584, 'M') && on_host(fd, map, 22100, 'N'));
+        failed += ftruncate(fd, 16384) != 0 || ftruncate(fd, sizeof(page)) != 0;
+    }
+    atomic_store(&s.stop, 1);
+    pthread_join(t, NULL);
+    if (storing)
+        pthread_join(u, NULL);
+    munmap((void *)map, 65536);
+    close(kq);
+    close(fd);
+    CHECK(seen == s.rounds && lost == 0 && failed == 0 && !atomic_load(&s.failed),
+          "%s: in %d rounds a mapper saw the write's bytes %d times, %d times a store made after that did not reach "
+          "the Mac, and %d calls failed", name, s.rounds, seen, lost, failed + atomic_load(&s.failed));
+}
+
+static void
+mapped_race(const char *name)
+{
+    size_t size = 4 << 20;
+    char *page = malloc(size);
+    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
+    if (page)
+        memset(page, 'x', size);
+    struct seer s = { .fd = fd, .rounds = 300, .size = size };
+    pthread_t t;
+    bool ready = page && fd >= 0 && write(fd, page, size) == (ssize_t)size && pthread_create(&t, NULL, seen_write, &s) == 0;
+    free(page);
+    CHECK(ready, "create %s: %s", name, strerror(errno));
+    if (!ready)
+        return;
+    int seen = 0, lost = 0, failed = 0;
+    for (int i = 1; i <= s.rounds; i++) {
+        char want = (char)('A' + i % 26);
+        uint64_t touch = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + arc4random_uniform(8000000);
+        atomic_store(&s.go, i);
+        while (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < touch)
+            ;
+        volatile char *map = mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        bool saw = map != MAP_FAILED && map[100] == want;
+        if (saw) {
+            map[200] = 'M';
+            failed += msync((void *)map, 16384, MS_SYNC) != 0;
+        }
+        while (atomic_load(&s.done) != i)
+            sched_yield();
+        seen += saw;
+        lost += saw && !on_host(fd, map, 200, 'M');
+        failed += map == MAP_FAILED || msync((void *)map, 16384, MS_INVALIDATE) != 0 || munmap((void *)map, 16384) != 0;
+    }
+    pthread_join(t, NULL);
+    close(fd);
+    CHECK(seen > 0 && lost == 0 && failed == 0 && !atomic_load(&s.failed),
+          "%s: in %d rounds a mapping made during the write saw its bytes %d times, %d times a store made after that "
+          "did not reach the Mac, and %d calls failed", name, s.rounds, seen, lost, failed + atomic_load(&s.failed));
+}
+
 static int
 link_pair(const char *dir, const char *step)
 {
@@ -1634,6 +1794,8 @@ rw_edge(const char *dir)
     store_race("race-write", 20000);
     store_race("race-append", 4000);
     store_race("race-inside", 2000);
+    seen_race("race-seen");
+    mapped_race("race-mapped");
 
     fd = open("times", O_WRONLY | O_CREAT | O_EXCL, 0644);
     close(fd);
