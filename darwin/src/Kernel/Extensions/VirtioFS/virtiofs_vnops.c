@@ -367,8 +367,8 @@ append_offset(struct virtiofs_node *np, vfs_context_t ctx, off_t *offset)
     return 0;
 }
 
-static int
-node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
+static bool
+node_cached(struct virtiofs_node *np, struct fuse_attr *attr)
 {
     IOLockLock(np->vmp->lock);
     wait_clear(np, VN_SIZING);
@@ -376,7 +376,13 @@ node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
     if (cached)
         *attr = np->attr;
     IOLockUnlock(np->vmp->lock);
-    return cached ? 0 : node_fetch(np, ctx, attr);
+    return cached;
+}
+
+static int
+node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
+{
+    return node_cached(np, attr) ? 0 : node_fetch(np, ctx, attr);
 }
 
 static void
@@ -778,8 +784,8 @@ handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open, bool co
     if (!*open || current)
         return 0;
 
-    bool applied = true;
-    int error = ask ? node_getattr(np, ctx, &attr, &applied) : node_attr(np, ctx, &attr);
+    bool applied = !ask && node_cached(np, &attr);
+    int error = applied ? 0 : node_getattr(np, ctx, &attr, &applied);
     if (error)
         return error;
     IOLockLock(vmp->lock);
