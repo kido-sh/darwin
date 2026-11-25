@@ -227,14 +227,14 @@ node_place(vnode_t vp, vnode_t dvp, struct componentname *cnp)
 {
     struct virtiofs_mount *vmp = VTON(vp)->vmp;
 
-    if (vp == dvp)
+    if (vp == dvp || vnode_isvroot(vp))
         return EIO;
 
     vnode_t parent = vnode_getparent(vp);
     const char *name = vnode_getname(vp);
     bool same = parent == dvp && name && strnlen(name, cnp->cn_namelen + 1) == (size_t)cnp->cn_namelen &&
                 strncmp(name, cnp->cn_nameptr, cnp->cn_namelen) == 0;
-    bool move = !same && parent != dvp && vnode_isdir(vp);
+    bool move = !same && vnode_isdir(vp);
 
     if (name)
         vnode_putname(name);
