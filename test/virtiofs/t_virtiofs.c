@@ -540,6 +540,67 @@ read_close(const char *path, int rounds)
 }
 
 static int
+exec_fail(const char *path)
+{
+    char *argv[] = { (char *)path, NULL };
+    execv(path, argv);
+    printf("exec: %s\n", strerror(errno));
+    return errno != ENOEXEC;
+}
+
+struct advised_append {
+    int fd;
+    atomic_int stop;
+};
+
+static void *
+append_forever(void *arg)
+{
+    struct advised_append *a = arg;
+    char chunk[3000];
+    memset(chunk, 'y', sizeof(chunk));
+    while (!atomic_load(&a->stop))
+        if (write(a->fd, chunk, sizeof(chunk)) != (ssize_t)sizeof(chunk))
+            break;
+    return NULL;
+}
+
+static int
+advise_append(const char *path, int seconds)
+{
+    static char buf[131072];
+    memset(buf, 'x', 4000);
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    struct advised_append a = { .fd = open(path, O_WRONLY | O_APPEND) };
+    if (fd < 0 || a.fd < 0 || write(fd, buf, 4000) != 4000) {
+        printf("create %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    pthread_t t;
+    pthread_create(&t, NULL, append_forever, &a);
+    long rounds = 0, zeros = 0;
+    for (time_t end = time(NULL) + seconds; time(NULL) < end; rounds++) {
+        struct stat st;
+        if (fstat(fd, &st) != 0)
+            break;
+        off_t at = st.st_size > 65536 ? st.st_size - 65536 : 0;
+        struct radvisory ra = { .ra_offset = at, .ra_count = 131072 };
+        fcntl(fd, F_RDADVISE, &ra);
+        if (fstat(fd, &st) != 0)
+            break;
+        off_t len = st.st_size - at < (off_t)sizeof(buf) ? st.st_size - at : (off_t)sizeof(buf);
+        ssize_t got = pread(fd, buf, (size_t)len, at);
+        zeros += got > 0 && memchr(buf, 0, (size_t)got) != NULL;
+    }
+    atomic_store(&a.stop, 1);
+    pthread_join(t, NULL);
+    close(a.fd);
+    close(fd);
+    printf("read advice beside appends: %ld rounds, %ld read zeros inside the file\n", rounds, zeros);
+    return zeros != 0;
+}
+
+static int
 advise_close(const char *path, int mib)
 {
     struct radvisory ra = { .ra_offset = 0, .ra_count = mib << 20 };
@@ -1318,32 +1379,33 @@ map_pressure(const char *path, int mib)
     return failures ? 1 : 0;
 }
 
-struct grower {
+struct storer {
     int fd;
-    int mode;
+    off_t at;
     int rounds;
     atomic_int go;
     atomic_int done;
 };
 
 static void *
-grow_one(void *arg)
+race_write(void *arg)
 {
-    struct grower *g = arg;
-    for (int i = 1; i <= g->rounds; i++) {
-        while (atomic_load(&g->go) != i)
+    struct storer *r = arg;
+    for (int i = 1; i <= r->rounds; i++) {
+        while (atomic_load(&r->go) != i)
             sched_yield();
-        if (g->mode == 0)
-            ftruncate(g->fd, 10000);
+        char c = (char)('A' + i % 26);
+        if (r->at < 0)
+            ftruncate(r->fd, 10000);
         else
-            pwrite(g->fd, "E", 1, g->mode == 1 ? 20000 : 4000);
-        atomic_store(&g->done, i);
+            pwrite(r->fd, &c, 1, r->at);
+        atomic_store(&r->done, i);
     }
     return NULL;
 }
 
 static void
-tail_race(const char *name, int mode)
+store_race(const char *name, off_t at)
 {
     char page[4000];
     int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
@@ -1355,27 +1417,35 @@ tail_race(const char *name, int mode)
         close(fd);
         return;
     }
-    struct grower g = { .fd = fd, .mode = mode, .rounds = 200 };
+    struct storer r = { .fd = fd, .at = at, .rounds = 1000 };
     pthread_t t;
-    pthread_create(&t, NULL, grow_one, &g);
-    int lost = 0;
-    for (int i = 1; i <= g.rounds; i++) {
+    pthread_create(&t, NULL, race_write, &r);
+    int lost = 0, wrote = 0, stale = 0;
+    for (int i = 1; i <= r.rounds; i++) {
         char want = (char)('a' + i % 26), back = 0;
+        if (at < 0)
+            map[5000] = 'Z';
         uint64_t until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + arc4random_uniform(200000);
-        atomic_store(&g.go, i);
+        atomic_store(&r.go, i);
         while (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < until)
             ;
         map[100] = want;
-        while (atomic_load(&g.done) != i)
+        while (atomic_load(&r.done) != i)
             sched_yield();
         if (msync(map, 16384, MS_SYNC) != 0 || pread(fd, &back, 1, 100) != 1 || back != want)
             lost++;
+        if (at >= 0 && (pread(fd, &back, 1, at) != 1 || back != (char)('A' + i % 26)))
+            wrote++;
+        if (at < 0 && (pread(fd, &back, 1, 5000) != 1 || back != 0))
+            stale++;
         ftruncate(fd, sizeof(page));
     }
     pthread_join(t, NULL);
     munmap(map, 16384);
     close(fd);
-    CHECK(lost == 0, "%s: %d of %d stores made while another thread grew the file were lost", name, lost, g.rounds);
+    CHECK(lost == 0 && wrote == 0 && stale == 0,
+          "%s: of %d rounds, %d stores and %d writes beside them were lost, %d stores past the end came back", name,
+          r.rounds, lost, wrote, stale);
 }
 
 static int
@@ -1486,9 +1556,10 @@ rw_edge(const char *dir)
         close(fd);
     }
 
-    tail_race("race-truncate", 0);
-    tail_race("race-write", 1);
-    tail_race("race-append", 2);
+    store_race("race-truncate", -1);
+    store_race("race-write", 20000);
+    store_race("race-append", 4000);
+    store_race("race-inside", 2000);
 
     fd = open("times", O_WRONLY | O_CREAT | O_EXCL, 0644);
     close(fd);
@@ -1528,6 +1599,25 @@ map_hold(const char *path, int seconds)
     printf("size seen after the host appended: %lld\n", rc == 0 ? (long long)st.st_size : -1LL);
     rc |= msync(map, 16384, MS_SYNC) | munmap(map, 16384);
     close(fd);
+    return rc != 0;
+}
+
+static int
+map_reader(const char *path, int seconds)
+{
+    int rfd = open(path, O_RDONLY), wfd = open(path, O_RDWR);
+    char *map = wfd < 0 ? MAP_FAILED : mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, wfd, 0);
+    if (rfd < 0 || map == MAP_FAILED) {
+        printf("open or mmap: %s\n", strerror(errno));
+        return 1;
+    }
+    map[0] = 'W';
+    close(wfd);
+    int rc = munmap(map, 16384);
+    printf("unmapped: %s\n", rc ? strerror(errno) : "ok");
+    fflush(stdout);
+    sleep((unsigned)seconds);
+    close(rfd);
     return rc != 0;
 }
 
@@ -1931,6 +2021,10 @@ main(int argc, char **argv)
         return rw_edge(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "map-hold"))
         return map_hold(argv[2], atoi(argv[3]));
+    if (argc == 3 && !strcmp(argv[1], "exec-fail"))
+        return exec_fail(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "advise-append"))
+        return advise_append(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "advise-close"))
         return advise_close(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "link-pair"))
@@ -1939,6 +2033,8 @@ main(int argc, char **argv)
         return raw_create(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "case-probe"))
         return case_probe(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "map-reader"))
+        return map_reader(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "map-store"))
         return map_store(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "map-sync"))

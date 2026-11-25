@@ -206,12 +206,13 @@ trunc_reader() {
   guest /tmp/t_virtiofs hold-mode /mnt/rw/oc rdonly-creat 3 > /dev/null 2>&1 &
   holder=$!
   sleep 1.5
-  created=$(host_writing "$rw/oc\$")
+  local held
+  created=$(host_writing "$rw/oc\$") held=$(host_open "$rw/oc\$")
   wait $holder
   status=$((status | $?))
   echo "while a descriptor lives, the Mac holds $writers files open for writing after O_RDONLY | O_TRUNC" \
     "($opened open at all) and $created after O_RDONLY | O_CREAT"
-  [[ $status == 0 && $writers == 0 && $opened -ge 1 && $created == 0 && ! -s "$rw/ot" ]]
+  [[ $status == 0 && $writers == 0 && $opened -ge 1 && $created == 0 && $held -ge 1 && ! -s "$rw/ot" ]]
 }
 synced_map() {
   local holder seen
@@ -230,16 +231,20 @@ removed_released() {
   echo "a file the guest removed before thousands of others is open $held times on this Mac"
   [[ $held == 0 ]]
 }
+inode_open() {
+  lsof -p "$vm" 2>/dev/null |
+    awk -v dev="$((${1} >> 24)),$((${1} & 0xffffff))" -v ino="$2" '$5 == "REG" && $6 == dev && $8 == ino' | wc -l
+}
 links_released() {
-  local dev ino held
+  local dev ino before held
   guest /tmp/t_virtiofs link-pair /mnt/rw/edge make > /dev/null || return 1
   dev=$(stat -f %d "$rw/edge/linked") ino=$(stat -f %i "$rw/edge/linked") || return 1
+  before=$(inode_open "$dev" "$ino")
   guest /tmp/t_virtiofs link-pair /mnt/rw/edge remove > /dev/null || return 1
   sleep 1
-  held=$(lsof -p "$vm" 2>/dev/null |
-    awk -v dev="$((dev >> 24)),$((dev & 0xffffff))" -v ino="$ino" '$5 == "REG" && $6 == dev && $8 == ino' | wc -l)
-  echo "a file whose two links the guest removed is open $((held)) times on this Mac"
-  [[ $held -eq 0 ]]
+  held=$(inode_open "$dev" "$ino")
+  echo "a file with two links is open $((before)) times on this Mac, and $((held)) times once the guest removed both"
+  [[ $before -ge 1 && $held -eq 0 ]]
 }
 raw_create_released() {
   local writers
@@ -249,16 +254,42 @@ raw_create_released() {
   echo "a file whose creating open failed before it opened is open $writers times for writing on this Mac"
   [[ -e "$rw/raw" && $writers == 0 ]]
 }
+exec_read_released() {
+  local was held status
+  was=$(guest /bin/sh -c 'sysctl -n vfs.generic.virtiofs.idle_files') || return 1
+  guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.idle_files=0 >/dev/null && /tmp/t_virtiofs exec-fail /mnt/data/notprog'
+  status=$?
+  sleep 1
+  held=$(host_fds '/notprog$')
+  guest /bin/sh -c "sysctl -w vfs.generic.virtiofs.idle_files=$was" >/dev/null
+  echo "a file an exec read and refused, with no idle handles kept: the host holds it open $held times"
+  [[ $status == 0 && $held -le 1 ]]
+}
 idle_none() {
   local was held status
   was=$(guest /bin/sh -c 'sysctl -n vfs.generic.virtiofs.idle_files') || return 1
-  guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.idle_files=0 >/dev/null && /tmp/t_virtiofs advise-close /mnt/data/big/32m 32'
+  head -c $((32 << 20)) /dev/urandom > "$share/big/cold"
+  guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.idle_files=0 >/dev/null && /tmp/t_virtiofs advise-close /mnt/data/big/cold 32'
   status=$?
   sleep 1
-  held=$(host_fds '/big/32m$')
+  held=$(host_fds '/big/cold$')
   guest /bin/sh -c "sysctl -w vfs.generic.virtiofs.idle_files=$was" >/dev/null
-  echo "a file closed while 32 MiB of read advice ran, with no idle handles kept: the host holds it open $held times"
+  echo "a file never read before, closed while 32 MiB of read advice ran, with no idle handles kept: the host holds it" \
+    "open $held times"
   [[ $status == 0 && $held -le 1 ]]
+}
+unmapped_released() {
+  local holder writers status
+  printf '%016384d' 0 > "$rw/mr"
+  guest /tmp/t_virtiofs map-reader /mnt/rw/mr 3 > "$work/map-reader.out" 2>&1 &
+  holder=$!
+  sleep 1.5
+  writers=$(host_writing "$rw/mr\$")
+  wait $holder
+  status=$?
+  echo "after munmap, with a reader still open: the Mac holds $writers files open for writing, first byte" \
+    "$(head -c 1 "$rw/mr")"
+  [[ $status == 0 && $writers == 0 && $(head -c 1 "$rw/mr") == W ]]
 }
 mapped_writer_kept() {
   local holder status
@@ -297,6 +328,8 @@ mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,long,links,private} "$wor
 printf 'wide share\n' > "$work/wide/f"
 printf 'mine\n' > "$share/private/f"
 printf 'revoke\n' > "$share/revoke"
+printf 'not a program\n' > "$share/notprog"
+chmod 755 "$share/notprog"
 chmod 700 "$share/private"
 : > "$share/small/0"
 for n in 1 4095 4096 4097 16383 16384 16385 131071 131072 131073 1048583; do
@@ -397,6 +430,7 @@ check "with revalidate_open at 0, a refusal takes effect after the attribute tim
 guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.revalidate_open=1' >/dev/null
 check "a mount keeps at most idle_files closed files open on the host" idle_kept
 check "with no idle handles kept, a file closed during its read-ahead is released" idle_none
+check "with no idle handles kept, a file an exec read without opening it is released" exec_read_released
 check "concurrent reads while every close releases a handle" guest /bin/sh -c 'w=$(sysctl -n vfs.generic.virtiofs.idle_files) &&
   sysctl -w vfs.generic.virtiofs.idle_files=1 >/dev/null && /tmp/t_virtiofs stress /mnt/data 16 1; r=$?;
   sysctl -w vfs.generic.virtiofs.idle_files=$w >/dev/null; exit $r'
@@ -423,6 +457,8 @@ check "a descriptor keeps working after its file is removed or renamed" guest /t
 check "edge cases of creation, stores beside growth, times and flags" guest /tmp/t_virtiofs rw-edge /mnt/rw/edge
 check "a file whose links were all removed is released on this Mac" links_released
 check "a writable mapping keeps writing after its descriptor closes and this Mac revokes writing" mapped_writer_kept
+check "a write handle is let go at munmap while a reader keeps the file open" unmapped_released
+check "read advice beside appends never caches zeros inside the file" guest /tmp/t_virtiofs advise-append /mnt/rw/aa 3
 check "a create whose open fails before it opens leaves nothing open for writing" raw_create_released
 check "a case-only rename works after the first case probe asked about a removed file" guest /bin/sh -c \
   'mkdir -p /mnt/cs && /sbin/mount -t virtiofs kido:rw /mnt/cs && /tmp/t_virtiofs case-probe /mnt/cs/cs; r=$?;
