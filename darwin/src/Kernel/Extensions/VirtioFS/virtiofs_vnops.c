@@ -575,7 +575,8 @@ file_idle(struct virtiofs_node *np)
             idle_remove_locked(oldest);
             continue;
         }
-        handle_drop_locked(oldest, &fh);
+        if (!handle_drop_locked(oldest, &fh))
+            continue;
         IOLockUnlock(vmp->lock);
         handle_release(oldest, fh);
         IOLockLock(vmp->lock);
