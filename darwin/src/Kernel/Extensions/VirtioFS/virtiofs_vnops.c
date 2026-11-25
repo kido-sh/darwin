@@ -1046,10 +1046,13 @@ push_dirty(vnode_t vp)
     uint32_t failures = np->push_failures;
     IOLockUnlock(np->vmp->lock);
     int error = push_range(vp, 0, ubc_getsize(vp));
+    vnode_waitforwrites(vp, 0, 0, 0, "virtiofs_push");
     if (error)
         push_failed(np);
     IOLockLock(np->vmp->lock);
-    if (!error && np->push_failures == failures)
+    if (!error && np->push_failures != failures)
+        error = EIO;
+    if (!error)
         np->flags &= ~VN_UNPUSHED;
     IOLockUnlock(np->vmp->lock);
     return error;
