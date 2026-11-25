@@ -153,6 +153,15 @@ readers_wait_locked(struct virtiofs_node *np)
     }
 }
 
+static void
+page_drop(vnode_t vp, off_t page)
+{
+    for (int i = 0; i < 8 && ubc_page_op(vp, page, 0, NULL, NULL) == KERN_SUCCESS; i++)
+        ubc_msync(vp, page, page + PAGE_SIZE, NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+    if (ubc_page_op(vp, page, 0, NULL, NULL) == KERN_SUCCESS)
+        ubc_msync(vp, page, page + PAGE_SIZE, NULL, UBC_INVALIDATE);
+}
+
 static bool
 node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec, uint32_t nsec, uint64_t version)
 {
@@ -186,8 +195,11 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     off_t cached = ubc_getsize(vp);
     if (size < cached)
         ubc_setsize(vp, size);
-    if (ubc_pages_resident(vp))
+    if (ubc_pages_resident(vp)) {
         ubc_msync(vp, 0, MAX(cached, size), NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+        if (size > old && (old & PAGE_MASK))
+            page_drop(vp, old & ~(off_t)PAGE_MASK);
+    }
     if (size > cached)
         ubc_setsize(vp, size);
     IOLockLock(vmp->lock);
@@ -254,7 +266,7 @@ node_changed(struct virtiofs_node *np, off_t tail, off_t from, off_t to, off_t s
     IOLockUnlock(vmp->lock);
     if (ubc_pages_resident(vp)) {
         if (tail >= 0) {
-            ubc_msync(vp, tail, tail + PAGE_SIZE, NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+            page_drop(vp, tail);
             from = MAX(from, tail + PAGE_SIZE);
         }
         if (to > from)
