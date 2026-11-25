@@ -1663,6 +1663,7 @@ sizing_enter(struct virtiofs_node *np)
     if (entered) {
         wait_clear(np, VN_SIZING);
         sizing_set(np);
+        readers_wait_locked(np);
     }
     IOLockUnlock(np->vmp->lock);
     return entered;
