@@ -1736,11 +1736,11 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
                                  UPL_COMMIT_CLEAR_DIRTY | UPL_COMMIT_FREE_ON_EMPTY);
         return 0;
     }
+    bool held = !rdonly && whandle_hold(np, &fh);
+    bool entered = sync && sizing_enter(np);
     IOLockLock(np->vmp->lock);
     np->pageouts++;
     IOLockUnlock(np->vmp->lock);
-    bool held = !rdonly && whandle_hold(np, &fh);
-    bool entered = sync && sizing_enter(np);
     bool made = ubc_create_upl(vp, ap->a_f_offset, (int)ap->a_size, &upl, &pl, kind) == KERN_SUCCESS;
     if (entered) {
         IOLockLock(np->vmp->lock);
@@ -2733,17 +2733,26 @@ static int
 virtiofs_vnop_inactive(struct vnop_inactive_args *ap)
 {
     vnode_t vp = ap->a_vp;
+    struct virtiofs_node *np = VTON(vp);
 
-    if (vnode_isreg(vp)) {
-        push_dirty(vp);
-        IOLockLock(VTON(vp)->vmp->lock);
-        VTON(vp)->creator = NULL;
-        IOLockUnlock(VTON(vp)->vmp->lock);
-        whandle_close(VTON(vp), false);
-        file_idle(VTON(vp));
-    } else {
-        dir_close(VTON(vp));
+    if (!vnode_isreg(vp)) {
+        dir_close(np);
+        return 0;
     }
+    IOLockLock(np->vmp->lock);
+    bool idle = !(np->flags & VN_SIZING) && !np->readers;
+    if (idle)
+        sizing_set(np);
+    np->creator = NULL;
+    IOLockUnlock(np->vmp->lock);
+    if (idle) {
+        push_dirty(vp);
+        IOLockLock(np->vmp->lock);
+        sizing_done(np, 0);
+        IOLockUnlock(np->vmp->lock);
+        whandle_close(np, false);
+    }
+    file_idle(np);
     return 0;
 }
 
