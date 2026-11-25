@@ -2834,8 +2834,8 @@ virtiofs_vnop_inactive(struct vnop_inactive_args *ap)
         IOLockLock(np->vmp->lock);
         sizing_done(np, 0);
         IOLockUnlock(np->vmp->lock);
-        whandle_close(np, false);
     }
+    whandle_close(np, false);
     file_idle(np);
     return 0;
 }
