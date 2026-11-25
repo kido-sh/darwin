@@ -57,6 +57,7 @@ private:
     IOInterruptEventSource *fInterruptSource;
     bool fIndirect;
     bool fDead;
+    bool fQuiesced;
     bool fStarted;
     bool fLostInterrupt;
     bool fPolling;

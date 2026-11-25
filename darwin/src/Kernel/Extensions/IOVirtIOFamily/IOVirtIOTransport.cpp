@@ -249,10 +249,11 @@ IOVirtIOTransport::reset()
     return true;
 }
 
-void
+bool
 IOVirtIOTransport::detach()
 {
-    if (fCommonCfg && !reset())
+    bool quiet = !fCommonCfg || reset();
+    if (!quiet)
         IOLog("IOVirtIOTransport: the device did not finish resetting\n");
     if (fPCIDevice)
         fPCIDevice->setBusMasterEnable(false);
@@ -264,6 +265,7 @@ IOVirtIOTransport::detach()
     fCommonCfg = fNotifyCfg = fIsrCfg = fDeviceCfg = 0;
     fNotifyLength = fDeviceCfgLength = 0;
     fPCIDevice = 0;
+    return quiet;
 }
 
 uint32_t

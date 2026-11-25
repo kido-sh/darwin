@@ -250,8 +250,8 @@ VirtioFSDevice::failLocked(bool broken)
     if (broken)
         IOLog("VirtioFS: the device completed a request it was not given, failing it\n");
     fDead = true;
-    fTransport.detach();
-    for (unsigned i = 0; i < fSlotCount; i++)
+    fQuiesced = fTransport.detach();
+    for (unsigned i = 0; fQuiesced && i < fSlotCount; i++)
         IOLockWakeup(fLock, &fSlots[i], false);
     IOLockWakeup(fLock, &fFreeSlots, false);
     IOLockWakeup(fLock, &fQueues[kHiprio], false);
@@ -465,7 +465,7 @@ VirtioFSDevice::call(struct virtiofs_call *c, uint32_t uid, uint32_t gid, uint32
         bool submitted = submitLocked(kRequests, slot, chain, count);
         if (submitted)
             spinLocked(slot, c->datalen);
-        while (submitted && !slot->done && !fDead)
+        while (submitted && !slot->done && !fQuiesced)
             pauseLocked(slot);
         if (slot->done)
             error = parseReply(slot, c);

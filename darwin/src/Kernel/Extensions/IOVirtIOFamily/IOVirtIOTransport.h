@@ -79,7 +79,7 @@ public:
     // performs ACKNOWLEDGE|DRIVER. Caller does feature negotiation next
     // (negotiateFeatures), then setDriverOk() once virtqueues are set up.
     bool attach(IOPCIDevice *pci);
-    void detach();
+    bool detach();
 
     // Writes the low 32 driver-feature bits (features 0-31), virtio-gpu/
     // blk/net/input/snd all fit their needed feature bits in the low
