@@ -282,16 +282,26 @@ readers_beside_writer() {
   local was how holder opened writing status=0
   was=$(guest /bin/sh -c 'sysctl -n vfs.generic.virtiofs.idle_files') || return 1
   guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.idle_files=0' > /dev/null
-  for how in advise read-close; do
-    printf 'readers\n' > "$rw/rb-$how"
-    guest /tmp/t_virtiofs hold-readers "/mnt/rw/rb-$how" $how 3 > /dev/null 2>&1 &
-    holder=$!
-    sleep 1.5
-    opened=$(host_open "$rw/rb-$how\$") writing=$(host_writing "$rw/rb-$how\$")
-    wait $holder || status=1
-    echo "$how beside a writer: the Mac holds the file open $opened times, $writing of them for writing"
-    [[ $opened == 2 && $writing == 1 ]] || status=1
-  done
+  local reading
+  printf 'readers\n' > "$rw/rb-advise"
+  guest /tmp/t_virtiofs hold-readers /mnt/rw/rb-advise advise 3 > /dev/null 2>&1 &
+  holder=$!
+  sleep 1.5
+  opened=$(host_open "$rw/rb-advise\$") writing=$(host_writing "$rw/rb-advise\$")
+  wait $holder || status=1
+  echo "read advice beside a writer: the Mac holds the file open $opened times, $writing of them for writing"
+  [[ $opened == 2 && $writing == 1 ]] || status=1
+  printf 'readers\n' > "$rw/rb-close"
+  guest /tmp/t_virtiofs hold-readers /mnt/rw/rb-close read-close 3 > /dev/null 2>&1 &
+  holder=$!
+  sleep 1.2
+  reading=$(host_open "$rw/rb-close\$")
+  sleep 2.3
+  opened=$(host_open "$rw/rb-close\$") writing=$(host_writing "$rw/rb-close\$")
+  wait $holder || status=1
+  echo "a reader beside a writer: the Mac holds the file open $reading times while it reads and $opened after it" \
+    "closes, $writing of them for writing"
+  [[ $reading == 3 && $opened == 2 && $writing == 1 ]] || status=1
   guest /bin/sh -c "sysctl -w vfs.generic.virtiofs.idle_files=$was" >/dev/null
   return $status
 }
@@ -477,6 +487,7 @@ check "a writable mapping keeps writing after its descriptor closes and this Mac
 check "a write handle is let go at munmap while a reader keeps the file open" unmapped_released
 check "beside a writer, read advice opens nothing and a closed reader's handle is let go" readers_beside_writer
 check "read advice beside appends never caches zeros inside the file" guest /tmp/t_virtiofs advise-append /mnt/rw/aa 3
+check "a counter stored to in a tight loop beside appends loses no store" guest /tmp/t_virtiofs store-loop /mnt/rw/sl 3
 check "a create whose open fails before it opens leaves nothing open for writing" raw_create_released
 check "a case-only rename works after the first case probe asked about a removed file" guest /bin/sh -c \
   'mkdir -p /mnt/cs && /sbin/mount -t virtiofs kido:rw /mnt/cs && /tmp/t_virtiofs case-probe /mnt/cs/cs; r=$?;

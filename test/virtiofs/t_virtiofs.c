@@ -577,27 +577,79 @@ advise_append(const char *path, int seconds)
         return 1;
     }
     pthread_t t;
-    pthread_create(&t, NULL, append_forever, &a);
-    long rounds = 0, zeros = 0;
+    if (pthread_create(&t, NULL, append_forever, &a) != 0)
+        return 1;
+    long rounds = 0, zeros = 0, failed = 0;
     for (time_t end = time(NULL) + seconds; time(NULL) < end; rounds++) {
         struct stat st;
-        if (fstat(fd, &st) != 0)
+        if (fstat(fd, &st) != 0) {
+            failed++;
             break;
+        }
         off_t at = st.st_size > 65536 ? st.st_size - 65536 : 0;
         struct radvisory ra = { .ra_offset = at, .ra_count = 131072 };
-        fcntl(fd, F_RDADVISE, &ra);
-        if (fstat(fd, &st) != 0)
+        failed += fcntl(fd, F_RDADVISE, &ra) != 0;
+        if (fstat(fd, &st) != 0) {
+            failed++;
             break;
+        }
         off_t len = st.st_size - at < (off_t)sizeof(buf) ? st.st_size - at : (off_t)sizeof(buf);
         ssize_t got = pread(fd, buf, (size_t)len, at);
+        failed += got <= 0;
         zeros += got > 0 && memchr(buf, 0, (size_t)got) != NULL;
     }
     atomic_store(&a.stop, 1);
     pthread_join(t, NULL);
     close(a.fd);
     close(fd);
-    printf("read advice beside appends: %ld rounds, %ld read zeros inside the file\n", rounds, zeros);
-    return zeros != 0;
+    printf("read advice beside appends: %ld rounds, %ld read zeros inside the file, %ld calls failed\n", rounds, zeros,
+           failed);
+    return zeros != 0 || failed != 0 || rounds == 0;
+}
+
+static void *
+append_bytes(void *arg)
+{
+    struct advised_append *a = arg;
+    while (!atomic_load(&a->stop)) {
+        if (write(a->fd, "a", 1) != 1)
+            break;
+        usleep(50);
+    }
+    return NULL;
+}
+
+static int
+store_loop(const char *path, int seconds)
+{
+    static char page[4000];
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    struct advised_append a = { .fd = open(path, O_WRONLY | O_APPEND) };
+    volatile uint32_t *counter = MAP_FAILED;
+    if (fd >= 0 && a.fd >= 0 && write(fd, page, sizeof(page)) == (ssize_t)sizeof(page))
+        counter = mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (counter == MAP_FAILED) {
+        printf("create and map %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    pthread_t t;
+    pthread_create(&t, NULL, append_bytes, &a);
+    uint32_t done = 0, onfile = 0;
+    for (time_t end = time(NULL) + seconds; time(NULL) < end;) {
+        for (int i = 0; i < 1000; i++)
+            counter[25]++;
+        done += 1000;
+    }
+    atomic_store(&a.stop, 1);
+    pthread_join(t, NULL);
+    int rc = msync((void *)counter, 16384, MS_SYNC) != 0 || pread(fd, &onfile, sizeof(onfile), 100) != sizeof(onfile);
+    uint32_t held = counter[25];
+    printf("a counter stored to in a tight loop beside appends: %u stores, %u in memory, %u in the file\n", done,
+           held, onfile);
+    munmap((void *)counter, 16384);
+    close(a.fd);
+    close(fd);
+    return rc || held != done || onfile != done;
 }
 
 static int
@@ -610,7 +662,9 @@ hold_readers(const char *path, const char *how, int seconds)
         rc = fcntl(wfd, F_RDADVISE, &ra) != 0;
     if (!rc && !strcmp(how, "read-close")) {
         int rfd = open(path, O_RDONLY);
-        rc = rfd < 0 || read(rfd, &byte, 1) != 1 || close(rfd) != 0;
+        rc = rfd < 0 || read(rfd, &byte, 1) != 1;
+        sleep(2);
+        rc |= rfd < 0 || close(rfd) != 0;
     }
     printf("%s beside a writer: %s\n", how, rc ? strerror(errno) : "ok");
     fflush(stdout);
@@ -2043,6 +2097,8 @@ main(int argc, char **argv)
         return map_hold(argv[2], atoi(argv[3]));
     if (argc == 3 && !strcmp(argv[1], "exec-fail"))
         return exec_fail(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "store-loop"))
+        return store_loop(argv[2], atoi(argv[3]));
     if (argc == 5 && !strcmp(argv[1], "hold-readers"))
         return hold_readers(argv[2], argv[3], atoi(argv[4]));
     if (argc == 4 && !strcmp(argv[1], "advise-append"))
