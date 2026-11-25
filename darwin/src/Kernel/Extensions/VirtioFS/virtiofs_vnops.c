@@ -328,13 +328,18 @@ node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exac
     bool tail = resident && (to & PAGE_MASK) && to < old && !(head && last == first);
     if (head)
         page_drop(vp, first);
-    if (resize && size > old) {
-        IOLockLock(vmp->lock);
+    IOLockLock(vmp->lock);
+    if (head)
+        np->skip_from = MAX(np->skip_from, first + PAGE_SIZE);
+    if (resize && size > old)
         np->push_limit = size;
+    IOLockUnlock(vmp->lock);
+    if (tail) {
+        page_drop(vp, last);
+        IOLockLock(vmp->lock);
+        np->skip_to = MIN(np->skip_to, last);
         IOLockUnlock(vmp->lock);
     }
-    if (tail)
-        page_drop(vp, last);
     off_t inner = head ? first + PAGE_SIZE : from, end = MIN(tail ? last : to, round_page_64(old));
     if (resident && inner < end)
         ubc_msync(vp, inner, end, NULL, UBC_INVALIDATE);
