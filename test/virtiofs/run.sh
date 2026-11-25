@@ -50,8 +50,10 @@ prints() {
   shift
   [[ "$("$@" 2>&1)" == "$want" ]]
 }
-owned_by() {
-  [[ $(guest /tmp/t_virtiofs as "$1" "$2" /mnt/data /mnt/data/private /mnt/data/private/f | grep -c " uid=$1 gid=$2 ") == 3 ]]
+owner_after() {
+  local paths="/mnt/data /mnt/data/private /mnt/data/private/f"
+  [[ $(guest /bin/sh -c "/tmp/t_virtiofs as $1 $2 $paths >/dev/null; /tmp/t_virtiofs as $3 $4 $paths" |
+    grep -c " uid=$3 gid=$4 ") == 3 ]]
 }
 host_fds() {
   lsof -p "$vm" 2>/dev/null | awk '$5 == "REG" || $5 == "DIR"' | grep -c "$share" || true
@@ -123,9 +125,8 @@ check "a 256-byte readdir buffer stops only at an entry too large for it" \
   guest /tmp/t_virtiofs small-readdir /mnt/data/names 256
 check "the old getdirentries lists names up to 255 bytes and skips longer ones" \
   guest /bin/sh -c '/tmp/t_virtiofs classic-readdir /mnt/data/names && /tmp/t_virtiofs classic-readdir /mnt/data/long'
-guest /tmp/t_virtiofs as 0 0 /mnt/data /mnt/data/private/f >/dev/null
-check "another user is shown as the owner right after root looked" owned_by 501 20
-check "root is shown as the owner right after another user looked" owned_by 0 0
+check "another user is shown as the owner right after root looked" owner_after 0 0 501 20
+check "root is shown as the owner right after another user looked" owner_after 501 20 0 0
 check "a program runs from the share" guest /mnt/data/exec tree /mnt/data/deep
 check "a FIFO on the share works as a pipe" prints hello guest /bin/sh -c 'echo hello >> /mnt/data/links/fifo & cat /mnt/data/links/fifo; wait'
 check "concurrent reads" guest /tmp/t_virtiofs stress /mnt/data 16 2
