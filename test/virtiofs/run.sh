@@ -97,7 +97,7 @@ touch -t 200102030405.06 "$share/small/1"
 "$work/t_virtiofs" tree "$share" > "$work/tree.host" || { echo "FAIL the tree on this Mac"; rc=1; }
 
 "$kido" image import "$img" $name >/dev/null || exit 1
-KIDO_DEV_VIRTIOFS="data=$share,empty=$work/empty,locked=$work/locked,$wide=$work/wide" "$kido" run -d --name $name $name /bin/sleep 100000 \
+KIDO_DEV_VIRTIOFS="data=$share:ro,empty=$work/empty:ro,locked=$work/locked:ro,$wide=$work/wide:ro" "$kido" run -d --name $name $name /bin/sleep 100000 \
   >/dev/null || exit 1
 vm=$(pgrep -n -f com.apple.Virtualization.VirtualMachine)
 "$kido" cp "$work/t_virtiofs" $name:/tmp/t_virtiofs || exit 1
