@@ -2824,7 +2824,7 @@ virtiofs_vnop_inactive(struct vnop_inactive_args *ap)
         return 0;
     }
     IOLockLock(np->vmp->lock);
-    bool idle = !(np->flags & VN_SIZING) && !np->readers;
+    bool idle = !(np->flags & VN_SIZING) && !np->readers && proc_selfpid() != 0;
     if (idle)
         sizing_set(np);
     np->creator = NULL;
