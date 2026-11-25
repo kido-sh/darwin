@@ -1400,9 +1400,8 @@ virtiofs_vnop_mmap(__unused struct vnop_mmap_args *ap)
 }
 
 static int
-virtiofs_vnop_fsync(struct vnop_fsync_args *ap)
+file_sync(vnode_t vp, vfs_context_t ctx)
 {
-    vnode_t vp = ap->a_vp;
     struct virtiofs_node *np = VTON(vp);
     uint64_t fh;
 
@@ -1410,10 +1409,16 @@ virtiofs_vnop_fsync(struct vnop_fsync_args *ap)
         return 0;
     int error = push_dirty(vp);
     if (!error && whandle_hold(np, &fh)) {
-        error = write_sync(np, ap->a_context, fh);
+        error = write_sync(np, ctx, fh);
         whandle_put(np);
     }
     return error;
+}
+
+static int
+virtiofs_vnop_fsync(struct vnop_fsync_args *ap)
+{
+    return file_sync(ap->a_vp, ap->a_context);
 }
 
 static int
@@ -1423,6 +1428,8 @@ virtiofs_vnop_ioctl(struct vnop_ioctl_args *ap)
     struct radvisory *ra = (struct radvisory *)ap->a_data;
     struct fuse_attr attr;
 
+    if (ap->a_command == F_FULLFSYNC || ap->a_command == F_BARRIERFSYNC)
+        return file_sync(vp, ap->a_context);
     if (ap->a_command != F_RDADVISE)
         return ENOTSUP;
     if (!vnode_isreg(vp))
