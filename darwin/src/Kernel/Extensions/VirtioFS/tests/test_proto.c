@@ -48,7 +48,7 @@ static void
 test_attr(void)
 {
     static const uint32_t types[] = { S_IFREG, S_IFDIR, S_IFLNK, S_IFIFO, S_IFCHR, S_IFBLK, S_IFSOCK };
-    struct fuse_attr attr = { .mode = S_IFREG | 0644, .size = INT64_MAX };
+    struct fuse_attr attr = { .mode = S_IFREG | 0644, .size = VIRTIOFS_SIZE_MAX };
     struct fuse_entry_out entry = { .nodeid = 2, .attr = attr };
 
     for (size_t i = 0; i < sizeof(types) / sizeof(*types); i++) {
@@ -60,6 +60,8 @@ test_attr(void)
     attr.mode = S_IFMT;
     EXPECT(!virtiofs_attr_ok(&attr));
     attr.mode = S_IFREG;
+    attr.size = VIRTIOFS_SIZE_MAX + 1;
+    EXPECT(!virtiofs_attr_ok(&attr));
     attr.size = (uint64_t)INT64_MAX + 1;
     EXPECT(!virtiofs_attr_ok(&attr));
 

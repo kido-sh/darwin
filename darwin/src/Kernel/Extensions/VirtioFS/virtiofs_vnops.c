@@ -1553,6 +1553,8 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
             uio_setoffset(uio, end);
     }
     off_t start = uio_offset(uio);
+    if (!error && uio_resid(uio) > VIRTIOFS_SIZE_MAX - start)
+        error = EFBIG;
     if (!error)
         error = push_range(vp, start, start + uio_resid(uio));
     uint32_t room = (uint32_t)MIN((user_ssize_t)np->vmp->session.max_io * WRITE_DEPTH, uio_resid(uio));
@@ -2215,6 +2217,8 @@ virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
         VATTR_SET_SUPPORTED(vap, va_modify_time);
     }
     if (truncate) {
+        if (vap->va_data_size > VIRTIOFS_SIZE_MAX)
+            return EFBIG;
         in.valid |= FATTR_SIZE | FATTR_FH;
         in.size = (uint64_t)vap->va_data_size;
     }

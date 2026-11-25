@@ -9,6 +9,7 @@
 #include "fuse.h"
 
 #define VIRTIOFS_NAME_MAX 1023
+#define VIRTIOFS_SIZE_MAX (INT64_MAX - (1LL << 20))
 
 #define VIRTIOFS_O_WRONLY  0x1
 #define VIRTIOFS_O_CREAT   0x40
