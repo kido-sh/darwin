@@ -227,28 +227,28 @@ pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count
     }
 }
 
-static void
-size_grow(struct virtiofs_node *np, off_t old, off_t size, bool refresh)
+static int
+size_grow(struct virtiofs_node *np, off_t old, off_t size)
 {
     vnode_t vp = np->vp;
     off_t page = old & ~(off_t)PAGE_MASK;
     upl_t upl = NULL;
     upl_page_info_t *pl = NULL;
+    int error = 0;
 
-    bool tail = old & PAGE_MASK;
-    bool held = tail && ubc_create_upl(vp, page, PAGE_SIZE, &upl, &pl, UPL_SET_LITE | UPL_WILL_MODIFY) == KERN_SUCCESS;
-    off_t from = refresh && held && !upl_dirty_page(pl, 0) ? page : old;
-    int error = held && upl_valid_page(pl, 0) ? page_fill(np, upl, page, from, MIN(page + PAGE_SIZE, size)) : 0;
-    if (held && error)
-        pages_release(vp, upl, pl, page, 1, false);
-    if (tail && (!held || error))
-        ubc_msync(vp, page, page + PAGE_SIZE, NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
-    IOLockLock(np->vmp->lock);
-    np->attr.size = (uint64_t)size;
-    IOLockUnlock(np->vmp->lock);
-    ubc_setsize(vp, size);
-    if (held && !error)
-        pages_release(vp, upl, pl, page, 1, true);
+    if ((old & PAGE_MASK) && ubc_create_upl(vp, page, PAGE_SIZE, &upl, &pl, HOLD_PAGES) != KERN_SUCCESS)
+        return ENOMEM;
+    if (upl && upl_valid_page(pl, 0))
+        error = page_fill(np, upl, page, old, MIN(page + PAGE_SIZE, size));
+    if (!error) {
+        IOLockLock(np->vmp->lock);
+        np->attr.size = (uint64_t)size;
+        IOLockUnlock(np->vmp->lock);
+        ubc_setsize(vp, size);
+    }
+    if (upl)
+        pages_release(vp, upl, pl, page, 1, !error);
+    return error;
 }
 
 static bool
@@ -288,13 +288,14 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     if (size < ubc_getsize(vp))
         ubc_setsize(vp, size);
     if (ubc_pages_resident(vp))
-        ubc_msync(vp, 0, size > old ? old & ~(off_t)PAGE_MASK : size, NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
-    if (size > old)
-        size_grow(np, old, size, true);
+        ubc_msync(vp, 0, MIN(old, size), NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+    bool sized = size <= old || !size_grow(np, old, size);
     IOLockLock(vmp->lock);
+    if (!sized)
+        np->expire = 0;
     wake(np, VN_SIZING);
     IOLockUnlock(vmp->lock);
-    return true;
+    return sized;
 }
 
 static int
@@ -395,10 +396,11 @@ node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
     return node_cached(np, attr) ? 0 : node_fetch(np, ctx, attr);
 }
 
-static void
+static int
 node_sized(struct virtiofs_node *np, off_t size)
 {
     struct virtiofs_mount *vmp = np->vmp;
+    int error = 0;
 
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
@@ -412,12 +414,13 @@ node_sized(struct virtiofs_node *np, off_t size)
     np->expire = 0;
     IOLockUnlock(vmp->lock);
     if (size > old)
-        size_grow(np, old, size, false);
+        error = size_grow(np, old, size);
     else if (size < old)
         ubc_setsize(np->vp, size);
     IOLockLock(vmp->lock);
     wake(np, VN_SIZING | VN_TRUNCATING);
     IOLockUnlock(vmp->lock);
+    return error;
 }
 
 static void
@@ -2185,7 +2188,7 @@ virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
                    IFTOVT(out.attr.mode) != vnode_vtype(vp)))
         error = EIO;
     if (!error && truncate) {
-        node_sized(np, (off_t)vap->va_data_size);
+        error = node_sized(np, (off_t)vap->va_data_size);
     } else if (!error) {
         if (!node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version))
             node_stale(np);
