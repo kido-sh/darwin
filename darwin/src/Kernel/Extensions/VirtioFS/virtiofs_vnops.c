@@ -77,6 +77,8 @@ struct virtiofs_node {
     struct fuse_attr attr;
     uint32_t users;
     uint32_t readers;
+    uint32_t pageouts[2];
+    uint32_t pageout_gen;
     uint32_t wusers;
     uint32_t wopens;
     uint32_t ropens;
@@ -423,6 +425,27 @@ node_skip(struct virtiofs_node *np, off_t from, off_t to)
     IOLockLock(np->vmp->lock);
     np->skip_from = from;
     np->skip_to = to;
+    IOLockUnlock(np->vmp->lock);
+}
+
+static void
+pageout_done(struct virtiofs_node *np, uint32_t gen)
+{
+    IOLockLock(np->vmp->lock);
+    if (--np->pageouts[gen] == 0)
+        wake(np, 0);
+    IOLockUnlock(np->vmp->lock);
+}
+
+static void
+pageouts_drain(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    uint32_t gen = np->pageout_gen++ & 1;
+    while (np->pageouts[gen]) {
+        np->flags |= VN_WANT;
+        IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
+    }
     IOLockUnlock(np->vmp->lock);
 }
 
@@ -1476,9 +1499,7 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
         error = uiomove(buf, (int)len, uio);
         if (!error) {
             node_skip(np, start, at + len);
-            error = push_range(vp, at, at + len);
-        }
-        if (!error) {
+            pageouts_drain(np);
             reach = at + len;
             error = write_batch(np, ctx, fh, at, buf, len, &written);
         }
@@ -1579,6 +1600,7 @@ struct virtiofs_io {
     struct virtiofs_node *np;
     uint32_t pending;
     uint32_t chunks;
+    uint32_t gen;
     int error;
     bool write;
     struct virtiofs_part part[];
@@ -1609,6 +1631,7 @@ io_done(void *arg, int error)
         }
         node_stale(np);
         whandle_put(np);
+        pageout_done(np, io->gen);
     } else {
         if (buf_flags(bp) & B_PAGEIO)
             __atomic_sub_fetch(&np->paging, 1, __ATOMIC_RELEASE);
@@ -1661,19 +1684,23 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     uint32_t count = buf_count(bp);
     uint32_t max = np->vmp->session.max_io;
     off_t offset = buf_blkno(bp) * vfs_devblocksize(vnode_mount(vp));
-    uint32_t span[3][2] = { { 0, count } }, spans = count ? 1 : 0;
+    uint32_t span[3][2] = { { 0, count } }, spans = count ? 1 : 0, gen = 0;
+    bool counted = false;
     uint64_t fh = 0;
 
     int error = write && vfs_isrdonly(vnode_mount(vp)) ? EROFS : 0;
-    if (write) {
+    if (write && !error) {
         IOLockLock(np->vmp->lock);
         off_t size = (off_t)np->attr.size, limit = np->push_limit;
         bool stale = (np->flags & VN_SIZING) && limit < size;
         off_t cut[2][2] = { { np->skip_from, np->skip_to },
                             { stale ? limit : 0, stale ? MIN(page_end(limit), size) : 0 } };
-        IOLockUnlock(np->vmp->lock);
         count = offset >= size ? 0 : (uint32_t)MIN((off_t)count, size - offset);
         spans = write_spans(offset, count, cut, span);
+        gen = np->pageout_gen & 1;
+        counted = spans != 0;
+        np->pageouts[gen] += counted;
+        IOLockUnlock(np->vmp->lock);
     }
     uint32_t chunks = 0;
     for (uint32_t p = 0; p < spans; p++)
@@ -1684,6 +1711,8 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     }
     if (error && io)
         IOFree(io, io_size(write, chunks));
+    if (error && counted)
+        pageout_done(np, gen);
     if (error || !chunks) {
         buf_seterror(bp, error);
         buf_setresid(bp, error ? buf_count(bp) : 0);
@@ -1695,6 +1724,7 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     io->np = np;
     io->pending = chunks;
     io->chunks = chunks;
+    io->gen = gen;
     io->write = write;
     if (!write && (buf_flags(bp) & B_PAGEIO))
         __atomic_add_fetch(&np->paging, 1, __ATOMIC_RELAXED);
