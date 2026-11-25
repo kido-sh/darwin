@@ -841,8 +841,10 @@ push_dirty(vnode_t vp)
 void
 virtiofs_vnode_push(vnode_t vp)
 {
-    if (vnode_isreg(vp))
+    if (vnode_isreg(vp)) {
         push_dirty(vp);
+        whandle_close(VTON(vp), false);
+    }
 }
 
 static void
@@ -1542,6 +1544,7 @@ file_sync(vnode_t vp, vfs_context_t ctx)
     if (vnode_isreg(vp) && whandle_hold(np, &fh)) {
         error = write_sync(np, ctx, fh, FUSE_FSYNC);
         whandle_put(np);
+        whandle_close(np, false);
     } else if (handle_hold(np, &fh)) {
         error = write_sync(np, ctx, fh, vnode_isdir(vp) ? FUSE_FSYNCDIR : FUSE_FSYNC);
         handle_put(np);
