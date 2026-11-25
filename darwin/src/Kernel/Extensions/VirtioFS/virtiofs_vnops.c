@@ -1687,7 +1687,7 @@ sizing_enter(struct virtiofs_node *np)
 }
 
 static int
-pageout_pages(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t offset, int pages, int flags, int refused)
+pageout_pages(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t offset, int pages, int flags)
 {
     struct virtiofs_node *np = VTON(vp);
     bool rdonly = vfs_isrdonly(vnode_mount(vp));
@@ -1701,18 +1701,16 @@ pageout_pages(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t offset, int page
     for (int i = 0, run = 1; i < last; i += run) {
         bool present = upl_page_present(pl, i), dirty = present && !rdonly && upl_dirty_page(pl, i);
         upl_offset_t at = (upl_offset_t)i * PAGE_SIZE;
-        int failed = refused;
         for (run = 1; dirty && i + run < last && upl_dirty_page(pl, i + run); run++)
             ;
-        if (dirty && refused)
-            ubc_upl_abort_range(upl, at, (upl_size_t)run * PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
-        else if (dirty)
-            failed = cluster_pageout(vp, upl, at, offset + at, run * PAGE_SIZE, size, flags);
-        else if (present)
+        if (dirty) {
+            int failed = cluster_pageout(vp, upl, at, offset + at, run * PAGE_SIZE, size, flags);
+            if (failed && offset + at < size) {
+                push_failed(np);
+                error = error ? error : failed;
+            }
+        } else if (present) {
             ubc_upl_commit_range(upl, at, PAGE_SIZE, UPL_COMMIT_CLEAR_DIRTY | UPL_COMMIT_FREE_ON_EMPTY);
-        if (dirty && failed && offset + at < size) {
-            push_failed(np);
-            error = error ? error : failed;
         }
     }
     return error;
@@ -1741,7 +1739,7 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
     IOLockLock(np->vmp->lock);
     np->pageouts++;
     IOLockUnlock(np->vmp->lock);
-    int refused = rdonly ? 0 : whandle_get(np, NULL, &fh), error = refused ? refused : EINVAL;
+    bool held = !rdonly && whandle_hold(np, &fh);
     bool entered = sync && sizing_enter(np);
     bool made = ubc_create_upl(vp, ap->a_f_offset, (int)ap->a_size, &upl, &pl, kind) == KERN_SUCCESS;
     if (entered) {
@@ -1749,12 +1747,12 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
         sizing_done(np, 0);
         IOLockUnlock(np->vmp->lock);
     }
+    int error = EINVAL;
     if (made)
-        error = pageout_pages(vp, upl, pl, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), ap->a_flags & ~UPL_NOCOMMIT,
-                              refused);
+        error = pageout_pages(vp, upl, pl, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), ap->a_flags & ~UPL_NOCOMMIT);
     else if (!rdonly)
         push_failed(np);
-    if (!rdonly && !refused)
+    if (held)
         whandle_put(np);
     IOLockLock(np->vmp->lock);
     if (--np->pageouts == 0)
