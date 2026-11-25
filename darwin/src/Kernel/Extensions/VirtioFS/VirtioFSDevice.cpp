@@ -279,17 +279,19 @@ VirtioFSDevice::spinLocked(VirtioFSSlot *slot, uint32_t datalen)
 {
     VirtQueue *vq = &fQueues[kRequests];
     volatile VRingUsedHdr *used = (volatile VRingUsedHdr *)vq->used;
+    volatile bool *done = &slot->done;
+    int spin = __atomic_load_n(&virtiofs_spin_us, __ATOMIC_RELAXED);
     uint64_t limit;
 
-    if (fPolling || virtiofs_spin_us <= 0)
+    if (fPolling || spin <= 0)
         return;
     fPolling = true;
-    nanoseconds_to_absolutetime(((uint64_t)virtiofs_spin_us + datalen / 2048) * 1000, &limit);
+    nanoseconds_to_absolutetime(((uint64_t)spin + datalen / 2048) * 1000, &limit);
     limit += mach_absolute_time();
     bool ready = true;
     while (ready && !slot->done && !fDead) {
         IOLockUnlock(fLock);
-        while (!(ready = used->idx != vq->lastUsedIdx) && mach_absolute_time() < limit)
+        while (!(ready = used->idx != vq->lastUsedIdx) && !*done && mach_absolute_time() < limit)
             __builtin_arm_yield();
         IOLockLock(fLock);
         if (ready)
