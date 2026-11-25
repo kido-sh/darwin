@@ -1978,13 +1978,18 @@ entry_reply(struct virtiofs_node *dnp, vfs_context_t ctx, struct virtiofs_call *
     error = virtiofs_call(dnp->vmp, ctx, c);
     bool alone;
     uint64_t version = dir_changed(dnp, cnp, before, &alone);
-    bool ok = !error && c->replylen == want && entry->nodeid;
+    bool ok = !error && c->replylen == want && virtiofs_entry_ok(entry);
     if (answered)
         *answered = ok;
     if (!error && !ok)
         error = EIO;
     if (!error)
-        error = virtiofs_node_get(dnp->vmp, entry, before, 1, dnp->vp, cnp, vpp);
+        error = virtiofs_node_get(dnp->vmp, entry, before, answered ? 0 : 1, dnp->vp, cnp, vpp);
+    if (!error && answered) {
+        IOLockLock(dnp->vmp->lock);
+        VTON(*vpp)->nlookup++;
+        IOLockUnlock(dnp->vmp->lock);
+    }
     if (!error && alone)
         name_remember(dnp, *vpp, cnp, entry, version);
     return error;
@@ -2002,11 +2007,6 @@ make_node(struct virtiofs_node *dnp, vfs_context_t ctx, struct componentname *cn
     };
 
     return entry_reply(dnp, ctx, &c, &out, sizeof(out), cnp, vpp, NULL);
-}
-
-static void
-orphan_done(__unused void *arg, __unused int error)
-{
 }
 
 static int
@@ -2043,7 +2043,8 @@ virtiofs_vnop_create(struct vnop_create_args *ap)
         struct virtiofs_call r = {
             .opcode = FUSE_RELEASE, .nodeid = out.entry.nodeid, .arg = { &rin }, .arglen = { sizeof(rin) },
         };
-        virtiofs_submit(dnp->vmp, NULL, &r, orphan_done, NULL);
+        virtiofs_call(dnp->vmp, NULL, &r);
+        forget(dnp->vmp, out.entry.nodeid, 1);
     }
     return error;
 }
