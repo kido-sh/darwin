@@ -341,7 +341,7 @@ virtiofs_vfs_register(void)
         .vfe_vopcnt = 2,
         .vfe_opvdescs = opv,
         .vfe_flags = VFS_TBLTHREADSAFE | VFS_TBLFSNODELOCK | VFS_TBL64BITREADY | VFS_TBLNOTYPENUM |
-                     VFS_TBLREADDIR_EXTENDED,
+                     VFS_TBLREADDIR_EXTENDED | VFS_TBLVNOP_PAGEOUTV2,
     };
 
     if (virtiofs_vfsconf)
