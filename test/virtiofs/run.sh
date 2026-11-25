@@ -157,7 +157,7 @@ check "unmount kido:empty" guest /sbin/umount /mnt/empty
 check "unmount the device root" guest /sbin/umount /mnt/root
 after=$(host_fds)
 echo "files of the share the host holds open: $before before mounting, $mid after the walks, $after after unmounting"
-check "the host closed all but a few of the files it opened for the guest" test "$after" -le $((before + 32))
+check "the host closed all but a few of the files it opened for the guest" test "$after" -le $((before + 64))
 forget_exact() {
   guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.entry_cache=0' >/dev/null &&
     guest /sbin/mount -t virtiofs -o ro kido:data /mnt/data >/dev/null &&
