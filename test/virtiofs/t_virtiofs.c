@@ -613,6 +613,25 @@ reopen_close(const char *path, int rounds)
 }
 
 static int
+hold(const char *path, int seconds)
+{
+    char buf[4096];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("open: %s\n", strerror(errno));
+        return 1;
+    }
+    sleep((unsigned)seconds);
+    ssize_t n = read(fd, buf, sizeof(buf));
+    if (n < 0)
+        printf("read: %s\n", strerror(errno));
+    else
+        printf("%zd bytes\n", n);
+    close(fd);
+    return n < 0;
+}
+
+static int
 classic_readdir(const char *dir)
 {
     struct old_dirent {
@@ -785,6 +804,8 @@ main(int argc, char **argv)
         return read_close(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "reopen-close"))
         return reopen_close(argv[2], atoi(argv[3]));
+    if (argc == 4 && !strcmp(argv[1], "hold"))
+        return hold(argv[2], atoi(argv[3]));
     if (argc == 3 && !strcmp(argv[1], "classic-readdir"))
         return classic_readdir(argv[2]);
     if (argc == 6 && !strcmp(argv[1], "mount-as"))

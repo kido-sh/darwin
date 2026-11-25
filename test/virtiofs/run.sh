@@ -56,7 +56,48 @@ owner_after() {
     grep -c " uid=$3 gid=$4 ") == 3 ]]
 }
 host_fds() {
-  lsof -p "$vm" 2>/dev/null | awk '$5 == "REG" || $5 == "DIR"' | grep -c "$share" || true
+  lsof -p "$vm" 2>/dev/null | awk '$5 == "REG" || $5 == "DIR"' | grep -c "$share${1:-}" || true
+}
+revoked() {
+  local pause=$1 file=$2 mode=$3 was
+  shift 3
+  was=$(stat -f %Lp "$share/$file") && [[ $(host_fds "/$file\$") == 2 ]] || return 1
+  chmod "$mode" "$share/$file"
+  sleep "$pause"
+  fails guest "$@"
+  local denied=$?
+  sleep 0.5
+  local held=$(host_fds "/$file\$")
+  chmod "$was" "$share/$file"
+  sleep "$pause"
+  echo "$file at mode $mode: $( ((denied == 0)) && echo refused || echo allowed ) after ${pause}s, then $held host files open on it"
+  [[ $denied == 0 && $held == 1 ]] && guest "$@" >/dev/null
+}
+held_open() {
+  local was holder status denied
+  was=$(stat -f %Lp "$share/revoke") || return 1
+  guest /tmp/t_virtiofs hold /mnt/data/revoke 3 > "$work/hold.out" 2>&1 &
+  holder=$!
+  sleep 1
+  chmod 000 "$share/revoke"
+  fails guest /bin/cat /mnt/data/revoke
+  denied=$?
+  wait $holder
+  status=$?
+  chmod "$was" "$share/revoke"
+  echo "a descriptor open across a refused open read: $(cat "$work/hold.out")"
+  [[ $denied == 0 && $status == 0 ]]
+}
+idle_kept() {
+  local was held
+  was=$(guest /bin/sh -c 'sysctl -n vfs.generic.virtiofs.idle_files') || return 1
+  guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.idle_files=4 >/dev/null && cat /mnt/data/many/f1?? >/dev/null'
+  local status=$?
+  sleep 1
+  held=$(host_fds '/many/f1[0-9][0-9]$')
+  guest /bin/sh -c "sysctl -w vfs.generic.virtiofs.idle_files=$was" >/dev/null
+  echo "100 files read with 4 idle handles kept: the host holds $held files of them open"
+  [[ $status == 0 && $held -gt 100 && $held -le 104 ]]
 }
 
 xcrun clang -arch arm64 -mmacosx-version-min=15.0 -O2 -o "$work/t_virtiofs" "$here/t_virtiofs.c" || exit 1
@@ -66,6 +107,7 @@ wide=$(printf '\xe4\xb8\xad%.0s' $(seq 1 85))
 mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,long,links,private} "$work/empty" "$work/locked" "$work/wide"
 printf 'wide share\n' > "$work/wide/f"
 printf 'mine\n' > "$share/private/f"
+printf 'revoke\n' > "$share/revoke"
 chmod 700 "$share/private"
 : > "$share/small/0"
 for n in 1 4095 4096 4097 16383 16384 16385 131071 131072 131073 1048583; do
@@ -153,6 +195,17 @@ sleep 1.1
 "$work/t_virtiofs" tree "$share/small" > "$work/small.host"
 guest /tmp/t_virtiofs tree /mnt/data/small > "$work/small.guest"
 check "a file rewritten in place on this Mac" diff -u "$work/small.host" "$work/small.guest"
+guest /bin/cat /mnt/data/revoke >/dev/null
+check "a file the host makes unreadable cannot be opened through a kept handle" revoked 0 revoke 000 /bin/cat /mnt/data/revoke
+check "a program the host makes unreadable cannot be run through a kept handle" revoked 0 exec 111 /mnt/data/exec tree /mnt/data/deep
+check "a descriptor already open keeps reading when another open is refused" held_open
+guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.revalidate_open=0 >/dev/null && cat /mnt/data/revoke >/dev/null'
+check "with revalidate_open at 0, a refusal takes effect after the attribute timeout" revoked 1.1 revoke 000 /bin/cat /mnt/data/revoke
+guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.revalidate_open=1' >/dev/null
+check "a mount keeps at most idle_files closed files open on the host" idle_kept
+check "concurrent reads while every close releases a handle" guest /bin/sh -c 'w=$(sysctl -n vfs.generic.virtiofs.idle_files) &&
+  sysctl -w vfs.generic.virtiofs.idle_files=1 >/dev/null && /tmp/t_virtiofs stress /mnt/data 16 1; r=$?;
+  sysctl -w vfs.generic.virtiofs.idle_files=$w >/dev/null; exit $r'
 
 check "unmount kido:data" guest /sbin/umount /mnt/data
 check "unmount kido:empty" guest /sbin/umount /mnt/empty
