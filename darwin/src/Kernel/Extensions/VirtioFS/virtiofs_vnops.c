@@ -265,7 +265,7 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         return true;
 
     off_t cached = ubc_getsize(vp);
-    if (size < cached)
+    if (size != cached)
         ubc_setsize(vp, size);
     if (ubc_pages_resident(vp)) {
         ubc_msync(vp, 0, MAX(cached, size), NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
@@ -275,10 +275,6 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     }
     IOLockLock(vmp->lock);
     np->push_limit = size;
-    IOLockUnlock(vmp->lock);
-    if (size > cached)
-        ubc_setsize(vp, size);
-    IOLockLock(vmp->lock);
     wake(np, VN_SIZING);
     IOLockUnlock(vmp->lock);
     return true;
@@ -359,7 +355,7 @@ node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exac
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
     off_t old = (off_t)np->attr.size, from = MIN(at, old), stop = MIN(to, page_end(old));
-    bool resize = exact ? size != old : size > old;
+    bool resize = exact ? size != old : size > old, grow = resize && size > old;
     np->flags |= VN_SIZING;
     np->push_limit = old;
     np->skip_from = from;
@@ -372,17 +368,19 @@ node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exac
     np->attr_version = ++vmp->version;
     np->expire = 0;
     IOLockUnlock(vmp->lock);
+    if (grow)
+        ubc_setsize(vp, size);
     bool resident = from < stop && ubc_pages_resident(vp);
     off_t first = from & ~(off_t)PAGE_MASK, last = to & ~(off_t)PAGE_MASK;
     bool head = resident && (from & PAGE_MASK) && first < old;
     bool tail = resident && (to & PAGE_MASK) && to < old && !(head && last == first);
-    off_t stale[2][2] = { { from, to }, { resize && size > old ? old : 0, resize && size > old ? size : 0 } };
+    off_t stale[2][2] = { { from, to }, { grow ? old : 0, grow ? size : 0 } };
     if (head)
         page_drop(np, first, stale);
     IOLockLock(vmp->lock);
     if (head)
         np->skip_from = MAX(np->skip_from, first + PAGE_SIZE);
-    if (resize && size > old)
+    if (grow)
         np->push_limit = size;
     IOLockUnlock(vmp->lock);
     if (tail) {
@@ -394,7 +392,7 @@ node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exac
     off_t inner = head ? first + PAGE_SIZE : from, end = tail ? last : stop;
     if (resident && inner < end)
         ubc_msync(vp, inner, end, NULL, UBC_INVALIDATE);
-    if (resize)
+    if (resize && !grow)
         ubc_setsize(vp, size);
     IOLockLock(vmp->lock);
     np->skip_from = np->skip_to = 0;
@@ -1520,8 +1518,8 @@ static int
 virtiofs_vnop_pagein(struct vnop_pagein_args *ap)
 {
     struct virtiofs_node *np = VTON(ap->a_vp);
-    int error = cluster_pagein(ap->a_vp, ap->a_pl, ap->a_pl_offset, ap->a_f_offset, (int)ap->a_size, node_size(np),
-                               ap->a_flags);
+    off_t size = MIN(node_size(np), (off_t)ubc_getsize(ap->a_vp));
+    int error = cluster_pagein(ap->a_vp, ap->a_pl, ap->a_pl_offset, ap->a_f_offset, (int)ap->a_size, size, ap->a_flags);
 
     if (!error && ap->a_size <= np->vmp->session.max_io && !(ap->a_flags & UPL_IOSTREAMING) &&
         __atomic_load_n(&np->paging, __ATOMIC_RELAXED) <= 1)
