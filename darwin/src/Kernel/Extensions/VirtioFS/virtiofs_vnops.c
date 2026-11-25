@@ -9,6 +9,7 @@
 #include <sys/errno.h>
 #include <sys/fcntl.h>
 #include <sys/kauth.h>
+#include <sys/mman.h>
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/syslimits.h>
@@ -44,6 +45,7 @@ enum {
     VN_WOPEN = 0x200,
     VN_WOPENING = 0x400,
     VN_MAPPED = 0x800,
+    VN_MAPPED_WRITE = 0x1000,
 };
 
 #define SETTABLE_MODE (ACCESSPERMS | S_ISVTX)
@@ -734,7 +736,7 @@ whandle_close(struct virtiofs_node *np, bool force)
         IOLockSleep(vmp->lock, np, THREAD_UNINT);
     }
     bool release = (np->flags & VN_WOPEN) &&
-                   (force || !(np->wopens || np->wusers || (np->flags & VN_WOPENING) || np->creator));
+                   (force || !(np->wopens || np->wusers || (np->flags & (VN_WOPENING | VN_MAPPED_WRITE)) || np->creator));
     if (release) {
         np->flags &= ~VN_WOPEN;
         np->creator = NULL;
@@ -1376,7 +1378,7 @@ virtiofs_vnop_mnomap(struct vnop_mnomap_args *ap)
         return 0;
     int error = push_dirty(vp);
     IOLockLock(VTON(vp)->vmp->lock);
-    VTON(vp)->flags &= ~VN_MAPPED;
+    VTON(vp)->flags &= ~(VN_MAPPED | VN_MAPPED_WRITE);
     IOLockUnlock(VTON(vp)->vmp->lock);
     return error;
 }
@@ -1520,7 +1522,7 @@ virtiofs_vnop_mmap(struct vnop_mmap_args *ap)
 
     if (vnode_isreg(vp)) {
         IOLockLock(VTON(vp)->vmp->lock);
-        VTON(vp)->flags |= VN_MAPPED;
+        VTON(vp)->flags |= VN_MAPPED | ((ap->a_fflags & PROT_WRITE) ? VN_MAPPED_WRITE : 0);
         IOLockUnlock(VTON(vp)->vmp->lock);
     }
     return 0;
