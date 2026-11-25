@@ -67,6 +67,21 @@ virtiofs_name_ok(const char *name, uint32_t len)
 }
 
 int
+virtiofs_xattr_list_ok(const char *list, uint32_t len)
+{
+    uint32_t start = 0;
+
+    for (uint32_t i = 0; i < len; i++) {
+        if (list[i] != '\0')
+            continue;
+        if (i == start)
+            return 0;
+        start = i + 1;
+    }
+    return start == len;
+}
+
+int
 virtiofs_dirent_next(const uint8_t *buf, uint32_t len, uint32_t *pos, int plus, struct virtiofs_dirent *d)
 {
     uint32_t at = *pos;
