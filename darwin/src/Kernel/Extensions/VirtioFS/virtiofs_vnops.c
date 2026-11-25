@@ -47,6 +47,7 @@ enum {
     VN_MAPPED = 0x800,
     VN_MAPPED_WRITE = 0x1000,
     VN_TRUNCATING = 0x2000,
+    VN_UNPUSHED = 0x4000,
 };
 
 #define SETTABLE_MODE (ACCESSPERMS | S_ISVTX)
@@ -925,7 +926,8 @@ whandle_close(struct virtiofs_node *np, bool force)
         IOLockSleep(vmp->lock, np, THREAD_UNINT);
     }
     bool release = (np->flags & VN_WOPEN) &&
-                   (force || !(np->wopens || np->wusers || (np->flags & (VN_WOPENING | VN_MAPPED_WRITE)) || np->creator));
+                   (force || !(np->wopens || np->wusers || (np->flags & (VN_WOPENING | VN_MAPPED_WRITE | VN_UNPUSHED)) ||
+                             np->creator));
     if (release) {
         np->flags &= ~VN_WOPEN;
         np->creator = NULL;
@@ -1017,14 +1019,25 @@ push_range(vnode_t vp, off_t start, off_t end)
 static int
 push_dirty(vnode_t vp)
 {
-    return push_range(vp, 0, ubc_getsize(vp));
+    struct virtiofs_node *np = VTON(vp);
+    int error = push_range(vp, 0, ubc_getsize(vp));
+
+    IOLockLock(np->vmp->lock);
+    if (error)
+        np->flags |= VN_UNPUSHED;
+    else
+        np->flags &= ~VN_UNPUSHED;
+    IOLockUnlock(np->vmp->lock);
+    return error;
 }
 
 void
 virtiofs_vnode_push(vnode_t vp)
 {
-    if (vnode_isreg(vp) && push_dirty(vp) == 0)
+    if (vnode_isreg(vp)) {
+        push_dirty(vp);
         whandle_close(VTON(vp), false);
+    }
 }
 
 static void
@@ -1568,8 +1581,7 @@ virtiofs_vnop_mnomap(struct vnop_mnomap_args *ap)
     IOLockLock(VTON(vp)->vmp->lock);
     VTON(vp)->flags &= ~(VN_MAPPED | VN_MAPPED_WRITE);
     IOLockUnlock(VTON(vp)->vmp->lock);
-    if (!error)
-        whandle_close(VTON(vp), false);
+    whandle_close(VTON(vp), false);
     file_idle(VTON(vp));
     return error;
 }
