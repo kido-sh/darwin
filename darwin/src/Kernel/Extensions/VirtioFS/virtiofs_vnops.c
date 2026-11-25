@@ -229,18 +229,9 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
 
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
-    if (np->attr_version > version) {
+    if (np->attr_version > version || (np->flags & VN_TRUNCATING)) {
         IOLockUnlock(vmp->lock);
         return false;
-    }
-    if (np->flags & VN_TRUNCATING) {
-        uint64_t kept = np->attr.size;
-        np->attr = *attr;
-        np->attr.size = kept;
-        np->expire = 0;
-        np->attr_version = ++vmp->version;
-        IOLockUnlock(vmp->lock);
-        return true;
     }
     bool changed = vnode_isreg(vp) && attr_changed(&np->attr, attr);
     off_t size = (off_t)attr->size, old = (off_t)np->attr.size;
@@ -250,7 +241,7 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         if (size != old)
             readers_wait_locked(np);
     }
-    if (np->attr_version > version || (np->flags & VN_TRUNCATING)) {
+    if (np->attr_version > version) {
         if (changed)
             wake(np, VN_SIZING);
         IOLockUnlock(vmp->lock);
@@ -726,13 +717,14 @@ handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open, bool co
     if (!*open || current)
         return 0;
 
-    int error = ask ? node_fetch(np, ctx, &attr) : node_attr(np, ctx, &attr);
+    bool applied = true;
+    int error = ask ? node_getattr(np, ctx, &attr, &applied) : node_attr(np, ctx, &attr);
     if (error)
         return error;
     IOLockLock(vmp->lock);
     wait_clear(np, VN_OPENING);
     *open = np->flags & VN_OPEN;
-    current = handle_current_locked(np, &attr) && !handle_kept_locked(np);
+    current = applied && handle_current_locked(np, &attr) && !handle_kept_locked(np);
     if (current) {
         idle_remove_locked(np);
         opened_locked(np, count);
