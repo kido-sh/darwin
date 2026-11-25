@@ -162,6 +162,8 @@ IOVirtIOTransport::attach(IOPCIDevice *pci)
         UInt32 len    = pci->configRead32((UInt8)(base + kCapLength));
         IOLog("IOVirtIOTransport: vendor cap #%u at off=0x%x type=%u bar=%u regoff=0x%x len=0x%x\n",
               nCaps, (unsigned)capOffset, cfgType, bar, off, len);
+        if (bar > 5)
+            continue;
 
         // shared memory windows can be gigabytes, only record them, the driver maps what it uses
         if (cfgType == VIRTIO_PCI_CAP_SHARED_MEMORY_CFG) {
@@ -180,6 +182,12 @@ IOVirtIOTransport::attach(IOPCIDevice *pci)
 
         // a window onto config space through a register pair, never a bar to map
         if (cfgType == VIRTIO_PCI_CAP_PCI_CFG) continue;
+        volatile uint8_t *existing = cfgType == VIRTIO_PCI_CAP_COMMON_CFG ? fCommonCfg :
+                                     cfgType == VIRTIO_PCI_CAP_NOTIFY_CFG ? fNotifyCfg :
+                                     cfgType == VIRTIO_PCI_CAP_ISR_CFG    ? fIsrCfg :
+                                     cfgType == VIRTIO_PCI_CAP_DEVICE_CFG ? fDeviceCfg : NULL;
+        if (existing)
+            continue;
 
         IOMemoryMap *map = mapBar(pci, bar);
         if (!map) {
