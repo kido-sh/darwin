@@ -149,9 +149,8 @@ IOVirtIOTransport::attach(IOPCIDevice *pci)
     pci->setMemoryEnable(true);
 
     IOByteCount capOffset = 0;
-    UInt32 found;
     unsigned nCaps = 0;
-    while ((found = pci->extendedFindPCICapability(PCI_CAP_ID_VNDR, &capOffset)) != 0) {
+    while (pci->extendedFindPCICapability(PCI_CAP_ID_VNDR, &capOffset) != 0) {
         nCaps++;
         // capOffset is the capability's own start (cap_vndr byte), field
         // offsets below are relative to it, per struct virtio_pci_cap.
