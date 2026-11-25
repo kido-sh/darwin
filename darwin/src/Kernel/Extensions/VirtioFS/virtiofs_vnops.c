@@ -1221,7 +1221,7 @@ write_batch_done(void *arg)
 
 static int
 write_batch(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, const char *buf, uint32_t len,
-            uint32_t *written, bool *stray)
+            uint32_t *written)
 {
     struct virtiofs_mount *vmp = np->vmp;
     uint32_t max = vmp->session.max_io, parts = (len + max - 1) / max;
@@ -1246,33 +1246,17 @@ write_batch(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, 
     IOLockUnlock(vmp->lock);
 
     int error = 0;
-    uint32_t bad = parts;
     *written = 0;
-    for (uint32_t i = 0; i < parts && bad == parts; i++) {
+    for (uint32_t i = 0; i < parts; i++) {
         uint32_t size = MIN(len - i * max, max), done = batch.part[i].out.size;
         error = batch.part[i].error ? batch.part[i].error : done > size ? EIO : 0;
-        if (error || done < size)
-            bad = i;
-        if (!error)
-            *written += done;
+        if (error)
+            break;
+        *written += done;
+        if (done < size)
+            break;
     }
-    *stray = false;
-    for (uint32_t i = bad + 1; i < parts; i++)
-        *stray |= !batch.part[i].error && batch.part[i].out.size;
     return error;
-}
-
-static void
-write_cut(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t size)
-{
-    struct fuse_setattr_in in = { .valid = FATTR_SIZE | FATTR_FH, .fh = fh, .size = (uint64_t)size };
-    struct fuse_attr_out out = {};
-    struct virtiofs_call c = {
-        .opcode = FUSE_SETATTR, .nodeid = np->nodeid,
-        .arg = { &in }, .arglen = { sizeof(in) }, .reply = &out, .replylen = sizeof(out),
-    };
-
-    virtiofs_call(np->vmp, ctx, &c);
 }
 
 static int
@@ -1316,17 +1300,14 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     if (!error && !buf)
         error = ENOMEM;
     off_t reach = start;
-    bool cut = false;
     while (!error && uio_resid(uio) > 0) {
         uint32_t len = (uint32_t)MIN((user_ssize_t)room, uio_resid(uio)), written = 0;
         user_ssize_t resid = uio_resid(uio);
         off_t at = uio_offset(uio);
         error = uiomove(buf, (int)len, uio);
         if (!error) {
-            bool stray;
             reach = at + len;
-            error = write_batch(np, ctx, fh, at, buf, len, &written, &stray);
-            cut |= stray;
+            error = write_batch(np, ctx, fh, at, buf, len, &written);
         }
         if (error || written < len) {
             uio_setresid(uio, resid - written);
@@ -1337,13 +1318,11 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     if (buf)
         IOFree(buf, room);
     off_t end = uio_offset(uio);
-    if (cut && reach > MAX(old, end))
-        write_cut(np, ctx, fh, MAX(old, end));
     if (end > start)
         error = (ap->a_ioflag & IO_SYNC) ? write_sync(np, ctx, fh, FUSE_FSYNC) : 0;
     whandle_put(np);
     if (reach > start)
-        node_changed(np, first, reach, end, false);
+        node_changed(np, first, reach, end > start ? end : 0, false);
     IOLockUnlock(np->wlock);
     return error;
 }
