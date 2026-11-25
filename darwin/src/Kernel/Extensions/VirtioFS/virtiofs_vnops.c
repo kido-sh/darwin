@@ -140,6 +140,14 @@ attr_changed(const struct fuse_attr *a, const struct fuse_attr *b)
            a->ctimensec != b->ctimensec;
 }
 
+static int
+change_cmp(const struct fuse_attr *a, const struct fuse_attr *b)
+{
+    if (a->ctime != b->ctime)
+        return a->ctime < b->ctime ? -1 : 1;
+    return a->ctimensec < b->ctimensec ? -1 : a->ctimensec > b->ctimensec;
+}
+
 uint64_t
 virtiofs_version(struct virtiofs_mount *vmp)
 {
@@ -312,6 +320,30 @@ node_fetch(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
     return 0;
 }
 
+static void
+node_resize_locked(struct virtiofs_node *np, off_t size)
+{
+    np->flags |= VN_SIZING;
+    np->push_limit = (off_t)np->attr.size;
+    readers_wait_locked(np);
+    np->push_limit = MIN((off_t)np->attr.size, size);
+    np->attr.size = (uint64_t)size;
+    np->attr_version = ++np->vmp->version;
+    IOLockUnlock(np->vmp->lock);
+    ubc_setsize(np->vp, size);
+    IOLockLock(np->vmp->lock);
+    wake(np, VN_SIZING);
+}
+
+static void
+node_resize(struct virtiofs_node *np, off_t size)
+{
+    IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_SIZING);
+    node_resize_locked(np, size);
+    IOLockUnlock(np->vmp->lock);
+}
+
 static int
 append_offset(struct virtiofs_node *np, vfs_context_t ctx, off_t *offset)
 {
@@ -325,7 +357,11 @@ append_offset(struct virtiofs_node *np, vfs_context_t ctx, off_t *offset)
         return error;
     IOLockLock(np->vmp->lock);
     wait_clear(np, VN_SIZING);
-    *offset = applied ? (off_t)np->attr.size : (off_t)reply.size;
+    int newer = applied ? 1 : change_cmp(&np->attr, &reply);
+    off_t cached = (off_t)np->attr.size, fetched = (off_t)reply.size;
+    *offset = newer > 0 ? cached : newer < 0 ? fetched : MAX(cached, fetched);
+    if (*offset < cached)
+        node_resize_locked(np, *offset);
     IOLockUnlock(np->vmp->lock);
     return 0;
 }
@@ -2070,24 +2106,6 @@ virtiofs_vnop_pathconf(struct vnop_pathconf_args *ap)
     default:
         return EINVAL;
     }
-}
-
-static void
-node_resize(struct virtiofs_node *np, off_t size)
-{
-    IOLockLock(np->vmp->lock);
-    wait_clear(np, VN_SIZING);
-    np->flags |= VN_SIZING;
-    np->push_limit = (off_t)np->attr.size;
-    readers_wait_locked(np);
-    np->push_limit = MIN((off_t)np->attr.size, size);
-    np->attr.size = (uint64_t)size;
-    np->attr_version = ++np->vmp->version;
-    IOLockUnlock(np->vmp->lock);
-    ubc_setsize(np->vp, size);
-    IOLockLock(np->vmp->lock);
-    wake(np, VN_SIZING);
-    IOLockUnlock(np->vmp->lock);
 }
 
 static int
