@@ -372,7 +372,8 @@ handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
     wait_clear(np, VN_OPENING);
     if (np->flags & VN_OPEN) {
         np->users++;
-        np->flags &= ~VN_CLOSING;
+        if (np->flags & VN_CLOSING)
+            wake(np, VN_CLOSING);
         *fh = np->fh;
         IOLockUnlock(vmp->lock);
         return 0;
