@@ -23,6 +23,7 @@
     {
       checks.${system} = {
         virtiofs-fuzz = basePkgs.callPackage ./nix/checks/virtiofs-fuzz.nix { };
+        virtiofs-unit = basePkgs.callPackage ./nix/checks/virtiofs-unit.nix { };
         virtiofs-analyze = darwin.virtiofsAnalyzeBuild;
       };
 
