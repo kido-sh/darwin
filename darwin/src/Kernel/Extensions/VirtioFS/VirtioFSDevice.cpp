@@ -207,8 +207,12 @@ VirtioFSDevice::setupInterrupt()
 }
 
 void
-VirtioFSDevice::interruptOccurred(IOInterruptEventSource *, int)
+VirtioFSDevice::interruptOccurred(IOInterruptEventSource *source, int)
 {
+    if (__atomic_load_n(&fDead, __ATOMIC_RELAXED)) {
+        source->disable();
+        return;
+    }
     if (!(fTransport.readIsr() & 1))
         return;
     IOLockLock(fLock);
@@ -266,7 +270,7 @@ VirtioFSDevice::failLocked(bool broken)
         return;
     if (broken)
         IOLog("VirtioFS: the device completed a request it was not given, failing it\n");
-    fDead = true;
+    __atomic_store_n(&fDead, true, __ATOMIC_RELAXED);
     fInterruptSource->disable();
     fQuiesced = fTransport.quiesce();
     for (unsigned i = 0; fQuiesced && i < fQueues[kRequests].queueSize; i++) {
