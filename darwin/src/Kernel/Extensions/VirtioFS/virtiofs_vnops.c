@@ -293,8 +293,7 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     off_t size = (off_t)attr->size, old = (off_t)np->attr.size;
     if (changed) {
         sizing_set(np);
-        if (size != old)
-            readers_wait_locked(np);
+        readers_wait_locked(np);
     }
     if (np->attr_version > version) {
         if (changed)
