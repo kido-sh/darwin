@@ -609,7 +609,7 @@ reopen_close(const char *path, int rounds)
     }
     printf("reopen-close: %d rounds, %d closes over 20 us, longest %.2f ms, %d over 50 ms, %ld failures\n", rounds,
            waited, longest * 1e3, slow, bad);
-    return !waited || slow || bad;
+    return slow || bad;
 }
 
 static int

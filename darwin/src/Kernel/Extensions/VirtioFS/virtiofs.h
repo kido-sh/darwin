@@ -25,13 +25,17 @@ struct virtiofs_mount {
     uint64_t version;
     vnode_t root;
     uint32_t hash_bits;
+    uint32_t nidle;
     struct virtiofs_bucket *hash;
     struct virtiofs_bucket *names;
+    TAILQ_HEAD(virtiofs_idle, virtiofs_node) idle;
 };
 
 #define VFSTOVMP(mp) ((struct virtiofs_mount *)vfs_fsprivate(mp))
 
 extern int virtiofs_entry_cache;
+extern int virtiofs_idle_files;
+extern int virtiofs_revalidate_open;
 extern struct vnodeopv_desc virtiofs_vnodeop_opv_desc;
 extern struct vnodeopv_desc virtiofs_fifoop_opv_desc;
 

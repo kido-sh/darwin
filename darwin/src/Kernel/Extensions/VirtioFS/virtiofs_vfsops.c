@@ -19,11 +19,17 @@
 static vfstable_t virtiofs_vfsconf;
 int virtiofs_spin_us = 50;
 int virtiofs_entry_cache = 1;
+int virtiofs_idle_files;
+int virtiofs_revalidate_open = 1;
 
 SYSCTL_DECL(_vfs_generic);
 SYSCTL_NODE(_vfs_generic, OID_AUTO, virtiofs, CTLFLAG_RW | CTLFLAG_LOCKED, 0, "virtio-fs");
 SYSCTL_INT(_vfs_generic_virtiofs, OID_AUTO, spin_us, CTLFLAG_RW | CTLFLAG_LOCKED, &virtiofs_spin_us, 0,
            "how long a request waits for its reply before sleeping");
+SYSCTL_INT(_vfs_generic_virtiofs, OID_AUTO, idle_files, CTLFLAG_RW | CTLFLAG_LOCKED, &virtiofs_idle_files, 0,
+           "file handles a mount keeps open after their files close");
+SYSCTL_INT(_vfs_generic_virtiofs, OID_AUTO, revalidate_open, CTLFLAG_RW | CTLFLAG_LOCKED, &virtiofs_revalidate_open, 0,
+           "ask the host on every open of a file whose handle is kept");
 SYSCTL_INT(_vfs_generic_virtiofs, OID_AUTO, entry_cache, CTLFLAG_RW | CTLFLAG_LOCKED, &virtiofs_entry_cache, 0,
            "reuse a looked-up name until the host's entry timeout");
 
@@ -151,6 +157,7 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
     vmp->dev = dev;
     vmp->lock = IOLockAlloc();
     vmp->move_lock = IOLockAlloc();
+    TAILQ_INIT(&vmp->idle);
     vmp->hash_bits = 10;
     while (vmp->hash_bits < 20 && (1 << vmp->hash_bits) < desiredvnodes / 8)
         vmp->hash_bits++;
@@ -295,9 +302,12 @@ virtiofs_vfs_register(void)
     strlcpy(vfe.vfe_fsname, "virtiofs", sizeof(vfe.vfe_fsname));
     int error = vfs_fsadd(&vfe, &virtiofs_vfsconf);
     if (!error) {
+        virtiofs_idle_files = desiredvnodes / 4;
         sysctl_register_oid(&sysctl__vfs_generic_virtiofs);
         sysctl_register_oid(&sysctl__vfs_generic_virtiofs_spin_us);
         sysctl_register_oid(&sysctl__vfs_generic_virtiofs_entry_cache);
+        sysctl_register_oid(&sysctl__vfs_generic_virtiofs_idle_files);
+        sysctl_register_oid(&sysctl__vfs_generic_virtiofs_revalidate_open);
     }
     return error;
 }
@@ -308,6 +318,8 @@ virtiofs_vfs_unregister(void)
     if (virtiofs_vfsconf && vfs_fsremove(virtiofs_vfsconf) != 0)
         return EBUSY;
     if (virtiofs_vfsconf) {
+        sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_revalidate_open);
+        sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_idle_files);
         sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_entry_cache);
         sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_spin_us);
         sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs);

@@ -35,7 +35,7 @@ enum {
     VN_OPEN = 0x08,
     VN_OPENING = 0x10,
     VN_LISTING = 0x20,
-    VN_CLOSING = 0x40,
+    VN_IDLE = 0x40,
     VN_SIZING = 0x80,
     VN_NAMED = 0x100,
 };
@@ -43,11 +43,13 @@ enum {
 struct virtiofs_node {
     LIST_ENTRY(virtiofs_node) link;
     LIST_ENTRY(virtiofs_node) name_link;
+    TAILQ_ENTRY(virtiofs_node) idle;
     struct virtiofs_mount *vmp;
     vnode_t vp;
     uint64_t nodeid;
     uint64_t nlookup;
     uint64_t fh;
+    uint64_t fh_ctime;
     uint64_t expire;
     uint64_t attr_version;
     uint64_t parent;
@@ -55,6 +57,7 @@ struct virtiofs_node {
     uint64_t name_version;
     char *name;
     uint32_t namelen;
+    uint32_t fh_ctimensec;
     struct fuse_attr attr;
     uint32_t users;
     uint32_t releasing;
@@ -155,17 +158,8 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
 }
 
 static int
-node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
+node_fetch(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
 {
-    IOLockLock(np->vmp->lock);
-    wait_clear(np, VN_SIZING);
-    bool cached = mach_absolute_time() < np->expire;
-    if (cached)
-        *attr = np->attr;
-    IOLockUnlock(np->vmp->lock);
-    if (cached)
-        return 0;
-
     struct fuse_getattr_in in = {};
     struct fuse_attr_out out = {};
     struct virtiofs_call c = {
@@ -185,6 +179,18 @@ node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
     *attr = np->attr;
     IOLockUnlock(np->vmp->lock);
     return 0;
+}
+
+static int
+node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
+{
+    IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_SIZING);
+    bool cached = mach_absolute_time() < np->expire;
+    if (cached)
+        *attr = np->attr;
+    IOLockUnlock(np->vmp->lock);
+    return cached ? 0 : node_fetch(np, ctx, attr);
 }
 
 static off_t
@@ -364,42 +370,19 @@ virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry
 }
 
 static int
-handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
+handle_open(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
 {
-    struct virtiofs_mount *vmp = np->vmp;
-
-    IOLockLock(vmp->lock);
-    wait_clear(np, VN_OPENING);
-    if (np->flags & VN_OPEN) {
-        np->users++;
-        if (np->flags & VN_CLOSING)
-            wake(np, VN_CLOSING);
-        *fh = np->fh;
-        IOLockUnlock(vmp->lock);
-        return 0;
-    }
-    np->flags |= VN_OPENING;
-    IOLockUnlock(vmp->lock);
-
     struct fuse_open_in in = {};
     struct fuse_open_out out = {};
     struct virtiofs_call c = {
         .opcode = vnode_isdir(np->vp) ? FUSE_OPENDIR : FUSE_OPEN, .nodeid = np->nodeid,
         .arg = { &in }, .arglen = { sizeof(in) }, .reply = &out, .replylen = sizeof(out),
     };
-    int error = virtiofs_call(vmp, ctx, &c);
+    int error = virtiofs_call(np->vmp, ctx, &c);
+
     if (!error && c.replylen != sizeof(out))
         error = EIO;
-
-    IOLockLock(vmp->lock);
-    if (!error) {
-        np->fh = out.fh;
-        np->flags = (np->flags | VN_OPEN) & ~VN_CLOSING;
-        np->users++;
-        *fh = out.fh;
-    }
-    wake(np, VN_OPENING);
-    IOLockUnlock(vmp->lock);
+    *fh = out.fh;
     return error;
 }
 
@@ -424,30 +407,130 @@ release_done(void *arg, __unused int error)
 }
 
 static void
-handle_close(struct virtiofs_node *np)
+handle_release(struct virtiofs_node *np, uint64_t fh)
+{
+    struct fuse_release_in in = { .fh = fh };
+    struct virtiofs_call c = {
+        .opcode = vnode_isdir(np->vp) ? FUSE_RELEASEDIR : FUSE_RELEASE, .nodeid = np->nodeid,
+        .arg = { &in }, .arglen = { sizeof(in) },
+    };
+
+    virtiofs_dev_submit(np->vmp->dev, &c, release_done, np);
+}
+
+static void
+idle_remove_locked(struct virtiofs_node *np)
+{
+    if (np->flags & VN_IDLE) {
+        TAILQ_REMOVE(&np->vmp->idle, np, idle);
+        np->vmp->nidle--;
+        np->flags &= ~VN_IDLE;
+    }
+}
+
+static bool
+handle_drop_locked(struct virtiofs_node *np, uint64_t *fh)
+{
+    idle_remove_locked(np);
+    if (!(np->flags & VN_OPEN))
+        return false;
+    np->flags &= ~VN_OPEN;
+    np->releasing++;
+    *fh = np->fh;
+    return true;
+}
+
+static bool
+handle_current_locked(struct virtiofs_node *np, const struct fuse_attr *attr)
+{
+    return (np->flags & VN_OPEN) && np->fh_ctime == attr->ctime && np->fh_ctimensec == attr->ctimensec;
+}
+
+static int
+handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open)
 {
     struct virtiofs_mount *vmp = np->vmp;
-    struct fuse_release_in in = {};
-    struct virtiofs_call c = { .arg = { &in }, .arglen = { sizeof(in) } };
+    bool ask = __atomic_load_n(&virtiofs_revalidate_open, __ATOMIC_RELAXED);
+    struct fuse_attr attr;
+    uint64_t fh, kept;
 
     IOLockLock(vmp->lock);
-    np->flags |= VN_CLOSING;
-    while ((np->flags & VN_CLOSING) && (np->users || (np->flags & VN_OPENING))) {
-        np->flags |= VN_WANT;
-        IOLockSleep(vmp->lock, np, THREAD_UNINT);
+    wait_clear(np, VN_OPENING | VN_SIZING);
+    *open = np->flags & VN_OPEN;
+    bool current = !ask && mach_absolute_time() < np->expire && handle_current_locked(np, &np->attr);
+    if (current)
+        idle_remove_locked(np);
+    IOLockUnlock(vmp->lock);
+    if (!*open || current)
+        return 0;
+
+    int error = ask ? node_fetch(np, ctx, &attr) : node_attr(np, ctx, &attr);
+    if (error)
+        return error;
+    IOLockLock(vmp->lock);
+    wait_clear(np, VN_OPENING);
+    *open = np->flags & VN_OPEN;
+    current = handle_current_locked(np, &attr);
+    if (current)
+        idle_remove_locked(np);
+    IOLockUnlock(vmp->lock);
+    if (!*open || current)
+        return 0;
+
+    error = handle_open(np, ctx, &fh);
+    IOLockLock(vmp->lock);
+    bool drop = error && !np->users && !vnode_isinuse(np->vp, 0) && handle_drop_locked(np, &kept);
+    bool adopt = !error && !(np->flags & (VN_OPEN | VN_OPENING));
+    if (!error) {
+        np->fh_ctime = attr.ctime;
+        np->fh_ctimensec = attr.ctimensec;
+        idle_remove_locked(np);
     }
-    bool release = (np->flags & (VN_OPEN | VN_CLOSING)) == (VN_OPEN | VN_CLOSING);
-    np->flags &= ~VN_CLOSING;
-    if (release) {
-        np->flags &= ~VN_OPEN;
+    if (adopt) {
+        np->fh = fh;
+        np->flags |= VN_OPEN;
+    } else if (!error) {
         np->releasing++;
-        in.fh = np->fh;
-        c.opcode = vnode_isdir(np->vp) ? FUSE_RELEASEDIR : FUSE_RELEASE;
-        c.nodeid = np->nodeid;
     }
     IOLockUnlock(vmp->lock);
-    if (release)
-        virtiofs_dev_submit(vmp->dev, &c, release_done, np);
+    if (!error && !adopt)
+        handle_release(np, fh);
+    if (drop)
+        handle_release(np, kept);
+    return error;
+}
+
+static int
+handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
+{
+    struct virtiofs_mount *vmp = np->vmp;
+
+    IOLockLock(vmp->lock);
+    wait_clear(np, VN_OPENING);
+    if (np->flags & VN_OPEN) {
+        np->users++;
+        *fh = np->fh;
+        IOLockUnlock(vmp->lock);
+        return 0;
+    }
+    np->flags |= VN_OPENING;
+    uint64_t ctime = np->attr.ctime;
+    uint32_t ctimensec = np->attr.ctimensec;
+    IOLockUnlock(vmp->lock);
+
+    int error = handle_open(np, ctx, fh);
+
+    IOLockLock(vmp->lock);
+    if (!error) {
+        np->fh = *fh;
+        np->fh_ctime = ctime;
+        np->fh_ctimensec = ctimensec;
+        np->flags |= VN_OPEN;
+        np->users++;
+    }
+    wake(np, VN_OPENING);
+    IOLockUnlock(vmp->lock);
+    return error;
 }
 
 static int
@@ -459,6 +542,56 @@ handle_check(struct virtiofs_node *np, vfs_context_t ctx)
     if (!error)
         handle_put(np);
     return error;
+}
+
+static int
+file_open(struct virtiofs_node *np, vfs_context_t ctx)
+{
+    bool open;
+    int error = handle_validate(np, ctx, &open);
+
+    if (error || open)
+        return error;
+    return handle_check(np, ctx);
+}
+
+static void
+file_idle(struct virtiofs_node *np)
+{
+    struct virtiofs_mount *vmp = np->vmp;
+    int keep = __atomic_load_n(&virtiofs_idle_files, __ATOMIC_RELAXED);
+    struct virtiofs_node *oldest;
+    uint64_t fh;
+
+    IOLockLock(vmp->lock);
+    if ((np->flags & (VN_OPEN | VN_IDLE)) == VN_OPEN) {
+        TAILQ_INSERT_TAIL(&vmp->idle, np, idle);
+        vmp->nidle++;
+        np->flags |= VN_IDLE;
+    }
+    while (vmp->nidle > (uint32_t)MAX(keep, 0) && !(oldest = TAILQ_FIRST(&vmp->idle))->users) {
+        if (vnode_isinuse(oldest->vp, 0)) {
+            idle_remove_locked(oldest);
+            continue;
+        }
+        handle_drop_locked(oldest, &fh);
+        IOLockUnlock(vmp->lock);
+        handle_release(oldest, fh);
+        IOLockLock(vmp->lock);
+    }
+    IOLockUnlock(vmp->lock);
+}
+
+static void
+dir_close(struct virtiofs_node *np)
+{
+    uint64_t fh;
+
+    IOLockLock(np->vmp->lock);
+    bool release = !np->users && handle_drop_locked(np, &fh);
+    IOLockUnlock(np->vmp->lock);
+    if (release)
+        handle_release(np, fh);
 }
 
 static struct virtiofs_bucket *
@@ -622,6 +755,9 @@ virtiofs_vnop_open(struct vnop_open_args *ap)
 
     switch (vnode_vtype(vp)) {
     case VREG:
+        if (ap->a_mode & (FWRITE | O_TRUNC))
+            return EROFS;
+        return file_open(VTON(vp), ap->a_context);
     case VDIR:
         if (ap->a_mode & (FWRITE | O_TRUNC))
             return EROFS;
@@ -695,7 +831,7 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
         return EINVAL;
     if (uio_resid(uio) == 0)
         return 0;
-    int error = handle_check(np, ap->a_context);
+    int error = vnode_isinuse(vp, 0) ? handle_check(np, ap->a_context) : file_open(np, ap->a_context);
     if (!error)
         error = node_attr(np, ap->a_context, &attr);
     if (error)
@@ -1002,7 +1138,10 @@ virtiofs_vnop_listxattr(struct vnop_listxattr_args *ap)
 static int
 virtiofs_vnop_inactive(struct vnop_inactive_args *ap)
 {
-    handle_close(VTON(ap->a_vp));
+    if (vnode_isreg(ap->a_vp))
+        file_idle(VTON(ap->a_vp));
+    else
+        dir_close(VTON(ap->a_vp));
     return 0;
 }
 
@@ -1012,8 +1151,17 @@ virtiofs_vnop_reclaim(struct vnop_reclaim_args *ap)
     vnode_t vp = ap->a_vp;
     struct virtiofs_node *np = VTON(vp);
     struct virtiofs_mount *vmp = np->vmp;
+    uint64_t fh;
 
-    handle_close(np);
+    IOLockLock(vmp->lock);
+    while (np->users || (np->flags & VN_OPENING)) {
+        np->flags |= VN_WANT;
+        IOLockSleep(vmp->lock, np, THREAD_UNINT);
+    }
+    bool release = handle_drop_locked(np, &fh);
+    IOLockUnlock(vmp->lock);
+    if (release)
+        handle_release(np, fh);
     IOLockLock(vmp->lock);
     while (np->releasing) {
         np->flags |= VN_WANT;
