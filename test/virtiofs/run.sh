@@ -278,6 +278,23 @@ idle_none() {
     "open $held times"
   [[ $status == 0 && $held -le 1 ]]
 }
+readers_beside_writer() {
+  local was how holder opened writing status=0
+  was=$(guest /bin/sh -c 'sysctl -n vfs.generic.virtiofs.idle_files') || return 1
+  guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.idle_files=0' > /dev/null
+  for how in advise read-close; do
+    printf 'readers\n' > "$rw/rb-$how"
+    guest /tmp/t_virtiofs hold-readers "/mnt/rw/rb-$how" $how 3 > /dev/null 2>&1 &
+    holder=$!
+    sleep 1.5
+    opened=$(host_open "$rw/rb-$how\$") writing=$(host_writing "$rw/rb-$how\$")
+    wait $holder || status=1
+    echo "$how beside a writer: the Mac holds the file open $opened times, $writing of them for writing"
+    [[ $opened == 2 && $writing == 1 ]] || status=1
+  done
+  guest /bin/sh -c "sysctl -w vfs.generic.virtiofs.idle_files=$was" >/dev/null
+  return $status
+}
 unmapped_released() {
   local holder writers status
   printf '%016384d' 0 > "$rw/mr"
@@ -458,6 +475,7 @@ check "edge cases of creation, stores beside growth, times and flags" guest /tmp
 check "a file whose links were all removed is released on this Mac" links_released
 check "a writable mapping keeps writing after its descriptor closes and this Mac revokes writing" mapped_writer_kept
 check "a write handle is let go at munmap while a reader keeps the file open" unmapped_released
+check "beside a writer, read advice opens nothing and a closed reader's handle is let go" readers_beside_writer
 check "read advice beside appends never caches zeros inside the file" guest /tmp/t_virtiofs advise-append /mnt/rw/aa 3
 check "a create whose open fails before it opens leaves nothing open for writing" raw_create_released
 check "a case-only rename works after the first case probe asked about a removed file" guest /bin/sh -c \

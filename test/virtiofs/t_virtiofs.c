@@ -601,6 +601,26 @@ advise_append(const char *path, int seconds)
 }
 
 static int
+hold_readers(const char *path, const char *how, int seconds)
+{
+    struct radvisory ra = { .ra_offset = 0, .ra_count = 65536 };
+    char byte;
+    int wfd = open(path, O_WRONLY), rc = wfd < 0;
+    if (!rc && !strcmp(how, "advise"))
+        rc = fcntl(wfd, F_RDADVISE, &ra) != 0;
+    if (!rc && !strcmp(how, "read-close")) {
+        int rfd = open(path, O_RDONLY);
+        rc = rfd < 0 || read(rfd, &byte, 1) != 1 || close(rfd) != 0;
+    }
+    printf("%s beside a writer: %s\n", how, rc ? strerror(errno) : "ok");
+    fflush(stdout);
+    sleep((unsigned)seconds);
+    if (wfd >= 0)
+        close(wfd);
+    return rc;
+}
+
+static int
 advise_close(const char *path, int mib)
 {
     struct radvisory ra = { .ra_offset = 0, .ra_count = mib << 20 };
@@ -2023,6 +2043,8 @@ main(int argc, char **argv)
         return map_hold(argv[2], atoi(argv[3]));
     if (argc == 3 && !strcmp(argv[1], "exec-fail"))
         return exec_fail(argv[2]);
+    if (argc == 5 && !strcmp(argv[1], "hold-readers"))
+        return hold_readers(argv[2], argv[3], atoi(argv[4]));
     if (argc == 4 && !strcmp(argv[1], "advise-append"))
         return advise_append(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "advise-close"))
