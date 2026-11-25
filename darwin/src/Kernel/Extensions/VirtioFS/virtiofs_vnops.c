@@ -2056,11 +2056,13 @@ case_sensitive(vnode_t vp, vfs_context_t ctx, int32_t *retval)
     if (letters && name_node(VTON(dvp), ctx, name, (uint32_t)len, &first) == 0 && first.nodeid == np->nodeid) {
         int error = name_node(VTON(dvp), ctx, flipped, (uint32_t)len, &flip);
         bool still = (!error || error == ENOENT) && name_node(VTON(dvp), ctx, name, (uint32_t)len, &again) == 0 &&
-                     again.nodeid == np->nodeid;
-        if (still && !error && flip.nodeid == np->nodeid)
-            known = vnode_isdir(vp) || (first.attr.nlink == 1 && flip.attr.nlink == 1) ? 0 : -1;
-        else if (still)
+                     again.nodeid == np->nodeid && change_cmp(&first.attr, &again.attr) == 0;
+        if (still && !error && flip.nodeid == np->nodeid) {
+            bool single = vnode_isdir(vp) || (first.attr.nlink == 1 && flip.attr.nlink == 1 && again.attr.nlink == 1);
+            known = single && change_cmp(&first.attr, &flip.attr) == 0 ? 0 : -1;
+        } else if (still) {
             known = 1;
+        }
     }
     if (flipped)
         IOFree(flipped, len);
