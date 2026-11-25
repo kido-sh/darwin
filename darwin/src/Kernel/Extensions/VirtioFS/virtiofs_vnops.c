@@ -212,6 +212,7 @@ static void file_idle(struct virtiofs_node *np);
 static int
 page_fill(struct virtiofs_node *np, upl_t upl, off_t page, off_t from, off_t to)
 {
+    uint32_t max = np->vmp->session.max_io;
     uint64_t fh;
 
     if (from >= to)
@@ -219,13 +220,16 @@ page_fill(struct virtiofs_node *np, upl_t upl, off_t page, off_t from, off_t to)
     int error = handle_get(np, NULL, &fh);
     if (error)
         return error;
-    struct fuse_read_in in = { .fh = fh, .offset = (uint64_t)from, .size = (uint32_t)(to - from) };
-    struct virtiofs_call c = {
-        .opcode = FUSE_READ, .flags = VIRTIOFS_ZERO_FILL, .nodeid = np->nodeid,
-        .arg = { &in }, .arglen = { sizeof(in) }, .datalen = (uint32_t)(to - from),
-        .upl = upl, .upl_offset = (uint32_t)(from - page),
-    };
-    error = virtiofs_call(np->vmp, NULL, &c);
+    for (; !error && from < to; from += max) {
+        uint32_t len = (uint32_t)MIN((off_t)max, to - from);
+        struct fuse_read_in in = { .fh = fh, .offset = (uint64_t)from, .size = len };
+        struct virtiofs_call c = {
+            .opcode = FUSE_READ, .flags = VIRTIOFS_ZERO_FILL, .nodeid = np->nodeid,
+            .arg = { &in }, .arglen = { sizeof(in) }, .datalen = len,
+            .upl = upl, .upl_offset = (uint32_t)(from - page),
+        };
+        error = virtiofs_call(np->vmp, NULL, &c);
+    }
     handle_put(np);
     file_idle(np);
     return error;
