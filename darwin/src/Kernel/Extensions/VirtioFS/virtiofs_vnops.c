@@ -1700,7 +1700,7 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     if (!error)
         error = write_batch(np, ctx, fh, at, buf, len, written);
     off_t reach = at + *written, size = *written ? MAX(old, reach) : old;
-    int changed = *written ? (int)(((off_t)round_page_64(reach) - first) / PAGE_SIZE) : 0;
+    int changed = *written ? (int)MIN((off_t)count, ((off_t)round_page_64(reach) - first) / PAGE_SIZE) : 0;
     for (int i = 0; addr && i < count; i++) {
         off_t page = first + (off_t)i * PAGE_SIZE, from = MAX(page, at), to = MIN(page + PAGE_SIZE, reach);
         if (upl_valid_page(pl, i) && from < to)
