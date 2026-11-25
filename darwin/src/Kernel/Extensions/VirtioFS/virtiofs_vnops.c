@@ -420,6 +420,8 @@ handle_put(struct virtiofs_node *np, bool close)
         c.opcode = vnode_isdir(np->vp) ? FUSE_RELEASEDIR : FUSE_RELEASE;
         c.nodeid = np->nodeid;
     }
+    if (np->users == 0)
+        wake(np, 0);
     IOLockUnlock(vmp->lock);
     if (release)
         virtiofs_dev_submit(vmp->dev, &c, NULL, NULL);
@@ -710,39 +712,82 @@ virtiofs_vnop_blockmap(struct vnop_blockmap_args *ap)
     return 0;
 }
 
+struct virtiofs_read {
+    buf_t bp;
+    struct virtiofs_node *np;
+    uint32_t size;
+    uint32_t pending;
+    int error;
+    struct {
+        struct fuse_read_in in;
+        struct virtiofs_call call;
+    } chunk[];
+};
+
+static void
+read_done(void *arg, int error)
+{
+    struct virtiofs_read *rd = arg;
+
+    if (error)
+        __atomic_store_n(&rd->error, error, __ATOMIC_RELAXED);
+    if (__atomic_sub_fetch(&rd->pending, 1, __ATOMIC_ACQ_REL) != 0)
+        return;
+    buf_t bp = rd->bp;
+    error = __atomic_load_n(&rd->error, __ATOMIC_RELAXED);
+    handle_put(rd->np, false);
+    IOFree(rd, rd->size);
+    buf_seterror(bp, error);
+    buf_setresid(bp, error ? buf_count(bp) : 0);
+    buf_biodone(bp);
+}
+
 static int
 virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
 {
     buf_t bp = ap->a_bp;
     vnode_t vp = buf_vnode(bp);
     struct virtiofs_node *np = VTON(vp);
+    struct virtiofs_read *rd = NULL;
     uint32_t count = buf_count(bp);
     uint32_t max = np->vmp->session.max_io;
+    uint32_t chunks = (count + max - 1) / max;
+    uint32_t size = (uint32_t)(sizeof(*rd) + chunks * sizeof(rd->chunk[0]));
     off_t offset = buf_blkno(bp) * vfs_devblocksize(vnode_mount(vp));
     uint64_t fh = 0;
-    int error = (buf_flags(bp) & B_READ) ? handle_get(np, NULL, &fh) : EROFS;
-    bool held = !error;
 
-    for (uint32_t done = 0; !error && done < count; done += max) {
-        uint32_t chunk = count - done < max ? count - done : max;
-        struct fuse_read_in in = { .fh = fh, .offset = (uint64_t)offset + done, .size = chunk };
-        struct virtiofs_call c = {
+    int error = (buf_flags(bp) & B_READ) ? 0 : EROFS;
+    if (!error && chunks)
+        error = (rd = IOMallocZero(size)) ? handle_get(np, NULL, &fh) : ENOMEM;
+    if (error && rd)
+        IOFree(rd, size);
+    if (error || !chunks) {
+        buf_seterror(bp, error);
+        buf_setresid(bp, error ? count : 0);
+        buf_biodone(bp);
+        return 0;
+    }
+
+    rd->bp = bp;
+    rd->np = np;
+    rd->size = size;
+    rd->pending = chunks;
+    for (uint32_t i = 0, done = 0; i < chunks; i++, done += max) {
+        struct fuse_read_in *in = &rd->chunk[i].in;
+        struct virtiofs_call *c = &rd->chunk[i].call;
+        *in = (struct fuse_read_in){ .fh = fh, .offset = (uint64_t)offset + done, .size = MIN(count - done, max) };
+        *c = (struct virtiofs_call){
             .opcode = FUSE_READ, .flags = VIRTIOFS_ZERO_FILL, .nodeid = np->nodeid,
-            .arg = { &in }, .arglen = { sizeof(in) }, .datalen = chunk,
+            .arg = { in }, .arglen = { sizeof(*in) }, .datalen = in->size,
         };
         if (buf_upl(bp)) {
-            c.upl = buf_upl(bp);
-            c.upl_offset = buf_uploffset(bp) + done;
+            c->upl = buf_upl(bp);
+            c->upl_offset = buf_uploffset(bp) + done;
         } else {
-            c.data = (void *)(buf_dataptr(bp) + done);
+            c->data = (void *)(buf_dataptr(bp) + done);
         }
-        error = virtiofs_call(np->vmp, NULL, &c);
+        virtiofs_dev_submit(np->vmp->dev, c, read_done, rd);
     }
-    if (held)
-        handle_put(np, false);
-    buf_seterror(bp, error);
-    buf_setresid(bp, error ? count : 0);
-    buf_biodone(bp);
     return 0;
 }
 
@@ -953,6 +998,12 @@ virtiofs_vnop_reclaim(struct vnop_reclaim_args *ap)
     struct virtiofs_node *np = VTON(vp);
     struct virtiofs_mount *vmp = np->vmp;
 
+    IOLockLock(vmp->lock);
+    while (np->users) {
+        np->flags |= VN_WANT;
+        IOLockSleep(vmp->lock, np, THREAD_UNINT);
+    }
+    IOLockUnlock(vmp->lock);
     handle_put(np, true);
     IOLockLock(vmp->lock);
     if (np->flags & VN_HASHED) {
