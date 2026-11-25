@@ -42,6 +42,16 @@ virtiofs_call(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_cal
                              ctx ? (uint32_t)vfs_context_pid(ctx) : 0);
 }
 
+void
+virtiofs_submit(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_call *c, virtiofs_done_t done,
+                void *arg)
+{
+    kauth_cred_t cred = ctx ? vfs_context_ucred(ctx) : NULL;
+
+    virtiofs_dev_submit(vmp->dev, c, cred ? kauth_cred_getuid(cred) : 0, cred ? kauth_cred_getgid(cred) : 0,
+                        ctx ? (uint32_t)vfs_context_pid(ctx) : 0, done, arg);
+}
+
 static int
 root_entry(struct virtiofs_mount *vmp, const char *share, vfs_context_t ctx, struct fuse_entry_out *entry,
            uint64_t *version)

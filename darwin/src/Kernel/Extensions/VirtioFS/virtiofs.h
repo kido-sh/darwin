@@ -44,6 +44,8 @@ extern struct vnodeopv_desc virtiofs_fifoop_opv_desc;
 int virtiofs_vfs_register(void);
 int virtiofs_vfs_unregister(void);
 int virtiofs_call(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_call *call);
+void virtiofs_submit(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_call *call, virtiofs_done_t done,
+                     void *arg);
 uint64_t virtiofs_version(struct virtiofs_mount *vmp);
 void virtiofs_vnode_push(vnode_t vp);
 int virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry, uint64_t version,

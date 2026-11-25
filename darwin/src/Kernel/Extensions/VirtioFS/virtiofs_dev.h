@@ -41,7 +41,8 @@ struct virtiofs_dev *virtiofs_dev_find(const char *tag);
 void virtiofs_dev_release(struct virtiofs_dev *dev);
 int virtiofs_dev_start(struct virtiofs_dev *dev, struct virtiofs_session *session);
 int virtiofs_dev_call(struct virtiofs_dev *dev, struct virtiofs_call *call, uint32_t uid, uint32_t gid, uint32_t pid);
-void virtiofs_dev_submit(struct virtiofs_dev *dev, struct virtiofs_call *call, virtiofs_done_t done, void *arg);
+void virtiofs_dev_submit(struct virtiofs_dev *dev, struct virtiofs_call *call, uint32_t uid, uint32_t gid, uint32_t pid,
+                         virtiofs_done_t done, void *arg);
 void virtiofs_dev_forget(struct virtiofs_dev *dev, uint64_t nodeid, uint64_t nlookup);
 void virtiofs_dev_poll(struct virtiofs_dev *dev, virtiofs_poll_t done, void *arg, uint32_t datalen);
 

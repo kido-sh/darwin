@@ -565,13 +565,14 @@ VirtioFSDevice::call(struct virtiofs_call *c, uint32_t uid, uint32_t gid, uint32
 }
 
 void
-VirtioFSDevice::submit(struct virtiofs_call *c, virtiofs_done_t done, void *arg)
+VirtioFSDevice::submit(struct virtiofs_call *c, uint32_t uid, uint32_t gid, uint32_t pid, virtiofs_done_t done,
+                       void *arg)
 {
     VirtioFSRequest r;
     int error = buildRequest(c, &r);
     if (!error) {
         IOLockLock(fLock);
-        if (!startLocked(c, &r, 0, 0, 0, true, done, arg))
+        if (!startLocked(c, &r, uid, gid, pid, true, done, arg))
             error = EIO;
         unlockAndReap();
         if (error)
@@ -715,9 +716,10 @@ virtiofs_dev_call(struct virtiofs_dev *dev, struct virtiofs_call *call, uint32_t
 }
 
 void
-virtiofs_dev_submit(struct virtiofs_dev *dev, struct virtiofs_call *call, virtiofs_done_t done, void *arg)
+virtiofs_dev_submit(struct virtiofs_dev *dev, struct virtiofs_call *call, uint32_t uid, uint32_t gid, uint32_t pid,
+                    virtiofs_done_t done, void *arg)
 {
-    ((VirtioFSDevice *)dev)->submit(call, done, arg);
+    ((VirtioFSDevice *)dev)->submit(call, uid, gid, pid, done, arg);
 }
 
 void

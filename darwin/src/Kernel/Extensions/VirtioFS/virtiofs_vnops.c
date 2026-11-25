@@ -453,7 +453,7 @@ handle_release(struct virtiofs_node *np, uint64_t fh)
         .arg = { &in }, .arglen = { sizeof(in) },
     };
 
-    virtiofs_dev_submit(np->vmp->dev, &c, release_done, np);
+    virtiofs_submit(np->vmp, NULL, &c, release_done, np);
 }
 
 static void
@@ -1105,7 +1105,8 @@ write_batch_done(void *arg)
 }
 
 static int
-write_batch(struct virtiofs_node *np, uint64_t fh, off_t at, const char *buf, uint32_t len, uint32_t *written)
+write_batch(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, const char *buf, uint32_t len,
+            uint32_t *written)
 {
     struct virtiofs_mount *vmp = np->vmp;
     uint32_t max = vmp->session.max_io, parts = (len + max - 1) / max;
@@ -1121,7 +1122,7 @@ write_batch(struct virtiofs_node *np, uint64_t fh, off_t at, const char *buf, ui
             .arg = { &part->in }, .arglen = { sizeof(part->in) }, .reply = &part->out, .replylen = sizeof(part->out),
             .data = (void *)(uintptr_t)(buf + i * max), .datalen = size,
         };
-        virtiofs_dev_submit(vmp->dev, &c, write_part_done, part);
+        virtiofs_submit(vmp, ctx, &c, write_part_done, part);
     }
     virtiofs_dev_poll(vmp->dev, write_batch_done, &batch, len);
     IOLockLock(vmp->lock);
@@ -1190,7 +1191,7 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
         error = uiomove(buf, (int)len, uio);
         if (!error) {
             reach = at + len;
-            error = write_batch(np, fh, at, buf, len, &written);
+            error = write_batch(np, ctx, fh, at, buf, len, &written);
         }
         if (error || written < len) {
             uio_setresid(uio, resid - written);
@@ -1388,7 +1389,7 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
         } else {
             c.data = (void *)(buf_dataptr(bp) + done);
         }
-        virtiofs_dev_submit(np->vmp->dev, &c, io_done, io);
+        virtiofs_submit(np->vmp, NULL, &c, io_done, io);
     }
     return 0;
 }
