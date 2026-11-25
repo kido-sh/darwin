@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -535,6 +537,81 @@ read_close(const char *path, int rounds)
     return failures != 0;
 }
 
+struct reopener {
+    const char *path;
+    _Atomic int *go;
+    int round, delay_us;
+    off_t base, span;
+    long bad;
+};
+
+static void *
+reopen_one(void *arg)
+{
+    struct reopener *o = arg;
+    unsigned char *buf = malloc(1 << 20);
+    while (atomic_load(o->go) != o->round)
+        sched_yield();
+    for (double t = now() + o->delay_us / 1e6; now() < t;)
+        ;
+    int fd = open(o->path, O_RDONLY);
+    if (!buf || fd < 0 || fcntl(fd, F_NOCACHE, 1) != 0)
+        o->bad++;
+    unsigned seed = (unsigned)o->delay_us * 2654435761u;
+    for (double until = now() + 0.25; !o->bad && now() < until;) {
+        seed = seed * 1103515245u + 12345u;
+        off_t off = o->base + (off_t)(seed % (unsigned)(o->span >> 20)) * (1 << 20);
+        o->bad += pread(fd, buf, 1 << 20, off) != 1 << 20;
+    }
+    if (fd >= 0)
+        close(fd);
+    free(buf);
+    return NULL;
+}
+
+static int
+reopen_close(const char *path, int rounds)
+{
+    static char buf[128 << 10];
+    _Atomic int go = 0;
+    struct stat st;
+    double longest = 0;
+    long bad = 0;
+    int waited = 0, slow = 0;
+    off_t at = 0;
+
+    if (stat(path, &st) != 0)
+        return 1;
+    for (int r = 1; r <= rounds; r++) {
+        pthread_t tid[8];
+        struct reopener o[8];
+        int n = 0;
+        for (; n < 8; n++) {
+            o[n] = (struct reopener){ path, &go, r, 20 + 10 * n, st.st_size - (8 << 20), 8 << 20, 0 };
+            if (pthread_create(&tid[n], NULL, reopen_one, &o[n]) != 0)
+                break;
+        }
+        bad += n < 8;
+        int fd = open(path, O_RDONLY);
+        for (int i = 0; fd >= 0 && i < 4; i++, at += (off_t)sizeof(buf))
+            bad += pread(fd, buf, sizeof(buf), at) != (ssize_t)sizeof(buf);
+        atomic_store(&go, r);
+        double t0 = now();
+        bad += fd < 0 || close(fd) != 0;
+        double took = now() - t0;
+        for (int i = 0; i < n; i++) {
+            pthread_join(tid[i], NULL);
+            bad += o[i].bad;
+        }
+        longest = took > longest ? took : longest;
+        waited += took > 20e-6;
+        slow += took > 0.05;
+    }
+    printf("reopen-close: %d rounds, %d closes over 20 us, longest %.2f ms, %d over 50 ms, %ld failures\n", rounds,
+           waited, longest * 1e3, slow, bad);
+    return !waited || slow || bad;
+}
+
 static int
 classic_readdir(const char *dir)
 {
@@ -706,6 +783,8 @@ main(int argc, char **argv)
         return as_user((uid_t)atoi(argv[2]), (gid_t)atoi(argv[3]), argv + 4);
     if (argc == 4 && !strcmp(argv[1], "read-close"))
         return read_close(argv[2], atoi(argv[3]));
+    if (argc == 4 && !strcmp(argv[1], "reopen-close"))
+        return reopen_close(argv[2], atoi(argv[3]));
     if (argc == 3 && !strcmp(argv[1], "classic-readdir"))
         return classic_readdir(argv[2]);
     if (argc == 6 && !strcmp(argv[1], "mount-as"))

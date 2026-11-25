@@ -72,6 +72,7 @@ for n in 1 4095 4096 4097 16383 16384 16385 131071 131072 131073 1048583; do
   head -c $n /dev/urandom > "$share/small/$n"
 done
 head -c $((64 << 20)) /dev/urandom > "$share/big/64m"
+head -c $((32 << 20)) /dev/urandom > "$share/big/32m"
 for i in $(seq 1 3000); do printf '%d\n' $i > "$share/many/f$i"; done
 printf 'deep\n' > "$share/deep/1/2/3/4/5/leaf"
 name255=$(printf 'n%.0s' $(seq 1 255))
@@ -115,6 +116,7 @@ check "a user other than root cannot mount a share" prints "mount: Operation not
 guest /sbin/mount | grep virtiofs
 
 check "files closed while their reads are in flight" guest /tmp/t_virtiofs read-close /mnt/data/big/64m 128
+check "a close is not held up by reads that start after it" guest /tmp/t_virtiofs reopen-close /mnt/data/big/32m 40
 guest /tmp/t_virtiofs tree /mnt/data > "$work/tree.guest"
 check "the guest sees the same tree as this Mac" diff -u "$work/tree.host" "$work/tree.guest"
 check "the empty share is empty" prints "" guest /bin/ls -A /mnt/empty
