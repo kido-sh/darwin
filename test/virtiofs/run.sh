@@ -62,7 +62,9 @@ host_fds() {
 xcrun clang -arch arm64 -mmacosx-version-min=15.0 -O2 -o "$work/t_virtiofs" "$here/t_virtiofs.c" || exit 1
 
 share=$work/share
-mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,long,links,private} "$work/empty" "$work/locked"
+wide=$(printf '\xe4\xb8\xad%.0s' $(seq 1 85))
+mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,long,links,private} "$work/empty" "$work/locked" "$work/wide"
+printf 'wide share\n' > "$work/wide/f"
 printf 'mine\n' > "$share/private/f"
 chmod 700 "$share/private"
 : > "$share/small/0"
@@ -94,7 +96,7 @@ touch -t 200102030405.06 "$share/small/1"
 "$work/t_virtiofs" tree "$share" > "$work/tree.host" || { echo "FAIL the tree on this Mac"; rc=1; }
 
 "$kido" image import "$img" $name >/dev/null || exit 1
-KIDO_DEV_VIRTIOFS="data=$share,empty=$work/empty,locked=$work/locked" "$kido" run -d --name $name $name /bin/sleep 100000 \
+KIDO_DEV_VIRTIOFS="data=$share,empty=$work/empty,locked=$work/locked,$wide=$work/wide" "$kido" run -d --name $name $name /bin/sleep 100000 \
   >/dev/null || exit 1
 vm=$(pgrep -n -f com.apple.Virtualization.VirtualMachine)
 "$kido" cp "$work/t_virtiofs" $name:/tmp/t_virtiofs || exit 1
@@ -116,7 +118,10 @@ check "files closed while their reads are in flight" guest /tmp/t_virtiofs read-
 guest /tmp/t_virtiofs tree /mnt/data > "$work/tree.guest"
 check "the guest sees the same tree as this Mac" diff -u "$work/tree.host" "$work/tree.guest"
 check "the empty share is empty" prints "" guest /bin/ls -A /mnt/empty
-check "the device root lists the shares" prints "$(printf 'data\nempty\nlocked')" guest /bin/ls /mnt/root
+check "the device root lists the shares" prints "$(printf 'data\nempty\nlocked\n%s' "$wide")" \
+  guest /bin/sh -c 'cd /mnt/root && printf "%s\n" *'
+check "a share with a 255-byte name mounts" prints "wide share" \
+  guest /bin/sh -c "mkdir -p /mnt/wide && /sbin/mount -t virtiofs -o ro kido:$wide /mnt/wide && cat /mnt/wide/f && /sbin/umount /mnt/wide"
 check "mount kido:locked" guest /sbin/mount -t virtiofs -o ro kido:locked /mnt/locked
 check "a file the host cannot read cannot be opened" fails guest /bin/cat /mnt/locked/noaccess
 check "unmount kido:locked" guest /sbin/umount /mnt/locked
