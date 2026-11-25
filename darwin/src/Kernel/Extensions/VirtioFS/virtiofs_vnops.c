@@ -1926,7 +1926,7 @@ case_sensitive(vnode_t vp, vfs_context_t ctx, int32_t *retval)
     if (letters && name_node(VTON(dvp), ctx, name, (uint32_t)len, &first) == 0 && first.nodeid == np->nodeid) {
         int error = name_node(VTON(dvp), ctx, flipped, (uint32_t)len, &flip);
         if (!error && flip.nodeid == np->nodeid)
-            known = first.attr.nlink == 1 ? 0 : -1;
+            known = vnode_isdir(vp) || (first.attr.nlink == 1 && flip.attr.nlink == 1) ? 0 : -1;
         else if ((!error || error == ENOENT) && name_node(VTON(dvp), ctx, name, (uint32_t)len, &again) == 0 &&
                  again.nodeid == np->nodeid)
             known = 1;
