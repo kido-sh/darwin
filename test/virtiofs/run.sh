@@ -102,7 +102,7 @@ ro_share_refuses() {
   out=$(guest /bin/sh -c 'mkdir -p /mnt/rwro && /sbin/mount -t virtiofs kido:data /mnt/rwro &&
     /tmp/t_virtiofs ro-share /mnt/rwro; /sbin/umount /mnt/rwro') || return 1
   echo "a writable mount of a read-only share: $(sed 's/^[^:]*: //' <<<"$out" | sort | uniq -c | tr -s ' ' | tr '\n' ',')"
-  [[ $(grep -c ': ok$' <<<"$out") == 0 && $(wc -l <<<"$out") -eq 12 ]]
+  [[ $(grep -cE ': (Operation not permitted|Permission denied|Read-only file system)$' <<<"$out") -eq 12 ]]
 }
 nostamp() {
   sed -E 's/ ctime=[0-9.]+//'
@@ -120,25 +120,101 @@ write_revoked() {
   guest /tmp/t_virtiofs "$hold" /mnt/rw/wr 3 > "$work/held.out" 2>&1 &
   holder=$!
   sleep 1
+  [[ $hold == hold ]] && guest /bin/sh -c ': >> /mnt/rw/wr'
+  local writers
+  writers=$(host_writing "$rw/wr")
   chmod 444 "$rw/wr"
-  fails guest /bin/sh -c 'printf "b\n" >> /mnt/rw/wr'
+  fails guest /bin/sh -c 'exec 3>> /mnt/rw/wr'
   denied=$?
   cut=1
   [[ $hold == hold ]] && fails guest /tmp/t_virtiofs truncate /mnt/rw/wr 0 && cut=0
   wait $holder
   status=$?
   chmod 644 "$rw/wr"
-  echo "with a descriptor from $hold: opening for writing was $( ((denied == 0)) && echo refused || echo allowed )," \
-    "truncating by name was $( ((cut == 0)) && echo refused || echo allowed ), the descriptor got $(cat "$work/held.out")"
-  [[ $denied == 0 && $status == 0 ]] || return 1
+  local truncated=
+  [[ $hold == hold ]] && truncated=" truncating by name was $( ((cut == 0)) && echo refused || echo allowed ),"
+  echo "with a descriptor from $hold: opening for writing was $( ((denied == 0)) && echo refused || echo allowed ),$truncated" \
+    "the Mac had $writers files open for writing, the descriptor got $(cat "$work/held.out")"
+  [[ $denied == 0 && $status == 0 && $writers -ge 1 ]] || return 1
   [[ $hold == hold-write ]] && [[ $(cat "$rw/wr") == $'a\nheld' ]] && return 0
   [[ $hold == hold && $cut == 0 && $(cat "$rw/wr") == a ]]
 }
+appended_kept() {
+  printf '%04000d' 0 > "$rw/app"
+  head -c 6000 /dev/urandom > "$work/appended"
+  guest /tmp/t_virtiofs map-hold /mnt/rw/app 3 > "$work/map-hold.out" 2>&1 &
+  local holder=$! status first kept=0
+  sleep 1
+  cat "$work/appended" >> "$rw/app"
+  wait $holder
+  status=$?
+  first=$(head -c 1 "$rw/app")
+  cmp -s <(tail -c 6000 "$rw/app") "$work/appended" && kept=1
+  echo "a page stored to before this Mac appended: $(cat "$work/map-hold.out"), first byte $first," \
+    "appended bytes $( ((kept)) && echo kept || echo overwritten)"
+  [[ $status == 0 && $first == A && $kept == 1 ]]
+}
+times_now() {
+  local mtime now
+  mtime=$(stat -f %m "$rw/edge/times") now=$(date +%s)
+  echo "utimes(NULL) in the guest: mtime $((now - mtime)) s before now on this Mac"
+  [[ $((now - mtime)) -lt 120 && $((mtime - now)) -lt 120 ]]
+}
+evtonly_kept() {
+  local was holder status
+  was=$(stat -f %Lp "$share/revoke") || return 1
+  guest /tmp/t_virtiofs hold-mode /mnt/data/revoke evtonly 3 > "$work/evt.out" 2>&1 &
+  holder=$!
+  sleep 1
+  chmod 000 "$share/revoke"
+  wait $holder
+  status=$?
+  chmod "$was" "$share/revoke"
+  echo "an O_EVTONLY descriptor open across a refusal read: $(cat "$work/evt.out")"
+  [[ $status == 0 && $(cat "$work/evt.out") == "7 bytes" ]]
+}
+exec_beside_writer() {
+  local holder denied
+  guest /bin/sh -c 'cp /tmp/t_virtiofs /mnt/rw/prog && chmod 755 /mnt/rw/prog && /mnt/rw/prog lookups 1 /' || return 1
+  chmod 311 "$rw/prog"
+  guest /tmp/t_virtiofs hold-mode /mnt/rw/prog wronly 3 > /dev/null 2>&1 &
+  holder=$!
+  sleep 1
+  fails guest /mnt/rw/prog lookups 1 /
+  denied=$?
+  wait $holder
+  chmod 755 "$rw/prog"
+  echo "a program this Mac made unreadable, run while another descriptor writes it: $( ((denied == 0)) && echo refused || echo ran)"
+  [[ $denied == 0 ]]
+}
+trunc_reader() {
+  local holder writers
+  printf 'abc\n' > "$rw/ot"
+  guest /tmp/t_virtiofs hold-mode /mnt/rw/ot rdonly-trunc 3 > /dev/null 2>&1 &
+  holder=$!
+  sleep 1.5
+  writers=$(host_writing "$rw/ot")
+  wait $holder
+  echo "open with O_RDONLY | O_TRUNC: the Mac holds $writers files open for writing while the descriptor lives"
+  [[ $writers == 0 && ! -s "$rw/ot" ]]
+}
+synced_map() {
+  local holder seen
+  printf 'xxxxxxxxxx' > "$rw/ms"
+  guest /tmp/t_virtiofs map-sync /mnt/rw/ms 3 > /dev/null 2>&1 &
+  holder=$!
+  sleep 1.5
+  seen=$(head -c 6 "$rw/ms")
+  wait $holder
+  echo "sync(2) with a store in a live mapping: this Mac reads $seen"
+  [[ $seen == synced ]]
+}
 removed_released() {
-  local held
-  held=$(host_open "$rw/gone")
-  echo "a file the guest removed before thousands of others is open $held times on this Mac"
-  [[ $held == 0 ]]
+  local held linked
+  held=$(host_open "$rw/gone") linked=$(host_open "$rw/edge/linked")
+  echo "files the guest removed before thousands of others: open $held times, a file with two links removed" \
+    "$linked times on this Mac"
+  [[ $held == 0 && $linked == 0 ]]
 }
 idle_kept() {
   local was held
@@ -256,6 +332,7 @@ guest /bin/cat /mnt/data/revoke >/dev/null
 check "a file the host makes unreadable cannot be opened through a kept handle" revoked 0 revoke 000 /bin/cat /mnt/data/revoke
 check "a program the host makes unreadable cannot be run through a kept handle" revoked 0 exec 111 /mnt/data/exec tree /mnt/data/deep
 check "a descriptor already open keeps reading when another open is refused" held_open
+check "an O_EVTONLY descriptor already open keeps reading when another open is refused" evtonly_kept
 guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.revalidate_open=0 >/dev/null && cat /mnt/data/revoke >/dev/null'
 check "with revalidate_open at 0, a refusal takes effect after the attribute timeout" revoked 1.1 revoke 000 /bin/cat /mnt/data/revoke
 guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.revalidate_open=1' >/dev/null
@@ -283,9 +360,16 @@ check "extended attributes match this Mac's" diff -u "$work/xattrs.host" "$work/
 check "this Mac holds the attributes the guest set" diff -u "$work/xattrs.guest" <("$work/t_virtiofs" xattr-list "$rw/x")
 check "writes, stores through a mapping and truncation agree" guest /tmp/t_virtiofs coherence /mnt/rw/coherent
 check "a descriptor keeps working after its file is removed or renamed" guest /tmp/t_virtiofs open-unlink /mnt/rw/ou
+check "edge cases of creation, growth past a stored page, links, times and flags" guest /tmp/t_virtiofs rw-edge /mnt/rw/edge
+check "utimes(NULL) in the guest sets the current time on this Mac" times_now
+check "a page stored to through a mapping does not overwrite what this Mac appended" appended_kept
+check "sync(2) pushes stores of a live mapping to this Mac" synced_map
+check "an open with O_RDONLY and O_TRUNC leaves nothing open for writing" trunc_reader
+check "a program this Mac makes unreadable cannot run while it is open for writing" exec_beside_writer
 check "stores through a mapping twice the guest's memory reach the host" guest /tmp/t_virtiofs map-pressure /mnt/rw/big 2048
 check "setuid and setgid bits set in the guest do not reach this Mac" setuid_dropped
-check "a file this Mac makes read-only cannot be opened for writing or truncated" write_revoked hold
+check "a write handle kept for a closed writer does not open or truncate a file this Mac made read-only" \
+  write_revoked hold
 check "a descriptor already open for writing keeps writing" write_revoked hold-write
 guest /bin/sh -c 'cp /tmp/t_virtiofs /mnt/rw/gone && cat /mnt/rw/gone > /dev/null && rm /mnt/rw/gone'
 check "concurrent creates, writes, renames, unlinks and appends" guest /tmp/t_virtiofs rw-stress /mnt/rw/stress 8 5

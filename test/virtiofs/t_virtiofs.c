@@ -1092,6 +1092,7 @@ rw_errors(const char *root)
     fd = open("dir3/x", O_WRONLY | O_CREAT | O_EXCL, 0644);
     close(fd);
     outcome("rename over a directory that is not empty", rename("dir2", "dir3"));
+    outcome("mkdir d/empty", mkdir("d/empty", 0755));
     outcome("rename over an empty directory", rename("dir2", "d/empty"));
     outcome("symlink over an existing name", symlink("x", "a"));
     outcome("symlink loop", symlink("loop", "loop"));
@@ -1104,6 +1105,8 @@ rw_errors(const char *root)
     memset(buf, 'v', 100);
     outcome("setxattr of 100 bytes", setxattr("a", "user.big", buf, 100, 0, 0));
     outcome("getxattr into a buffer too small", (int)getxattr("a", "user.big", buf, 10, 0, 0));
+    outcome("getxattr into a buffer of size 0", (int)getxattr("a", "user.big", buf, 0, 0, 0));
+    outcome("listxattr into a buffer of size 0", (int)listxattr("a", buf, 0, 0));
     outcome("getxattr of a directory's missing attribute", (int)getxattr("d", "user.none", buf, sizeof(buf), 0, 0));
     outcome("chflags 0", chflags("a", 0));
     fd = open("case", O_WRONLY | O_CREAT | O_EXCL, 0644);
@@ -1213,8 +1216,11 @@ coherence(const char *path)
     CHECK(pread(fd, got, 3, 40000) == 3 && !memcmp(got, "NOS", 3), "read sees a store through the mapping at once");
     CHECK(pwrite(fd, "PW", 2, 40001) == 2 && !memcmp(map + 40000, "NPW", 3),
           "a write next to a store through the mapping keeps both");
+    map[5000] = 'K';
+    map[30000] = 'L';
     CHECK(ftruncate(fd, 10000) == 0 && pread(fd, got, 1, 9999) == 1 && pread(fd, got, 1, 10000) == 0,
           "a shrunk file ends at its new size");
+    CHECK(pread(fd, got, 1, 5000) == 1 && got[0] == 'K', "a store before the cut point survives the truncation");
     CHECK(ftruncate(fd, sizeof(data)) == 0 && map[20000] == 0 && map[9999] == (char)data[9999],
           "a file grown again reads zeros where it was cut");
     munmap(map, sizeof(data));
@@ -1300,6 +1306,125 @@ map_pressure(const char *path, int mib)
 }
 
 static int
+rw_edge(const char *dir)
+{
+    char page[16384], back[16];
+    struct stat st;
+    int fd;
+
+    CHECK(mkdir(dir, 0755) == 0 && chdir(dir) == 0, "mkdir %s: %s", dir, strerror(errno));
+    fd = open("readonly-made", O_WRONLY | O_CREAT | O_EXCL, 0444);
+    CHECK(fd >= 0 && write(fd, "abc", 3) == 3 && close(fd) == 0, "a file created read-only is written by its creator: %s",
+          strerror(errno));
+    fd = open("readonly-open", O_RDONLY | O_CREAT | O_EXCL, 0644);
+    CHECK(fd >= 0 && fstat(fd, &st) == 0 && st.st_size == 0, "create for reading: %s", strerror(errno));
+    CHECK(fsync(fd) == 0, "fsync of a descriptor open for reading: %s", strerror(errno));
+    close(fd);
+    int dfd = open(".", O_RDONLY);
+    CHECK(dfd >= 0 && fsync(dfd) == 0, "fsync of a directory: %s", strerror(errno));
+    close(dfd);
+
+    for (int grow = 0; grow < 2; grow++) {
+        const char *name = grow ? "tail-write" : "tail-truncate";
+        fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
+        memset(page, 'x', 4000);
+        CHECK(fd >= 0 && write(fd, page, 4000) == 4000, "create %s: %s", name, strerror(errno));
+        char *map = mmap(NULL, sizeof(page), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        CHECK(map != MAP_FAILED, "mmap %s: %s", name, strerror(errno));
+        if (map == MAP_FAILED)
+            continue;
+        map[0] = 'A';
+        map[5000] = 'Z';
+        if (grow)
+            CHECK(pwrite(fd, "END", 3, 20000) == 3, "write past the page: %s", strerror(errno));
+        else
+            CHECK(ftruncate(fd, 10000) == 0, "ftruncate to grow: %s", strerror(errno));
+        CHECK(msync(map, sizeof(page), MS_SYNC) == 0 && munmap(map, sizeof(page)) == 0, "msync: %s", strerror(errno));
+        memset(back, 1, sizeof(back));
+        CHECK(pread(fd, back, 1, 5000) == 1 && back[0] == 0, "%s: a store past the end reached the file", name);
+        CHECK(pread(fd, back, 1, 0) == 1 && back[0] == 'A', "%s: a store inside the file was lost", name);
+        close(fd);
+    }
+
+    fd = open("linked", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    close(fd);
+    CHECK(link("linked", "linked2") == 0 && unlink("linked2") == 0 && unlink("linked") == 0,
+          "remove both links: %s", strerror(errno));
+    CHECK(stat("linked", &st) != 0 && errno == ENOENT, "the last link is gone");
+
+    fd = open("times", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    close(fd);
+    struct timeval old[2] = { { 981173106, 0 }, { 981173106, 0 } };
+    CHECK(utimes("times", old) == 0 && utimes("times", NULL) == 0 && stat("times", &st) == 0 &&
+          st.st_mtimespec.tv_sec > 981173106 + 86400, "utimes(NULL) sets the current time: mtime %ld",
+          (long)st.st_mtimespec.tv_sec);
+    errno = 0;
+    CHECK(chflags("times", UF_HIDDEN) != 0 && errno == ENOTSUP, "chflags with a flag: %s", strerror(errno));
+    errno = 0;
+    CHECK(mknod("chr", S_IFCHR | 0600, 0) != 0, "mknod of a character device succeeded");
+    chdir("/");
+    printf("rw-edge: %d failures\n", failures);
+    return failures ? 1 : 0;
+}
+
+static int
+map_hold(const char *path, int seconds)
+{
+    int fd = open(path, O_RDWR);
+    char *map = fd < 0 ? MAP_FAILED : mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    struct stat st;
+    if (map == MAP_FAILED) {
+        printf("mmap: %s\n", strerror(errno));
+        return 1;
+    }
+    map[0] = 'A';
+    sleep((unsigned)seconds);
+    int rc = fstat(fd, &st);
+    printf("size seen after the host appended: %lld\n", rc == 0 ? (long long)st.st_size : -1LL);
+    rc |= msync(map, 16384, MS_SYNC) | munmap(map, 16384);
+    close(fd);
+    return rc != 0;
+}
+
+static int
+map_sync(const char *path, int seconds)
+{
+    int fd = open(path, O_RDWR);
+    char *map = fd < 0 ? MAP_FAILED : mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        printf("mmap: %s\n", strerror(errno));
+        return 1;
+    }
+    memcpy(map, "synced", 6);
+    sync();
+    sleep((unsigned)seconds);
+    int rc = munmap(map, 16384);
+    close(fd);
+    return rc != 0;
+}
+
+static int
+hold_mode(const char *path, const char *how, int seconds)
+{
+    int flags = !strcmp(how, "evtonly") ? O_RDONLY | O_EVTONLY : !strcmp(how, "wronly") ? O_WRONLY :
+                !strcmp(how, "rdonly-trunc") ? O_RDONLY | O_TRUNC : O_RDONLY;
+    char buf[64];
+    int fd = open(path, flags);
+    if (fd < 0) {
+        printf("open: %s\n", strerror(errno));
+        return 1;
+    }
+    sleep((unsigned)seconds);
+    ssize_t n = (flags & O_ACCMODE) == O_WRONLY ? 0 : read(fd, buf, sizeof(buf));
+    if (n < 0)
+        printf("read: %s\n", strerror(errno));
+    else
+        printf("%zd bytes\n", n);
+    close(fd);
+    return n < 0;
+}
+
+static int
 hold_write(const char *path, int seconds)
 {
     int fd = open(path, O_WRONLY | O_APPEND);
@@ -1320,6 +1445,7 @@ hold_write(const char *path, int seconds)
 struct rw_worker {
     const char *dir;
     int id;
+    int shared;
     double until;
     long files;
     int bad;
@@ -1332,14 +1458,17 @@ rw_work(void *arg)
     char sub[1024], path[1200], moved[1200];
     unsigned seed = (unsigned)w->id * 7919u + 1;
     unsigned char *buf = malloc(300000), *back = malloc(300000);
-    snprintf(sub, sizeof(sub), "%s/t%d", w->dir, w->id);
-    if (mkdir(sub, 0755) != 0)
+    if (w->shared)
+        snprintf(sub, sizeof(sub), "%s/shared", w->dir);
+    else
+        snprintf(sub, sizeof(sub), "%s/t%d", w->dir, w->id);
+    if (!w->shared && mkdir(sub, 0755) != 0)
         w->bad++;
     for (long k = 0; now() < w->until; k++) {
         seed = seed * 1103515245u + 12345u;
         size_t size = seed % 300000, step = 1 + (seed >> 8) % 70000;
-        snprintf(path, sizeof(path), "%s/f%ld", sub, k);
-        snprintf(moved, sizeof(moved), "%s/g%ld", sub, k);
+        snprintf(path, sizeof(path), "%s/f%d-%ld", sub, w->id, k);
+        snprintf(moved, sizeof(moved), "%s/g%d-%ld", sub, w->id, k);
         fill(seed, 0, buf, size);
         int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
         for (size_t done = 0; fd >= 0 && done < size; done += step)
@@ -1366,19 +1495,39 @@ rw_work(void *arg)
 
 struct appender {
     int fd, id, records;
+    const char *path;
 };
+
+static void *
+region_work(void *arg)
+{
+    struct appender *a = arg;
+    unsigned char *buf = malloc(65536);
+    void *bad = NULL;
+    for (int r = 0; r < a->records && !bad; r++) {
+        fill((unsigned)(a->id * 1000 + r), 0, buf, 65536);
+        if (pwrite(a->fd, buf, 65536, (off_t)a->id * 65536) != 65536)
+            bad = (void *)1;
+    }
+    free(buf);
+    return bad;
+}
 
 static void *
 append_work(void *arg)
 {
     struct appender *a = arg;
     char rec[64];
-    for (int i = 0; i < a->records; i++) {
+    int fd = open(a->path, O_WRONLY | O_APPEND);
+    void *bad = fd < 0 ? (void *)1 : NULL;
+    for (int i = 0; i < a->records && !bad; i++) {
         snprintf(rec, sizeof(rec), "%04d %08d %-48s\n", a->id, i, "record");
-        if (write(a->fd, rec, 63) != 63)
-            return (void *)1;
+        if (write(fd, rec, 63) != 63)
+            bad = (void *)1;
     }
-    return NULL;
+    if (fd >= 0)
+        close(fd);
+    return bad;
 }
 
 static int
@@ -1403,12 +1552,47 @@ rw_stress(const char *dir, int threads, int seconds)
         files += w[i].files;
         bad += w[i].bad;
     }
+    snprintf(log, sizeof(log), "%s/shared", dir);
+    if (mkdir(log, 0755) != 0)
+        return 1;
+    until = now() + seconds;
+    for (int i = 0; i < threads; i++) {
+        w[i] = (struct rw_worker){ .dir = dir, .id = i, .shared = 1, .until = until };
+        pthread_create(&t[i], NULL, rw_work, &w[i]);
+    }
+    for (int i = 0; i < threads; i++) {
+        pthread_join(t[i], NULL);
+        files += w[i].files;
+        bad += w[i].bad;
+    }
+    snprintf(log, sizeof(log), "%s/regions", dir);
+    int rfd = open(log, O_RDWR | O_CREAT | O_EXCL, 0644);
+    if (rfd < 0)
+        return 1;
+    for (int i = 0; i < threads; i++) {
+        a[i] = (struct appender){ .fd = rfd, .id = i, .records = 50 };
+        pthread_create(&t[i], NULL, region_work, &a[i]);
+    }
+    for (int i = 0; i < threads; i++) {
+        void *r;
+        pthread_join(t[i], &r);
+        bad += r != NULL;
+    }
+    unsigned char *expect = malloc(65536), *got = malloc(65536);
+    for (int i = 0; i < threads; i++) {
+        fill((unsigned)(i * 1000 + 49), 0, expect, 65536);
+        if (pread(rfd, got, 65536, (off_t)i * 65536) != 65536 || memcmp(expect, got, 65536))
+            bad++;
+    }
+    free(expect);
+    free(got);
+    close(rfd);
     snprintf(log, sizeof(log), "%s/log", dir);
     int fd = open(log, O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0644);
     if (fd < 0)
         return 1;
     for (int i = 0; i < threads; i++) {
-        a[i] = (struct appender){ .fd = fd, .id = i, .records = 2000 };
+        a[i] = (struct appender){ .fd = fd, .id = i, .records = 2000, .path = log };
         pthread_create(&t[i], NULL, append_work, &a[i]);
     }
     for (int i = 0; i < threads; i++) {
@@ -1436,8 +1620,9 @@ rw_stress(const char *dir, int threads, int seconds)
     CHECK(stat(log, &st) == 0 && st.st_size == want, "appended log is %lld bytes, want %ld", (long long)st.st_size,
           want);
     CHECK(bad == 0, "%d bad results", bad);
-    printf("rw-stress: %d threads wrote and checked %ld files in %d s, then appended %ld records, %d failures\n",
-           threads, files, seconds, lines, failures);
+    printf("rw-stress: %d threads wrote and checked %ld files in %d s each in their own and in one shared directory, "
+           "wrote regions of one file and appended %ld records to another, %d failures\n", threads, files, seconds,
+           lines, failures);
     return failures ? 1 : 0;
 }
 
@@ -1578,6 +1763,14 @@ main(int argc, char **argv)
         return xattr_list(argv[2], argc == 4 && !strcmp(argv[3], "all"));
     if (argc == 3 && !strcmp(argv[1], "coherence"))
         return coherence(argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "rw-edge"))
+        return rw_edge(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "map-hold"))
+        return map_hold(argv[2], atoi(argv[3]));
+    if (argc == 4 && !strcmp(argv[1], "map-sync"))
+        return map_sync(argv[2], atoi(argv[3]));
+    if (argc == 5 && !strcmp(argv[1], "hold-mode"))
+        return hold_mode(argv[2], argv[3], atoi(argv[4]));
     if (argc == 4 && !strcmp(argv[1], "map-pressure"))
         return map_pressure(argv[2], atoi(argv[3]));
     if (argc == 3 && !strcmp(argv[1], "open-unlink"))
