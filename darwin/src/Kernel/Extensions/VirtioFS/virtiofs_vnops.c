@@ -249,6 +249,7 @@ node_stale(struct virtiofs_node *np)
 {
     IOLockLock(np->vmp->lock);
     np->expire = 0;
+    np->attr_version = ++np->vmp->version;
     IOLockUnlock(np->vmp->lock);
 }
 
@@ -934,7 +935,7 @@ name_remember(struct virtiofs_node *dnp, vnode_t vp, struct componentname *cnp, 
 }
 
 static uint64_t
-dir_changed(struct virtiofs_node *dnp, struct componentname *cnp)
+dir_changed(struct virtiofs_node *dnp, struct componentname *cnp, uint64_t before, bool *alone)
 {
     struct virtiofs_mount *vmp = dnp->vmp;
     struct virtiofs_node *np, *next;
@@ -944,7 +945,9 @@ dir_changed(struct virtiofs_node *dnp, struct componentname *cnp)
         if (name_matches(np, dnp->nodeid, cnp))
             name_drop_locked(np);
     }
-    uint64_t version = dnp->changed = ++vmp->version;
+    if (alone)
+        *alone = dnp->changed <= before;
+    uint64_t version = dnp->changed = dnp->attr_version = ++vmp->version;
     dnp->expire = 0;
     IOLockUnlock(vmp->lock);
     return version;
@@ -1901,16 +1904,18 @@ entry_reply(struct virtiofs_node *dnp, vfs_context_t ctx, struct virtiofs_call *
 
     if (error)
         return error;
+    uint64_t before = virtiofs_version(dnp->vmp);
     error = virtiofs_call(dnp->vmp, ctx, c);
-    uint64_t version = dir_changed(dnp, cnp);
+    bool alone;
+    uint64_t version = dir_changed(dnp, cnp, before, &alone);
     bool ok = !error && c->replylen == want && entry->nodeid;
     if (answered)
         *answered = ok;
     if (!error && !ok)
         error = EIO;
     if (!error)
-        error = virtiofs_node_get(dnp->vmp, entry, version, 1, dnp->vp, cnp, vpp);
-    if (!error)
+        error = virtiofs_node_get(dnp->vmp, entry, before, 1, dnp->vp, cnp, vpp);
+    if (!error && alone)
         name_remember(dnp, *vpp, cnp, entry, version);
     return error;
 }
@@ -2043,8 +2048,10 @@ virtiofs_vnop_link(struct vnop_link_args *ap)
     if (vnode_isdir(ap->a_vp))
         return EPERM;
     int error = entry_reply(tdnp, ap->a_context, &c, &out, sizeof(out), cnp, &vp, NULL);
-    if (!error)
+    if (!error) {
+        node_stale(VTON(vp));
         vnode_put(vp);
+    }
     return error;
 }
 
@@ -2054,10 +2061,13 @@ node_gone(vnode_t vp)
     struct virtiofs_node *np = VTON(vp);
 
     IOLockLock(np->vmp->lock);
-    bool last = vnode_isdir(vp) || np->attr.nlink <= 1;
+    if (np->attr.nlink)
+        np->attr.nlink--;
+    bool last = vnode_isdir(vp) || np->attr.nlink == 0;
     if (last)
         name_drop_locked(np);
     np->expire = 0;
+    np->attr_version = ++np->vmp->version;
     IOLockUnlock(np->vmp->lock);
     if (last)
         vnode_recycle(vp);
@@ -2078,7 +2088,7 @@ remove_name(vnode_t dvp, vnode_t vp, struct componentname *cnp, uint32_t opcode,
     if (error)
         return error;
     error = virtiofs_call(dnp->vmp, ctx, &c);
-    dir_changed(dnp, cnp);
+    dir_changed(dnp, cnp, 0, NULL);
     if (!error)
         node_gone(vp);
     return error;
@@ -2125,10 +2135,11 @@ virtiofs_vnop_rename(struct vnop_rename_args *ap)
     };
     error = virtiofs_call(fdnp->vmp, ap->a_context, &c);
     IOFree(target, tlen);
-    dir_changed(fdnp, fcnp);
-    dir_changed(tdnp, tcnp);
+    dir_changed(fdnp, fcnp, 0, NULL);
+    dir_changed(tdnp, tcnp, 0, NULL);
     if (!error) {
         node_stale(VTON(ap->a_fvp));
+        node_place(ap->a_fvp, ap->a_tdvp, tcnp);
         if (ap->a_tvp && ap->a_tvp != ap->a_fvp)
             node_gone(ap->a_tvp);
     }
