@@ -11,8 +11,10 @@
 # but a few files once the guest unmounts, and a file looked up 500 times once it is forgotten. On a
 # writable share the guest builds a tree that must come out on the Mac as the Mac itself builds it, its
 # errors and extended attributes must match the Mac's, and the Mac's permissions and read-only shares hold
-# for every change. It ends with read, write and metadata timings. Needs a kido whose VMM attaches the
-# directories named in KIDO_DEV_VIRTIOFS.
+# for every change. The writable share is mounted a second time, so that checks can read and change what the
+# Mac holds without the first mount's cache, and a 16 MiB disk image serves as a volume that runs full on
+# demand. It ends with read, write and metadata timings. Needs a kido whose VMM attaches the directories
+# named in KIDO_DEV_VIRTIOFS.
 # Each command in the container fails after TIMEOUT seconds (default 120). Uses a throwaway KIDO_HOME.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -22,7 +24,7 @@ limit=${TIMEOUT:-120}
 work=$(mktemp -d "${TMPDIR:-/tmp}/kido-virtiofs.XXXX") && work=$(cd "$work" && pwd -P) || exit 1
 name=virtiofs-test
 export KIDO_HOME=$work/home KIDO_BACKEND=vz
-trap '"$kido" rm -f $name >/dev/null 2>&1; chmod -R u+rwX "$work"; rm -rf "$work"' EXIT
+trap '"$kido" rm -f $name >/dev/null 2>&1; hdiutil detach -quiet -force "$work/full" 2>/dev/null; chmod -R u+rwX "$work"; rm -rf "$work"' EXIT
 rc=0
 
 timed() {
@@ -333,6 +335,65 @@ mapped_writer_kept() {
     "$(cat "$work/map-store.out"), first byte $(head -c 1 "$rw/ms2")"
   [[ $status == 0 && $(head -c 1 "$rw/ms2") == M ]]
 }
+fill() {
+  local pass
+  sync
+  for pass in 1 2 3; do
+    dd if=/dev/zero of="$full/ballast$pass" bs=65536 2>/dev/null
+    dd if=/dev/zero of="$full/ballast$pass-last" bs=512 2>/dev/null
+    sync
+    sleep 0.2
+  done
+}
+refused_kept() {
+  local holder status byte
+  dd if=/dev/zero of="$full/stored" bs=1 count=0 seek=65536 2>/dev/null
+  guest /tmp/t_virtiofs map-fail /mnt/full/stored 3 > "$work/map-fail.out" 2>&1 &
+  holder=$!
+  sleep 1
+  fill
+  sleep 2.5
+  rm -f "$full"/ballast*
+  wait $holder
+  status=$?
+  byte=$(dd if="$full/stored" bs=1 skip=20000 count=1 2>/dev/null)
+  echo "on a volume of this Mac that ran full: $(cat "$work/map-fail.out"), and this Mac reads $byte"
+  [[ $status == 0 && $byte == m ]]
+}
+unpushed_kept() {
+  local holder status byte mode
+  dd if=/dev/zero of="$full/unpushed" bs=1 count=0 seek=16384 2>/dev/null
+  guest /tmp/t_virtiofs map-unpushed /mnt/full/unpushed 3 > "$work/unpushed.out" 2>&1 &
+  holder=$!
+  sleep 1
+  fill
+  sleep 2.5
+  chmod 444 "$full/unpushed"
+  rm -f "$full"/ballast*
+  wait $holder
+  status=$?
+  sleep 0.5
+  byte=$(dd if="$full/unpushed" bs=1 skip=100 count=1 2>/dev/null) mode=$(stat -f %Lp "$full/unpushed")
+  echo "a store whose pushes failed until its mapping was gone: $(cat "$work/unpushed.out"), then this Mac made the" \
+    "file mode $mode and room, and after sync(2) it reads $byte"
+  [[ $status == 0 && $byte == k && $mode == 444 ]]
+}
+short_kept() {
+  local holder status wrong
+  dd if=/dev/zero of="$full/short" bs=1 count=0 seek=$((2 << 20)) 2>/dev/null
+  head -c $((640 << 10)) /dev/urandom > "$full/slack"
+  fill
+  rm -f "$full/slack"
+  guest /tmp/t_virtiofs short-write /mnt/full/short 2 > "$work/short.out" 2>&1 &
+  holder=$!
+  sleep 1.2
+  rm -f "$full"/ballast*
+  wait $holder
+  status=$?
+  wrong=$(head -c $((1 << 20)) "$full/short" | tr -d p | wc -c | tr -d ' ')
+  echo "on a volume of this Mac with 640 KiB free: $(cat "$work/short.out"), $wrong bytes differ on this Mac"
+  [[ $status == 0 && $wrong == 0 ]]
+}
 idle_kept() {
   local was held
   was=$(guest /bin/sh -c 'sysctl -n vfs.generic.virtiofs.idle_files') || return 1
@@ -350,8 +411,11 @@ xcrun clang -arch arm64 -mmacosx-version-min=15.0 -O2 -o "$work/t_virtiofs" "$he
 share=$work/share
 wide=$(printf '\xe4\xb8\xad%.0s' $(seq 1 85))
 rw=$work/rw
+full=$work/full
 mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,long,links,private} "$work/empty" "$work/locked" "$work/wide" \
-  "$rw"
+  "$rw" "$full"
+hdiutil create -quiet -size 16m -fs APFS -volname kido-full "$work/full.dmg" &&
+  hdiutil attach -quiet -nobrowse -mountpoint "$full" "$work/full.dmg" || exit 1
 printf 'wide share\n' > "$work/wide/f"
 printf 'mine\n' > "$share/private/f"
 printf 'revoke\n' > "$share/revoke"
@@ -388,7 +452,7 @@ touch -t 200102030405.06 "$share/small/1"
 "$work/t_virtiofs" tree "$share" > "$work/tree.host" || { echo "FAIL the tree on this Mac"; rc=1; }
 
 "$kido" image import "$img" $name >/dev/null || exit 1
-KIDO_DEV_VIRTIOFS="data=$share:ro,empty=$work/empty:ro,locked=$work/locked:ro,rw=$rw,$wide=$work/wide:ro" \
+KIDO_DEV_VIRTIOFS="data=$share:ro,empty=$work/empty:ro,locked=$work/locked:ro,rw=$rw,full=$full,$wide=$work/wide:ro" \
   "$kido" run -d --name $name $name /bin/sleep 100000 >/dev/null || exit 1
 vm=$(pgrep -n -f com.apple.Virtualization.VirtualMachine)
 "$kido" cp "$work/t_virtiofs" $name:/tmp/t_virtiofs || exit 1
@@ -412,7 +476,7 @@ check "fcntl F_RDADVISE brings a file into memory without a read" guest /tmp/t_v
 guest /tmp/t_virtiofs tree /mnt/data > "$work/tree.guest"
 check "the guest sees the same tree as this Mac" diff -u "$work/tree.host" "$work/tree.guest"
 check "the empty share is empty" prints "" guest /bin/ls -A /mnt/empty
-check "the device root lists the shares" prints "$(printf 'data\nempty\nlocked\nrw\n%s' "$wide")" \
+check "the device root lists the shares" prints "$(printf 'data\nempty\nfull\nlocked\nrw\n%s' "$wide")" \
   guest /bin/sh -c 'cd /mnt/root && printf "%s\n" *'
 check "a share with a 255-byte name mounts" prints "wide share" \
   guest /bin/sh -c "mkdir -p /mnt/wide && /sbin/mount -t virtiofs -o ro kido:$wide /mnt/wide && cat /mnt/wide/f && /sbin/umount /mnt/wide"
@@ -481,13 +545,22 @@ check "extended attributes match this Mac's" diff -u "$work/xattrs.host" "$work/
 check "this Mac holds the attributes the guest set" diff -u "$work/xattrs.guest" <("$work/t_virtiofs" xattr-list "$rw/x")
 check "writes, stores through a mapping and truncation agree" guest /tmp/t_virtiofs coherence /mnt/rw/coherent
 check "a descriptor keeps working after its file is removed or renamed" guest /tmp/t_virtiofs open-unlink /mnt/rw/ou
-check "edge cases of creation, stores beside growth, times and flags" guest /tmp/t_virtiofs rw-edge /mnt/rw/edge
+check "mount kido:rw a second time" guest /bin/sh -c 'mkdir -p /mnt/peer && /sbin/mount -t virtiofs kido:rw /mnt/peer'
+check "edge cases of creation, stores beside growth, times and flags" \
+  guest /tmp/t_virtiofs rw-edge /mnt/rw/edge /mnt/peer/edge
 check "a file whose links were all removed is released on this Mac" links_released
 check "a writable mapping keeps writing after its descriptor closes and this Mac revokes writing" mapped_writer_kept
 check "a write handle is let go at munmap while a reader keeps the file open" unmapped_released
 check "beside a writer, read advice opens nothing and a closed reader's handle is let go" readers_beside_writer
 check "read advice beside appends never caches zeros inside the file" guest /tmp/t_virtiofs advise-append /mnt/rw/aa 3
-check "a counter stored to in a tight loop beside appends loses no store" guest /tmp/t_virtiofs store-loop /mnt/rw/sl 3
+check "a counter stored to in a tight loop beside appends loses no store" \
+  guest /tmp/t_virtiofs store-loop /mnt/rw/sl /mnt/peer/sl 3
+check "unmount the second mount of kido:rw" guest /sbin/umount /mnt/peer
+check "mount kido:full" guest /bin/sh -c 'mkdir -p /mnt/full && /sbin/mount -t virtiofs kido:full /mnt/full'
+check "a write and a push this Mac has no room for fail, and the store they met is pushed once there is room" refused_kept
+check "a write this Mac has room for only in part reports what it wrote" short_kept
+check "a store whose pushes failed is still pushed after its mapping is gone and this Mac revoked writing" unpushed_kept
+check "unmount kido:full" guest /sbin/umount /mnt/full
 check "a create whose open fails before it opens leaves nothing open for writing" raw_create_released
 check "a case-only rename works after the first case probe asked about a removed file" guest /bin/sh -c \
   'mkdir -p /mnt/cs && /sbin/mount -t virtiofs kido:rw /mnt/cs && /tmp/t_virtiofs case-probe /mnt/cs/cs; r=$?;
