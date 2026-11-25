@@ -1259,6 +1259,47 @@ open_unlink(const char *dir)
 }
 
 static int
+map_pressure(const char *path, int mib)
+{
+    size_t size = (size_t)mib << 20, page = (size_t)getpagesize(), bad = 0;
+    int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0644);
+    CHECK(fd >= 0 && ftruncate(fd, (off_t)size) == 0, "create %s: %s", path, strerror(errno));
+    unsigned char *map = fd < 0 ? MAP_FAILED : mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(map != MAP_FAILED, "mmap: %s", strerror(errno));
+    if (map == MAP_FAILED)
+        return 1;
+    double t0 = now();
+    for (size_t at = 0; at < size; at += page) {
+        uint64_t stamp = (at / page + 1) * 0x9e3779b97f4a7c15ULL;
+        memcpy(map + at, &stamp, sizeof(stamp));
+        memcpy(map + at + page - sizeof(stamp), &stamp, sizeof(stamp));
+    }
+    CHECK(munmap(map, size) == 0 && close(fd) == 0, "munmap: %s", strerror(errno));
+    double stored = now() - t0;
+    unsigned char *buf = malloc(1 << 20);
+    fd = open(path, O_RDONLY);
+    CHECK(fd >= 0 && fcntl(fd, F_NOCACHE, 1) == 0, "reopen: %s", strerror(errno));
+    for (size_t at = 0; fd >= 0 && at < size; at += 1 << 20) {
+        if (pread(fd, buf, 1 << 20, (off_t)at) != 1 << 20) {
+            bad += (1 << 20) / page;
+            continue;
+        }
+        for (size_t p = 0; p < 1 << 20; p += page) {
+            uint64_t stamp = ((at + p) / page + 1) * 0x9e3779b97f4a7c15ULL, head, tail;
+            memcpy(&head, buf + p, sizeof(head));
+            memcpy(&tail, buf + p + page - sizeof(tail), sizeof(tail));
+            bad += head != stamp || tail != stamp || buf[p + page / 2] != 0;
+        }
+    }
+    close(fd);
+    free(buf);
+    CHECK(bad == 0, "%zu of %zu pages differ", bad, size / page);
+    CHECK(unlink(path) == 0, "unlink: %s", strerror(errno));
+    printf("map-pressure: %d MiB stored through a mapping in %.1f s, %zu pages wrong\n", mib, stored, bad);
+    return failures ? 1 : 0;
+}
+
+static int
 hold_write(const char *path, int seconds)
 {
     int fd = open(path, O_WRONLY | O_APPEND);
@@ -1537,6 +1578,8 @@ main(int argc, char **argv)
         return xattr_list(argv[2], argc == 4 && !strcmp(argv[3], "all"));
     if (argc == 3 && !strcmp(argv[1], "coherence"))
         return coherence(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "map-pressure"))
+        return map_pressure(argv[2], atoi(argv[3]));
     if (argc == 3 && !strcmp(argv[1], "open-unlink"))
         return open_unlink(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "hold-write"))
