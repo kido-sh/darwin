@@ -147,6 +147,12 @@ virtiofs_version(struct virtiofs_mount *vmp)
 }
 
 static off_t
+page_end(off_t offset)
+{
+    return offset > INT64_MAX - (off_t)PAGE_MASK ? INT64_MAX : (off_t)round_page_64(offset);
+}
+
+static off_t
 reader_begin(struct virtiofs_node *np)
 {
     IOLockLock(np->vmp->lock);
@@ -385,7 +391,7 @@ node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exac
         np->skip_to = MIN(np->skip_to, last);
         IOLockUnlock(vmp->lock);
     }
-    off_t inner = head ? first + PAGE_SIZE : from, end = MIN(tail ? last : to, round_page_64(old));
+    off_t inner = head ? first + PAGE_SIZE : from, end = MIN(tail ? last : to, page_end(old));
     if (resident && inner < end)
         ubc_msync(vp, inner, end, NULL, UBC_INVALIDATE);
     if (resize)
@@ -1672,7 +1678,7 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
         off_t size = (off_t)np->attr.size, limit = np->push_limit;
         bool stale = (np->flags & VN_SIZING) && limit < size;
         off_t cut[2][2] = { { np->skip_from, np->skip_to },
-                            { stale ? limit : 0, stale ? MIN(round_page_64(limit), size) : 0 } };
+                            { stale ? limit : 0, stale ? MIN(page_end(limit), size) : 0 } };
         IOLockUnlock(np->vmp->lock);
         count = offset >= size ? 0 : (uint32_t)MIN((off_t)count, size - offset);
         spans = write_spans(offset, count, cut, span);
