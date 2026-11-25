@@ -46,6 +46,7 @@ enum {
     VN_WOPENING = 0x400,
     VN_MAPPED = 0x800,
     VN_MAPPED_WRITE = 0x1000,
+    VN_TRUNCATING = 0x2000,
 };
 
 #define SETTABLE_MODE (ACCESSPERMS | S_ISVTX)
@@ -160,7 +161,7 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
 
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
-    bool changed = vnode_isreg(vp) && attr_changed(&np->attr, attr);
+    bool changed = vnode_isreg(vp) && !(np->flags & VN_TRUNCATING) && attr_changed(&np->attr, attr);
     off_t size = (off_t)attr->size, old = (off_t)np->attr.size;
     if (changed) {
         np->flags |= VN_SIZING;
@@ -168,7 +169,7 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         if (size != old)
             readers_wait_locked(np);
     }
-    if (np->attr_version > version) {
+    if (np->attr_version > version || (np->flags & VN_TRUNCATING)) {
         if (changed)
             wake(np, VN_SIZING);
         IOLockUnlock(vmp->lock);
@@ -262,7 +263,7 @@ node_changed(struct virtiofs_node *np, off_t tail, off_t from, off_t to, off_t s
     if (resize)
         ubc_setsize(vp, size);
     IOLockLock(vmp->lock);
-    wake(np, VN_SIZING);
+    wake(np, VN_SIZING | VN_TRUNCATING);
     IOLockUnlock(vmp->lock);
 }
 
@@ -1834,6 +1835,9 @@ truncate_begin(struct virtiofs_node *np, vfs_context_t ctx, off_t size, uint64_t
         whandle_put(np);
         return error;
     }
+    IOLockLock(np->vmp->lock);
+    np->flags |= VN_TRUNCATING;
+    IOLockUnlock(np->vmp->lock);
     if (size < *was)
         node_resize(np, size);
     return 0;
@@ -1918,9 +1922,10 @@ virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
     } else if (!error) {
         if (!node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version))
             node_stale(np);
+    } else if (truncate) {
+        off_t size = vap->va_data_size;
+        node_changed(np, was > size && (size & PAGE_MASK) ? size & ~(off_t)PAGE_MASK : -1, 0, 0, was, true);
     } else {
-        if (truncate && was > vap->va_data_size)
-            node_resize(np, was);
         node_stale(np);
     }
     if (truncate) {
