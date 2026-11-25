@@ -234,7 +234,7 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
 }
 
 static int
-node_fetch(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
+node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *reply, bool *applied)
 {
     struct fuse_getattr_in in = {};
     struct fuse_attr_out out = {};
@@ -249,10 +249,40 @@ node_fetch(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
         error = EIO;
     if (error)
         return error;
-    bool applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
+    *reply = out.attr;
+    *applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
+    return 0;
+}
+
+static int
+node_fetch(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
+{
+    bool applied;
+    int error = node_getattr(np, ctx, attr, &applied);
+
+    if (error)
+        return error;
     IOLockLock(np->vmp->lock);
     wait_clear(np, VN_SIZING);
-    *attr = applied ? np->attr : out.attr;
+    *attr = np->attr;
+    IOLockUnlock(np->vmp->lock);
+    return 0;
+}
+
+static int
+append_offset(struct virtiofs_node *np, vfs_context_t ctx, off_t *offset)
+{
+    struct fuse_attr reply;
+    bool applied = false;
+    int error = 0;
+
+    for (int tries = 0; !error && !applied && tries < 3; tries++)
+        error = node_getattr(np, ctx, &reply, &applied);
+    if (error)
+        return error;
+    IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_SIZING);
+    *offset = applied ? (off_t)np->attr.size : MAX((off_t)reply.size, (off_t)np->attr.size);
     IOLockUnlock(np->vmp->lock);
     return 0;
 }
@@ -1367,7 +1397,6 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     uio_t uio = ap->a_uio;
     vfs_context_t ctx = ap->a_context;
     struct virtiofs_node *np = VTON(vp);
-    struct fuse_attr attr;
     uint64_t fh;
 
     if (vnode_isdir(vp))
@@ -1388,9 +1417,10 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
         return error;
     }
     if (ap->a_ioflag & IO_APPEND) {
-        error = node_fetch(np, ctx, &attr);
+        off_t end;
+        error = append_offset(np, ctx, &end);
         if (!error)
-            uio_setoffset(uio, (off_t)attr.size);
+            uio_setoffset(uio, end);
     }
     off_t start = uio_offset(uio), old = node_size(np), from = MIN(start, old);
     if (!error)
