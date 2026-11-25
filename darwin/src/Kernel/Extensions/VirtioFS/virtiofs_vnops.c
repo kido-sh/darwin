@@ -295,7 +295,7 @@ append_offset(struct virtiofs_node *np, vfs_context_t ctx, off_t *offset)
         return error;
     IOLockLock(np->vmp->lock);
     wait_clear(np, VN_SIZING);
-    *offset = applied ? (off_t)np->attr.size : MAX((off_t)reply.size, (off_t)np->attr.size);
+    *offset = applied ? (off_t)np->attr.size : (off_t)reply.size;
     IOLockUnlock(np->vmp->lock);
     return 0;
 }
