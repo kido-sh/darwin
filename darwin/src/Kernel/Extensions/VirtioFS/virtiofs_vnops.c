@@ -367,6 +367,7 @@ node_resize_locked(struct virtiofs_node *np, off_t size)
     readers_wait_locked(np);
     np->attr.size = (uint64_t)size;
     np->attr_version = ++np->vmp->version;
+    np->expire = 0;
     IOLockUnlock(np->vmp->lock);
     ubc_setsize(np->vp, size);
     IOLockLock(np->vmp->lock);
