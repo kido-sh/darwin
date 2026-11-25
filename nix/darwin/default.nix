@@ -471,6 +471,25 @@ let
       "PDDiskImages2.kext" "PDLifs.kext" "PDKeyStore.kext"
     ];
   } // kextsOnlyArgs xnuHeadersArm64Build);
+  virtiofsAnalyzeBuild = (mkPureDarwinBuild ({
+    pname = "kido-virtiofs-analyze";
+    src = kextsOnlySource;
+    buildTargets = [ "IOVirtIOFamily.kext" "VirtioFS.kext" ];
+    enableUserspace = false;
+    installUserland = false;
+    installKernel = false;
+  } // kextsOnlyArgs xnuHeadersArm64Build // {
+    extraCmakeFlags = (kextsOnlyArgs xnuHeadersArm64Build).extraCmakeFlags ++ [ "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" ];
+  })).overrideAttrs (old: {
+    pname = "kido-virtiofs-analyze";
+    postBuild = (old.postBuild or "") + ''
+      python3 ${../checks/virtiofs-analyze.py} build-nix analyzer-report.txt
+    '';
+    installPhase = ''
+      mkdir -p $out
+      cp analyzer-report.txt $out/
+    '';
+  });
   splitBaseSystemArm64VirtMinimalRelease = pkgs.runCommand "kido-basesystem-arm64-virt-minimal-release-0.1" { } ''
     mkdir -p "$out"
     cp -a ${libSystemArm64Build}/. "$out/"
@@ -515,6 +534,7 @@ in
     iconvArm64eBuild
     kernelArm64VirtBuild
     kextsArm64Build
+    virtiofsAnalyzeBuild
     libeditArm64Build
     libresslArm64eBuild
     libSystemArm64Build

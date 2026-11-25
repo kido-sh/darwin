@@ -21,7 +21,10 @@
       };
     in
     {
-      checks.${system}.virtiofs-fuzz = basePkgs.callPackage ./nix/checks/virtiofs-fuzz.nix { };
+      checks.${system} = {
+        virtiofs-fuzz = basePkgs.callPackage ./nix/checks/virtiofs-fuzz.nix { };
+        virtiofs-analyze = darwin.virtiofsAnalyzeBuild;
+      };
 
       packages.${system} = {
         default = image.image;
