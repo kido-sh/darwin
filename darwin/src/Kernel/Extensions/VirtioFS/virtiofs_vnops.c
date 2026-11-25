@@ -125,6 +125,7 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     vnode_t vp = np->vp;
 
     IOLockLock(vmp->lock);
+    wait_clear(np, VN_SIZING);
     if (np->attr_version > version) {
         IOLockUnlock(vmp->lock);
         return;
@@ -137,7 +138,6 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         IOLockUnlock(vmp->lock);
         return;
     }
-    wait_clear(np, VN_SIZING);
     np->flags |= VN_SIZING;
     off_t size = (off_t)np->attr.size;
     IOLockUnlock(vmp->lock);
@@ -156,6 +156,7 @@ static int
 node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
 {
     IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_SIZING);
     bool cached = mach_absolute_time() < np->expire;
     if (cached)
         *attr = np->attr;
@@ -178,6 +179,7 @@ node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
         return error;
     node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
     IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_SIZING);
     *attr = np->attr;
     IOLockUnlock(np->vmp->lock);
     return 0;
