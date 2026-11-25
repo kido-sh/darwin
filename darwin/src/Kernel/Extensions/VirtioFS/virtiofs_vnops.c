@@ -557,6 +557,13 @@ handle_current_locked(struct virtiofs_node *np, const struct fuse_attr *attr)
     return (np->flags & VN_OPEN) && np->fh_ctime == attr->ctime && np->fh_ctimensec == attr->ctimensec;
 }
 
+static void
+opened_locked(struct virtiofs_node *np, bool count)
+{
+    if (count)
+        np->ropens++;
+}
+
 static bool
 handle_kept_locked(struct virtiofs_node *np)
 {
@@ -564,7 +571,7 @@ handle_kept_locked(struct virtiofs_node *np)
 }
 
 static int
-handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open)
+handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open, bool count)
 {
     struct virtiofs_mount *vmp = np->vmp;
     bool ask = __atomic_load_n(&virtiofs_revalidate_open, __ATOMIC_RELAXED);
@@ -576,8 +583,10 @@ handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open)
     *open = np->flags & VN_OPEN;
     bool current = !ask && mach_absolute_time() < np->expire && handle_current_locked(np, &np->attr) &&
                    !handle_kept_locked(np);
-    if (current)
+    if (current) {
         idle_remove_locked(np);
+        opened_locked(np, count);
+    }
     IOLockUnlock(vmp->lock);
     if (!*open || current)
         return 0;
@@ -589,8 +598,10 @@ handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open)
     wait_clear(np, VN_OPENING);
     *open = np->flags & VN_OPEN;
     current = handle_current_locked(np, &attr) && !handle_kept_locked(np);
-    if (current)
+    if (current) {
         idle_remove_locked(np);
+        opened_locked(np, count);
+    }
     IOLockUnlock(vmp->lock);
     if (!*open || current)
         return 0;
@@ -603,6 +614,7 @@ handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open)
         np->fh_ctime = attr.ctime;
         np->fh_ctimensec = attr.ctimensec;
         idle_remove_locked(np);
+        opened_locked(np, count);
     }
     if (adopt) {
         np->fh = fh;
@@ -619,7 +631,7 @@ handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open)
 }
 
 static int
-handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
+handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh, bool count)
 {
     struct virtiofs_mount *vmp = np->vmp;
 
@@ -627,6 +639,7 @@ handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
     wait_clear(np, VN_OPENING);
     if (np->flags & VN_OPEN) {
         np->users++;
+        opened_locked(np, count);
         *fh = np->fh;
         IOLockUnlock(vmp->lock);
         return 0;
@@ -645,6 +658,7 @@ handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
         np->fh_ctimensec = ctimensec;
         np->flags |= VN_OPEN;
         np->users++;
+        opened_locked(np, count);
     }
     wake(np, VN_OPENING);
     IOLockUnlock(vmp->lock);
@@ -666,10 +680,10 @@ handle_hold(struct virtiofs_node *np, uint64_t *fh)
 }
 
 static int
-handle_check(struct virtiofs_node *np, vfs_context_t ctx)
+handle_check(struct virtiofs_node *np, vfs_context_t ctx, bool count)
 {
     uint64_t fh;
-    int error = handle_get(np, ctx, &fh);
+    int error = handle_get(np, ctx, &fh, count);
 
     if (!error)
         handle_put(np);
@@ -677,14 +691,14 @@ handle_check(struct virtiofs_node *np, vfs_context_t ctx)
 }
 
 static int
-file_open(struct virtiofs_node *np, vfs_context_t ctx)
+file_open(struct virtiofs_node *np, vfs_context_t ctx, bool count)
 {
     bool open;
-    int error = handle_validate(np, ctx, &open);
+    int error = handle_validate(np, ctx, &open, count);
 
     if (error || open)
         return error;
-    return handle_check(np, ctx);
+    return handle_check(np, ctx, count);
 }
 
 static int
@@ -808,15 +822,6 @@ wfile_created(struct virtiofs_node *np, int mode)
 }
 
 static void
-file_opened(struct virtiofs_node *np, int mode)
-{
-    IOLockLock(np->vmp->lock);
-    if (mode & FREAD)
-        np->ropens++;
-    IOLockUnlock(np->vmp->lock);
-}
-
-static void
 file_closed(struct virtiofs_node *np, int mode)
 {
     IOLockLock(np->vmp->lock);
@@ -857,7 +862,7 @@ file_idle(struct virtiofs_node *np)
     uint64_t fh;
 
     IOLockLock(vmp->lock);
-    if ((np->flags & (VN_OPEN | VN_IDLE)) == VN_OPEN) {
+    if ((np->flags & (VN_OPEN | VN_IDLE)) == VN_OPEN && !node_used_locked(np)) {
         TAILQ_INSERT_TAIL(&vmp->idle, np, idle);
         vmp->nidle++;
         np->flags |= VN_IDLE;
@@ -1073,7 +1078,7 @@ virtiofs_vnop_open(struct vnop_open_args *ap)
         if ((write || (ap->a_mode & O_TRUNC)) && vfs_isrdonly(vnode_mount(vp)))
             return EROFS;
         bool created = wfile_created(np, ap->a_mode);
-        int error = (ap->a_mode & FREAD) ? file_open(np, ap->a_context) : 0;
+        int error = (ap->a_mode & FREAD) ? file_open(np, ap->a_context, true) : 0;
         bool reading = !error && (ap->a_mode & FREAD);
         if (!error && write && !created)
             error = wfile_check(np, ap->a_context, true);
@@ -1082,16 +1087,16 @@ virtiofs_vnop_open(struct vnop_open_args *ap)
                 file_closed(np, FWRITE);
             whandle_close(np, false);
         }
-        if (!error)
-            file_opened(np, ap->a_mode);
-        else if (reading)
+        if (error && reading) {
+            file_closed(np, FREAD);
             file_idle(np);
+        }
         return error;
     }
     case VDIR:
         if (ap->a_mode & (FWRITE | O_TRUNC))
             return EROFS;
-        return handle_check(VTON(vp), ap->a_context);
+        return handle_check(VTON(vp), ap->a_context, false);
     case VLNK:
         return 0;
     case VCHR:
@@ -1167,7 +1172,7 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
     IOLockLock(np->vmp->lock);
     bool opened = node_used_locked(np);
     IOLockUnlock(np->vmp->lock);
-    int error = opened ? handle_check(np, ap->a_context) : file_open(np, ap->a_context);
+    int error = opened ? handle_check(np, ap->a_context, false) : file_open(np, ap->a_context, false);
     if (!error)
         error = node_attr(np, ap->a_context, &attr);
     if (error)
@@ -1471,7 +1476,7 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     uint32_t chunks = (count + max - 1) / max;
     if (!error && chunks) {
         io = IOMallocZero(io_size(write, chunks));
-        error = !io ? ENOMEM : write ? whandle_get(np, NULL, &fh) : handle_get(np, NULL, &fh);
+        error = !io ? ENOMEM : write ? whandle_get(np, NULL, &fh) : handle_get(np, NULL, &fh, false);
     }
     if (error && io)
         IOFree(io, io_size(write, chunks));
@@ -1646,7 +1651,7 @@ virtiofs_vnop_readdir(struct vnop_readdir_args *ap)
     uint8_t *buf = IOMallocZero(size);
     if (!buf)
         return ENOMEM;
-    int error = handle_get(np, ap->a_context, &fh);
+    int error = handle_get(np, ap->a_context, &fh, false);
     if (error) {
         IOFree(buf, size);
         return error;
