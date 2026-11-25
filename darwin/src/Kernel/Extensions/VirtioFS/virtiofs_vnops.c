@@ -196,16 +196,24 @@ static bool
 is_ancestor(vnode_t vp, vnode_t dvp)
 {
     vnode_t p = dvp;
-    bool found = false;
+    bool held = false, found = true;
 
-    for (int depth = 0; p != NULLVP && !found && depth < 4096; depth++) {
-        found = p == vp;
-        vnode_t next = found || vnode_isvroot(p) ? NULLVP : vnode_getparent(p);
-        if (p != dvp)
+    for (int depth = 0; depth < 4096; depth++) {
+        if (p == vp || vnode_isvroot(p)) {
+            found = p == vp;
+            break;
+        }
+        vnode_t parent = vnode_getparent(p);
+        if (held)
             vnode_put(p);
-        p = next;
+        p = parent;
+        held = true;
+        if (p == NULLVP) {
+            found = false;
+            break;
+        }
     }
-    if (p != NULLVP && p != dvp)
+    if (held && p != NULLVP)
         vnode_put(p);
     return found;
 }
@@ -213,6 +221,8 @@ is_ancestor(vnode_t vp, vnode_t dvp)
 static int
 node_place(vnode_t vp, vnode_t dvp, struct componentname *cnp)
 {
+    struct virtiofs_mount *vmp = VTON(vp)->vmp;
+
     if (vp == dvp)
         return EIO;
 
@@ -220,18 +230,23 @@ node_place(vnode_t vp, vnode_t dvp, struct componentname *cnp)
     const char *name = vnode_getname(vp);
     bool same = parent == dvp && name && strnlen(name, cnp->cn_namelen + 1) == (size_t)cnp->cn_namelen &&
                 strncmp(name, cnp->cn_nameptr, cnp->cn_namelen) == 0;
-    bool loop = !same && parent != dvp && vnode_isdir(vp) && is_ancestor(vp, dvp);
+    bool move = !same && parent != dvp && vnode_isdir(vp);
 
     if (name)
         vnode_putname(name);
     if (parent)
         vnode_put(parent);
-    if (loop)
-        return EIO;
-    if (!same)
+    if (same)
+        return 0;
+    if (move)
+        IOLockLock(vmp->move_lock);
+    int error = move && is_ancestor(vp, dvp) ? EIO : 0;
+    if (!error)
         vnode_update_identity(vp, dvp, cnp->cn_nameptr, cnp->cn_namelen, cnp->cn_hash,
                               VNODE_UPDATE_PARENT | VNODE_UPDATE_NAME);
-    return 0;
+    if (move)
+        IOLockUnlock(vmp->move_lock);
+    return error;
 }
 
 static void

@@ -127,14 +127,16 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
         return ENXIO;
     struct virtiofs_mount *vmp = IOMallocZero(sizeof(*vmp));
     IOLock *lock = IOLockAlloc();
+    IOLock *move_lock = IOLockAlloc();
     struct fuse_entry_out entry = {};
     uint64_t version = 0;
     vnode_t root = NULLVP;
-    error = vmp && lock ? 0 : ENOMEM;
+    error = vmp && lock && move_lock ? 0 : ENOMEM;
     if (!error) {
         vmp->mp = mp;
         vmp->dev = dev;
         vmp->lock = lock;
+        vmp->move_lock = move_lock;
         error = virtiofs_dev_start(dev, &vmp->session);
     }
     if (!error)
@@ -148,6 +150,8 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
         vfs_setfsprivate(mp, NULL);
         if (lock)
             IOLockFree(lock);
+        if (move_lock)
+            IOLockFree(move_lock);
         if (vmp)
             IOFree(vmp, sizeof(*vmp));
         virtiofs_dev_release(dev);
@@ -191,6 +195,7 @@ virtiofs_unmount(mount_t mp, int mntflags, __unused vfs_context_t ctx)
     vfs_setfsprivate(mp, NULL);
     virtiofs_dev_release(vmp->dev);
     IOLockFree(vmp->lock);
+    IOLockFree(vmp->move_lock);
     IOFree(vmp, sizeof(*vmp));
     return 0;
 }

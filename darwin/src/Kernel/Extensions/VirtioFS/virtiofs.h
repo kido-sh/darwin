@@ -22,6 +22,7 @@ struct virtiofs_mount {
     struct virtiofs_dev *dev;
     struct virtiofs_session session;
     IOLock *lock;
+    IOLock *move_lock;
     uint64_t rootid;
     uint64_t attr_version;
     vnode_t root;
