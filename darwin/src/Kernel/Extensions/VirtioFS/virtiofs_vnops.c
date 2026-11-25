@@ -1734,6 +1734,17 @@ virtiofs_vnop_readlink(struct vnop_readlink_args *ap)
 }
 
 static int
+name_node(struct virtiofs_node *dnp, vfs_context_t ctx, const char *name, uint32_t len, struct fuse_entry_out *entry)
+{
+    uint64_t version;
+    int error = lookup_name(dnp, ctx, name, len, entry, &version);
+
+    if (!error)
+        forget(dnp->vmp, entry->nodeid, 1);
+    return error;
+}
+
+static int
 case_sensitive(vnode_t vp, vfs_context_t ctx, int32_t *retval)
 {
     struct virtiofs_node *np = VTON(vp);
@@ -1755,16 +1766,14 @@ case_sensitive(vnode_t vp, vfs_context_t ctx, int32_t *retval)
         letters |= (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
         flipped[i] = c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c;
     }
-    if (letters) {
-        struct fuse_entry_out entry;
-        uint64_t version;
-        int error = lookup_name(VTON(dvp), ctx, flipped, (uint32_t)len, &entry, &version);
-        if (!error) {
-            forget(vmp, entry.nodeid, 1);
-            known = entry.nodeid != np->nodeid;
-        } else if (error == ENOENT) {
+    struct fuse_entry_out first, flip, again;
+    if (letters && name_node(VTON(dvp), ctx, name, (uint32_t)len, &first) == 0 && first.nodeid == np->nodeid) {
+        int error = name_node(VTON(dvp), ctx, flipped, (uint32_t)len, &flip);
+        if (!error && flip.nodeid == np->nodeid)
+            known = first.attr.nlink == 1 ? 0 : -1;
+        else if ((!error || error == ENOENT) && name_node(VTON(dvp), ctx, name, (uint32_t)len, &again) == 0 &&
+                 again.nodeid == np->nodeid)
             known = 1;
-        }
     }
     if (flipped)
         IOFree(flipped, len);
@@ -1772,10 +1781,9 @@ case_sensitive(vnode_t vp, vfs_context_t ctx, int32_t *retval)
         vnode_putname(name);
     if (dvp)
         vnode_put(dvp);
-    if (known < 0)
-        return EINVAL;
-    __atomic_store_n(&vmp->case_sensitive, known, __ATOMIC_RELAXED);
-    *retval = known;
+    if (known >= 0)
+        __atomic_store_n(&vmp->case_sensitive, known, __ATOMIC_RELAXED);
+    *retval = known > 0;
     return 0;
 }
 
