@@ -358,12 +358,12 @@ node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exac
 
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
-    off_t old = (off_t)np->attr.size, from = MIN(at, old);
+    off_t old = (off_t)np->attr.size, from = MIN(at, old), stop = MIN(to, page_end(old));
     bool resize = exact ? size != old : size > old;
     np->flags |= VN_SIZING;
     np->push_limit = old;
     np->skip_from = from;
-    np->skip_to = to;
+    np->skip_to = stop;
     if (resize) {
         readers_wait_locked(np);
         np->push_limit = MIN(old, size);
@@ -372,7 +372,7 @@ node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exac
     np->attr_version = ++vmp->version;
     np->expire = 0;
     IOLockUnlock(vmp->lock);
-    bool resident = from < to && ubc_pages_resident(vp);
+    bool resident = from < stop && ubc_pages_resident(vp);
     off_t first = from & ~(off_t)PAGE_MASK, last = to & ~(off_t)PAGE_MASK;
     bool head = resident && (from & PAGE_MASK) && first < old;
     bool tail = resident && (to & PAGE_MASK) && to < old && !(head && last == first);
@@ -391,7 +391,7 @@ node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exac
         np->skip_to = MIN(np->skip_to, last);
         IOLockUnlock(vmp->lock);
     }
-    off_t inner = head ? first + PAGE_SIZE : from, end = MIN(tail ? last : to, page_end(old));
+    off_t inner = head ? first + PAGE_SIZE : from, end = tail ? last : stop;
     if (resident && inner < end)
         ubc_msync(vp, inner, end, NULL, UBC_INVALIDATE);
     if (resize)
