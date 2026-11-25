@@ -15,8 +15,8 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
-#include <sys/time.h>
 #include <sys/xattr.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CHUNK (64 * 1024)
@@ -53,9 +53,7 @@ fnv(uint64_t h, const unsigned char *p, size_t n)
 static double
 now(void)
 {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec + tv.tv_usec / 1e6;
+    return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e9;
 }
 
 static double
