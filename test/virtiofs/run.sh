@@ -167,11 +167,13 @@ evtonly_kept() {
   holder=$!
   sleep 1
   chmod 000 "$share/revoke"
+  fails guest /bin/cat /mnt/data/revoke
+  local denied=$?
   wait $holder
   status=$?
   chmod "$was" "$share/revoke"
-  echo "an O_EVTONLY descriptor open across a refusal read: $(cat "$work/evt.out")"
-  [[ $status == 0 && $(cat "$work/evt.out") == "7 bytes" ]]
+  echo "an O_EVTONLY descriptor open across a refused open read: $(cat "$work/evt.out")"
+  [[ $denied == 0 && $status == 0 && $(cat "$work/evt.out") == "7 bytes" ]]
 }
 exec_beside_writer() {
   local holder denied
@@ -180,12 +182,16 @@ exec_beside_writer() {
   guest /tmp/t_virtiofs hold-mode /mnt/rw/prog wronly 3 > /dev/null 2>&1 &
   holder=$!
   sleep 1
+  local writers status
+  writers=$(host_writing "$rw/prog\$")
   fails guest /mnt/rw/prog lookups 1 /
   denied=$?
   wait $holder
+  status=$?
   chmod 755 "$rw/prog"
-  echo "a program this Mac made unreadable, run while another descriptor writes it: $( ((denied == 0)) && echo refused || echo ran)"
-  [[ $denied == 0 ]]
+  echo "a program this Mac made unreadable, run while another descriptor writes it ($writers open for writing):" \
+    "$( ((denied == 0)) && echo refused || echo ran)"
+  [[ $denied == 0 && $status == 0 && $writers -ge 1 ]]
 }
 trunc_reader() {
   local holder writers
@@ -193,10 +199,19 @@ trunc_reader() {
   guest /tmp/t_virtiofs hold-mode /mnt/rw/ot rdonly-trunc 3 > /dev/null 2>&1 &
   holder=$!
   sleep 1.5
-  writers=$(host_writing "$rw/ot")
+  local opened created status
+  writers=$(host_writing "$rw/ot\$") opened=$(host_open "$rw/ot\$")
   wait $holder
-  echo "open with O_RDONLY | O_TRUNC: the Mac holds $writers files open for writing while the descriptor lives"
-  [[ $writers == 0 && ! -s "$rw/ot" ]]
+  status=$?
+  guest /tmp/t_virtiofs hold-mode /mnt/rw/oc rdonly-creat 3 > /dev/null 2>&1 &
+  holder=$!
+  sleep 1.5
+  created=$(host_writing "$rw/oc\$")
+  wait $holder
+  status=$((status | $?))
+  echo "while a descriptor lives, the Mac holds $writers files open for writing after O_RDONLY | O_TRUNC" \
+    "($opened open at all) and $created after O_RDONLY | O_CREAT"
+  [[ $status == 0 && $writers == 0 && $opened -ge 1 && $created == 0 && ! -s "$rw/ot" ]]
 }
 synced_map() {
   local holder seen
@@ -210,11 +225,55 @@ synced_map() {
   [[ $seen == synced ]]
 }
 removed_released() {
-  local held linked
-  held=$(host_open "$rw/gone") linked=$(host_open "$rw/edge/linked")
-  echo "files the guest removed before thousands of others: open $held times, a file with two links removed" \
-    "$linked times on this Mac"
-  [[ $held == 0 && $linked == 0 ]]
+  local held
+  held=$(host_open "$rw/gone\$")
+  echo "a file the guest removed before thousands of others is open $held times on this Mac"
+  [[ $held == 0 ]]
+}
+links_released() {
+  local dev ino held
+  guest /tmp/t_virtiofs link-pair /mnt/rw/edge make > /dev/null || return 1
+  dev=$(stat -f %d "$rw/edge/linked") ino=$(stat -f %i "$rw/edge/linked") || return 1
+  guest /tmp/t_virtiofs link-pair /mnt/rw/edge remove > /dev/null || return 1
+  sleep 1
+  held=$(lsof -p "$vm" 2>/dev/null |
+    awk -v dev="$((dev >> 24)),$((dev & 0xffffff))" -v ino="$ino" '$5 == "REG" && $6 == dev && $8 == ino' | wc -l)
+  echo "a file whose two links the guest removed is open $((held)) times on this Mac"
+  [[ $held -eq 0 ]]
+}
+raw_create_released() {
+  local writers
+  guest /tmp/t_virtiofs raw-create /mnt/rw/raw || return 1
+  sleep 0.5
+  writers=$(host_writing "$rw/raw\$")
+  echo "a file whose creating open failed before it opened is open $writers times for writing on this Mac"
+  [[ -e "$rw/raw" && $writers == 0 ]]
+}
+idle_none() {
+  local was held status
+  was=$(guest /bin/sh -c 'sysctl -n vfs.generic.virtiofs.idle_files') || return 1
+  guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.idle_files=0 >/dev/null && /tmp/t_virtiofs advise-close /mnt/data/big/32m 32'
+  status=$?
+  sleep 1
+  held=$(host_fds '/big/32m$')
+  guest /bin/sh -c "sysctl -w vfs.generic.virtiofs.idle_files=$was" >/dev/null
+  echo "a file closed while 32 MiB of read advice ran, with no idle handles kept: the host holds it open $held times"
+  [[ $status == 0 && $held -le 1 ]]
+}
+mapped_writer_kept() {
+  local holder status
+  printf '%016384d' 0 > "$rw/ms2"
+  guest /tmp/t_virtiofs map-store /mnt/rw/ms2 3 > "$work/map-store.out" 2>&1 &
+  holder=$!
+  sleep 1
+  guest /tmp/t_virtiofs truncate /mnt/rw/ms2 16384 > /dev/null
+  chmod 444 "$rw/ms2"
+  wait $holder
+  status=$?
+  chmod 644 "$rw/ms2"
+  echo "a mapping whose descriptor closed, after a truncation by name and a chmod 444 on this Mac:" \
+    "$(cat "$work/map-store.out"), first byte $(head -c 1 "$rw/ms2")"
+  [[ $status == 0 && $(head -c 1 "$rw/ms2") == M ]]
 }
 idle_kept() {
   local was held
@@ -337,6 +396,7 @@ guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.revalidate_open=0 >/dev/null &&
 check "with revalidate_open at 0, a refusal takes effect after the attribute timeout" revoked 1.1 revoke 000 /bin/cat /mnt/data/revoke
 guest /bin/sh -c 'sysctl -w vfs.generic.virtiofs.revalidate_open=1' >/dev/null
 check "a mount keeps at most idle_files closed files open on the host" idle_kept
+check "with no idle handles kept, a file closed during its read-ahead is released" idle_none
 check "concurrent reads while every close releases a handle" guest /bin/sh -c 'w=$(sysctl -n vfs.generic.virtiofs.idle_files) &&
   sysctl -w vfs.generic.virtiofs.idle_files=1 >/dev/null && /tmp/t_virtiofs stress /mnt/data 16 1; r=$?;
   sysctl -w vfs.generic.virtiofs.idle_files=$w >/dev/null; exit $r'
@@ -360,7 +420,13 @@ check "extended attributes match this Mac's" diff -u "$work/xattrs.host" "$work/
 check "this Mac holds the attributes the guest set" diff -u "$work/xattrs.guest" <("$work/t_virtiofs" xattr-list "$rw/x")
 check "writes, stores through a mapping and truncation agree" guest /tmp/t_virtiofs coherence /mnt/rw/coherent
 check "a descriptor keeps working after its file is removed or renamed" guest /tmp/t_virtiofs open-unlink /mnt/rw/ou
-check "edge cases of creation, growth past a stored page, links, times and flags" guest /tmp/t_virtiofs rw-edge /mnt/rw/edge
+check "edge cases of creation, stores beside growth, times and flags" guest /tmp/t_virtiofs rw-edge /mnt/rw/edge
+check "a file whose links were all removed is released on this Mac" links_released
+check "a writable mapping keeps writing after its descriptor closes and this Mac revokes writing" mapped_writer_kept
+check "a create whose open fails before it opens leaves nothing open for writing" raw_create_released
+check "a case-only rename works after the first case probe asked about a removed file" guest /bin/sh -c \
+  'mkdir -p /mnt/cs && /sbin/mount -t virtiofs kido:rw /mnt/cs && /tmp/t_virtiofs case-probe /mnt/cs/cs; r=$?;
+  /sbin/umount /mnt/cs; exit $r'
 check "utimes(NULL) in the guest sets the current time on this Mac" times_now
 check "a page stored to through a mapping does not overwrite what this Mac appended" appended_kept
 check "sync(2) pushes stores of a live mapping to this Mac" synced_map

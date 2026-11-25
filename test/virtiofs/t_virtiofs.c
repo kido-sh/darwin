@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -536,6 +537,18 @@ read_close(const char *path, int rounds)
     }
     printf("read-close: %d rounds of 512 KiB, %ld failures\n", rounds, failures);
     return failures != 0;
+}
+
+static int
+advise_close(const char *path, int mib)
+{
+    struct radvisory ra = { .ra_offset = 0, .ra_count = mib << 20 };
+    int fd = open(path, O_RDONLY);
+    if (fd < 0 || fcntl(fd, F_RDADVISE, &ra) != 0) {
+        printf("read advice: %s\n", strerror(errno));
+        return 1;
+    }
+    return close(fd) != 0;
 }
 
 struct reopener {
@@ -1305,6 +1318,133 @@ map_pressure(const char *path, int mib)
     return failures ? 1 : 0;
 }
 
+struct grower {
+    int fd;
+    int mode;
+    int rounds;
+    atomic_int go;
+    atomic_int done;
+};
+
+static void *
+grow_one(void *arg)
+{
+    struct grower *g = arg;
+    for (int i = 1; i <= g->rounds; i++) {
+        while (atomic_load(&g->go) != i)
+            sched_yield();
+        if (g->mode == 0)
+            ftruncate(g->fd, 10000);
+        else
+            pwrite(g->fd, "E", 1, g->mode == 1 ? 20000 : 4000);
+        atomic_store(&g->done, i);
+    }
+    return NULL;
+}
+
+static void
+tail_race(const char *name, int mode)
+{
+    char page[4000];
+    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
+    memset(page, 'x', sizeof(page));
+    CHECK(fd >= 0 && write(fd, page, sizeof(page)) == (ssize_t)sizeof(page), "create %s: %s", name, strerror(errno));
+    char *map = fd < 0 ? MAP_FAILED : mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(map != MAP_FAILED, "mmap %s: %s", name, strerror(errno));
+    if (map == MAP_FAILED) {
+        close(fd);
+        return;
+    }
+    struct grower g = { .fd = fd, .mode = mode, .rounds = 200 };
+    pthread_t t;
+    pthread_create(&t, NULL, grow_one, &g);
+    int lost = 0;
+    for (int i = 1; i <= g.rounds; i++) {
+        char want = (char)('a' + i % 26), back = 0;
+        uint64_t until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + arc4random_uniform(200000);
+        atomic_store(&g.go, i);
+        while (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < until)
+            ;
+        map[100] = want;
+        while (atomic_load(&g.done) != i)
+            sched_yield();
+        if (msync(map, 16384, MS_SYNC) != 0 || pread(fd, &back, 1, 100) != 1 || back != want)
+            lost++;
+        ftruncate(fd, sizeof(page));
+    }
+    pthread_join(t, NULL);
+    munmap(map, 16384);
+    close(fd);
+    CHECK(lost == 0, "%s: %d of %d stores made while another thread grew the file were lost", name, lost, g.rounds);
+}
+
+static int
+link_pair(const char *dir, const char *step)
+{
+    struct stat st;
+    if (chdir(dir) != 0) {
+        printf("chdir %s: %s\n", dir, strerror(errno));
+        return 1;
+    }
+    if (!strcmp(step, "make")) {
+        int fd = open("linked", O_WRONLY | O_CREAT | O_EXCL, 0644);
+        int rc = fd < 0 || close(fd) != 0 || link("linked", "linked2") != 0;
+        outcome("make two links", rc ? -1 : 0);
+        return rc;
+    }
+    int rc = unlink("linked") != 0 || unlink("linked2") != 0 || stat("linked2", &st) == 0;
+    for (int i = 0; i < 64 && !rc; i++) {
+        char name[32];
+        snprintf(name, sizeof(name), "flush%d", i);
+        int fd = open(name, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        rc = fd < 0 || close(fd) != 0 || unlink(name) != 0;
+    }
+    outcome("remove both links", rc ? -1 : 0);
+    return rc;
+}
+
+static int
+raw_create(const char *path)
+{
+    int fd = open_dprotected_np(path, O_RDONLY | O_CREAT | O_EXCL, -1, O_DP_GETRAWUNENCRYPTED, 0644);
+    if (fd >= 0) {
+        close(fd);
+        printf("a raw open was allowed\n");
+        return 1;
+    }
+    printf("raw create: %s\n", strerror(errno));
+    return errno != EPERM;
+}
+
+static int
+case_probe(const char *dir)
+{
+    if (mkdir(dir, 0755) != 0 || chdir(dir) != 0) {
+        printf("mkdir %s: %s\n", dir, strerror(errno));
+        return 1;
+    }
+    long removed = -2;
+    int fd = open("x", O_RDWR | O_CREAT | O_EXCL, 0644);
+    if (fd >= 0 && unlink("x") == 0)
+        removed = fpathconf(fd, _PC_CASE_SENSITIVE);
+    if (fd >= 0)
+        close(fd);
+    fd = open("bar", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    int rc = fd < 0 || close(fd) != 0 || rename("bar", "BAR") != 0;
+    bool upper = false, lower = false;
+    DIR *d = opendir(".");
+    for (struct dirent *e; d && (e = readdir(d));) {
+        upper |= !strcmp(e->d_name, "BAR");
+        lower |= !strcmp(e->d_name, "bar");
+    }
+    if (d)
+        closedir(d);
+    printf("case-sensitive answered for a removed file: %ld, after the rename: %ld, BAR %s, bar %s\n", removed,
+           pathconf("BAR", _PC_CASE_SENSITIVE), upper ? "listed" : "missing", lower ? "listed" : "missing");
+    chdir("/");
+    return rc || !upper || lower;
+}
+
 static int
 rw_edge(const char *dir)
 {
@@ -1346,14 +1486,19 @@ rw_edge(const char *dir)
         close(fd);
     }
 
-    fd = open("linked", O_WRONLY | O_CREAT | O_EXCL, 0644);
-    close(fd);
-    CHECK(link("linked", "linked2") == 0 && unlink("linked2") == 0 && unlink("linked") == 0,
-          "remove both links: %s", strerror(errno));
-    CHECK(stat("linked", &st) != 0 && errno == ENOENT, "the last link is gone");
+    tail_race("race-truncate", 0);
+    tail_race("race-write", 1);
+    tail_race("race-append", 2);
 
     fd = open("times", O_WRONLY | O_CREAT | O_EXCL, 0644);
     close(fd);
+    char value[8];
+    errno = 0;
+    CHECK(getxattr("times", XATTR_RESOURCEFORK_NAME, value, sizeof(value), 1, 0) < 0 && errno == EINVAL,
+          "getxattr of a resource fork at a position: %s", strerror(errno));
+    errno = 0;
+    CHECK(setxattr("times", XATTR_RESOURCEFORK_NAME, "x", 1, 1, 0) != 0 && errno == EINVAL,
+          "setxattr of a resource fork at a position: %s", strerror(errno));
     struct timeval old[2] = { { 981173106, 0 }, { 981173106, 0 } };
     CHECK(utimes("times", old) == 0 && utimes("times", NULL) == 0 && stat("times", &st) == 0 &&
           st.st_mtimespec.tv_sec > 981173106 + 86400, "utimes(NULL) sets the current time: mtime %ld",
@@ -1387,6 +1532,24 @@ map_hold(const char *path, int seconds)
 }
 
 static int
+map_store(const char *path, int seconds)
+{
+    int fd = open(path, O_RDWR);
+    char *map = fd < 0 ? MAP_FAILED : mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED) {
+        printf("mmap: %s\n", strerror(errno));
+        return 1;
+    }
+    close(fd);
+    sleep((unsigned)seconds);
+    map[0] = 'M';
+    int rc = msync(map, 16384, MS_SYNC);
+    printf("msync after the descriptor closed: %s\n", rc ? strerror(errno) : "ok");
+    rc |= munmap(map, 16384);
+    return rc != 0;
+}
+
+static int
 map_sync(const char *path, int seconds)
 {
     int fd = open(path, O_RDWR);
@@ -1407,9 +1570,10 @@ static int
 hold_mode(const char *path, const char *how, int seconds)
 {
     int flags = !strcmp(how, "evtonly") ? O_RDONLY | O_EVTONLY : !strcmp(how, "wronly") ? O_WRONLY :
-                !strcmp(how, "rdonly-trunc") ? O_RDONLY | O_TRUNC : O_RDONLY;
+                !strcmp(how, "rdonly-trunc") ? O_RDONLY | O_TRUNC :
+                !strcmp(how, "rdonly-creat") ? O_RDONLY | O_CREAT | O_EXCL : O_RDONLY;
     char buf[64];
-    int fd = open(path, flags);
+    int fd = open(path, flags, 0644);
     if (fd < 0) {
         printf("open: %s\n", strerror(errno));
         return 1;
@@ -1767,6 +1931,16 @@ main(int argc, char **argv)
         return rw_edge(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "map-hold"))
         return map_hold(argv[2], atoi(argv[3]));
+    if (argc == 4 && !strcmp(argv[1], "advise-close"))
+        return advise_close(argv[2], atoi(argv[3]));
+    if (argc == 4 && !strcmp(argv[1], "link-pair"))
+        return link_pair(argv[2], argv[3]);
+    if (argc == 3 && !strcmp(argv[1], "raw-create"))
+        return raw_create(argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "case-probe"))
+        return case_probe(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "map-store"))
+        return map_store(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "map-sync"))
         return map_sync(argv[2], atoi(argv[3]));
     if (argc == 5 && !strcmp(argv[1], "hold-mode"))
