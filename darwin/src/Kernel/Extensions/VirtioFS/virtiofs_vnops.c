@@ -1851,7 +1851,7 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     }
     if (error && io)
         IOFree(io, io_size(write, chunks));
-    if (error && write)
+    if (error && write && error != EROFS)
         push_failed(np);
     if (error || !chunks) {
         buf_seterror(bp, error);
