@@ -60,7 +60,7 @@ host_fds() {
 xcrun clang -arch arm64 -mmacosx-version-min=15.0 -O2 -o "$work/t_virtiofs" "$here/t_virtiofs.c" || exit 1
 
 share=$work/share
-mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,links,private} "$work/empty" "$work/locked"
+mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,long,links,private} "$work/empty" "$work/locked"
 printf 'mine\n' > "$share/private/f"
 chmod 700 "$share/private"
 : > "$share/small/0"
@@ -75,6 +75,8 @@ printf 'long\n' > "$share/names/$name255"
 printf 'utf8\n' > "$share/names/caf$(printf '\xc3\xa9') ünïcødé"
 printf 'space\n' > "$share/names/with space"
 printf 'colon\n' > "$share/names/a:b"
+printf 'wide\n' > "$share/names/$(printf '\xe4\xb8\xad%.0s' $(seq 1 100))"
+printf 'longest\n' > "$share/long/$(printf '\xe4\xb8\xad%.0s' $(seq 1 255))"
 ln -s ../small/4097 "$share/links/relative"
 ln -s /etc/hosts "$share/links/absolute"
 ln -s nowhere "$share/links/dangling"
@@ -117,7 +119,10 @@ check "a file the host cannot read cannot be opened" fails guest /bin/cat /mnt/l
 check "unmount kido:locked" guest /sbin/umount /mnt/locked
 check "errors of a read-only mount" guest /tmp/t_virtiofs errors /mnt/data kido:data
 check "a 512-byte readdir buffer lists every entry" guest /tmp/t_virtiofs small-readdir /mnt/data/names 512
-check "a 256-byte readdir buffer never ends a listing early" guest /tmp/t_virtiofs small-readdir /mnt/data/names 256
+check "a 256-byte readdir buffer stops only at an entry too large for it" \
+  guest /tmp/t_virtiofs small-readdir /mnt/data/names 256
+check "the old getdirentries lists names up to 255 bytes and skips longer ones" \
+  guest /bin/sh -c '/tmp/t_virtiofs classic-readdir /mnt/data/names && /tmp/t_virtiofs classic-readdir /mnt/data/long'
 guest /tmp/t_virtiofs as 0 0 /mnt/data /mnt/data/private/f >/dev/null
 check "another user is shown as the owner right after root looked" owned_by 501 20
 check "root is shown as the owner right after another user looked" owned_by 0 0

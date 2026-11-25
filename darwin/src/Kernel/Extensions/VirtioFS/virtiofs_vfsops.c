@@ -98,7 +98,7 @@ copyin_spec(user_addr_t data, vfs_context_t ctx, char *spec, size_t size)
 static int
 virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context_t ctx)
 {
-    char spec[VIRTIOFS_TAG_MAX + 1 + VIRTIOFS_NAME_MAX + 1];
+    char spec[VIRTIOFS_TAG_MAX + 1 + NAME_MAX + 1];
     char tag[VIRTIOFS_TAG_MAX + 1];
 
     if (vfs_context_suser(ctx))

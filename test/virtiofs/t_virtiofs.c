@@ -319,6 +319,14 @@ errors(const char *mnt, const char *spec)
     name[256] = 0;
     snprintf(q, sizeof(q), "%s/names/%s", mnt, name);
     expect_errno(lstat(q, &st), ENAMETOOLONG, "lstat of a 256-byte name");
+    char wide[3 * 256 + 1] = "";
+    for (int i = 0; i < 255; i++)
+        strcat(wide, "\xe4\xb8\xad");
+    snprintf(q, sizeof(q), "%s/long/%s", mnt, wide);
+    CHECK(lstat(q, &st) == 0, "lstat of a 255-character, 765-byte name: %s", strerror(errno));
+    strcat(wide, "\xe4\xb8\xad");
+    snprintf(q, sizeof(q), "%s/long/%s", mnt, wide);
+    expect_errno(lstat(q, &st), ENAMETOOLONG, "lstat of a 256-character name");
 
     snprintf(q, sizeof(q), "%s/deep/1/2/3/../../2/3/4/5", mnt);
     CHECK(lstat(q, &st) == 0 && S_ISDIR(st.st_mode), "lookup through ..: %s", strerror(errno));
@@ -464,11 +472,11 @@ inodes(const char *dir, int limit)
 static int
 small_readdir(const char *dir, int bufsize)
 {
-    char *buf = malloc((size_t)bufsize);
+    char *buf = malloc(65536);
     int fd = open(dir, O_RDONLY | O_DIRECTORY);
     off_t base = 0;
     long listed = 0, want = 0;
-    int got;
+    int got, next = 0;
 
     if (!buf || fd < 0)
         return 1;
@@ -477,14 +485,19 @@ small_readdir(const char *dir, int bufsize)
             listed++;
     }
     int err = got < 0 ? errno : 0;
+    if (err == EINVAL && syscall(SYS_getdirentries64, fd, buf, 65536, &base) > 0)
+        next = ((struct dirent *)buf)->d_reclen;
     close(fd);
     DIR *d = opendir(dir);
     while (d && readdir(d))
         want++;
     if (d)
         closedir(d);
-    printf("%d-byte buffers: %ld of %ld entries, %s\n", bufsize, listed, want, err ? strerror(err) : "end");
-    return err == EINVAL || (!err && listed == want) ? 0 : 1;
+    printf("%d-byte buffers: %ld of %ld entries, %s", bufsize, listed, want, err ? strerror(err) : "end");
+    if (err == EINVAL)
+        printf(" before a %d-byte entry", next);
+    printf("\n");
+    return (err == EINVAL && next > bufsize) || (!err && listed == want) ? 0 : 1;
 }
 
 static int
@@ -500,6 +513,40 @@ as_user(uid_t uid, gid_t gid, char **paths)
             printf("%s uid=%u gid=%u mode=%04o\n", *p, st.st_uid, st.st_gid, st.st_mode & 07777);
     }
     return 0;
+}
+
+static int
+classic_readdir(const char *dir)
+{
+    struct old_dirent {
+        uint32_t d_ino;
+        uint16_t d_reclen;
+        uint8_t d_type;
+        uint8_t d_namlen;
+        char d_name[256];
+    };
+    static char buf[8192];
+    int fd = open(dir, O_RDONLY | O_DIRECTORY);
+    long base = 0, listed = 0, want = 0;
+    int got;
+
+    if (fd < 0)
+        return 1;
+    while ((got = syscall(SYS_getdirentries, fd, buf, sizeof(buf), &base)) > 0) {
+        for (int at = 0; at < got; at += ((struct old_dirent *)(buf + at))->d_reclen)
+            listed++;
+    }
+    int err = got < 0 ? errno : 0;
+    close(fd);
+    DIR *d = opendir(dir);
+    struct dirent *de;
+    while (d && (de = readdir(d)) != NULL)
+        want += de->d_namlen <= 255;
+    if (d)
+        closedir(d);
+    printf("old getdirentries: %ld of %ld entries with names up to 255 bytes, %s\n", listed, want,
+           err ? strerror(err) : "end");
+    return !err && listed == want ? 0 : 1;
 }
 
 static int
@@ -637,6 +684,8 @@ main(int argc, char **argv)
         return small_readdir(argv[2], atoi(argv[3]));
     if (argc >= 5 && !strcmp(argv[1], "as"))
         return as_user((uid_t)atoi(argv[2]), (gid_t)atoi(argv[3]), argv + 4);
+    if (argc == 3 && !strcmp(argv[1], "classic-readdir"))
+        return classic_readdir(argv[2]);
     if (argc == 6 && !strcmp(argv[1], "mount-as"))
         return mount_as((uid_t)atoi(argv[2]), (gid_t)atoi(argv[3]), argv[4], argv[5]);
     if (argc >= 4 && !strcmp(argv[1], "lookups"))

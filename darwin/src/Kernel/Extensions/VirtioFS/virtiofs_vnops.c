@@ -808,6 +808,8 @@ virtiofs_vnop_readdir(struct vnop_readdir_args *ap)
     struct virtiofs_mount *vmp = np->vmp;
     bool extended = (ap->a_flags & VNODE_READDIR_EXTENDED) != 0;
     user_ssize_t resid = uio_resid(uio);
+    uint64_t cookie = (uint64_t)uio_offset(uio);
+    bool full = false, skipped;
     int count = 0, eof = 0;
     uint64_t fh;
 
@@ -826,41 +828,45 @@ virtiofs_vnop_readdir(struct vnop_readdir_args *ap)
         IOFree(buf, size);
         return error;
     }
-    uint64_t cookie = (uint64_t)uio_offset(uio);
-    struct fuse_read_in in = { .fh = fh, .offset = cookie, .size = size };
-    struct virtiofs_call c = {
-        .opcode = FUSE_READDIR, .nodeid = np->nodeid,
-        .arg = { &in }, .arglen = { sizeof(in) }, .datalen = size, .data = buf,
-    };
     IOLockLock(vmp->lock);
     wait_clear(np, VN_LISTING);
     np->flags |= VN_LISTING;
     IOLockUnlock(vmp->lock);
-    error = virtiofs_call(vmp, ap->a_context, &c);
-    IOLockLock(vmp->lock);
-    wake(np, VN_LISTING);
-    IOLockUnlock(vmp->lock);
-    handle_put(np, false);
-
-    if (!error) {
+    do {
+        struct fuse_read_in in = { .fh = fh, .offset = cookie, .size = size };
+        struct virtiofs_call c = {
+            .opcode = FUSE_READDIR, .nodeid = np->nodeid,
+            .arg = { &in }, .arglen = { sizeof(in) }, .datalen = size, .data = buf,
+        };
         struct virtiofs_dirent d;
         uint32_t pos = 0;
-        bool full = false;
         int more = 0;
+
+        skipped = false;
+        error = virtiofs_call(vmp, ap->a_context, &c);
         while (!error && !full && (more = virtiofs_dirent_next(buf, c.datalen, &pos, 0, &d)) == 1) {
+            if (!extended && d.namelen > MAXNAMLEN) {
+                skipped = true;
+                cookie = d.off;
+                continue;
+            }
             error = emit(uio, extended, &d, &full);
             if (!error && !full) {
                 count++;
                 cookie = d.off;
             }
         }
-        if (!error && !full && more < 0)
+        if (!error && !full && more < 0 && count == 0)
             error = EIO;
-        if (!error && count == 0 && c.datalen > 0)
-            error = EINVAL;
-        eof = c.datalen == 0;
-        uio_setoffset(uio, (off_t)cookie);
-    }
+        eof = !error && c.datalen == 0;
+    } while (!error && !eof && !full && count == 0 && skipped);
+    if (!error && full && count == 0)
+        error = EINVAL;
+    IOLockLock(vmp->lock);
+    wake(np, VN_LISTING);
+    IOLockUnlock(vmp->lock);
+    handle_put(np, false);
+    uio_setoffset(uio, (off_t)cookie);
     IOFree(buf, size);
     if (ap->a_eofflag)
         *ap->a_eofflag = eof;
@@ -897,7 +903,8 @@ virtiofs_vnop_pathconf(struct vnop_pathconf_args *ap)
         *ap->a_retval = LINK_MAX;
         return 0;
     case _PC_NAME_MAX:
-        *ap->a_retval = VIRTIOFS_NAME_MAX;
+    case _PC_NAME_CHARS_MAX:
+        *ap->a_retval = NAME_MAX;
         return 0;
     case _PC_PATH_MAX:
         *ap->a_retval = MAXPATHLEN;

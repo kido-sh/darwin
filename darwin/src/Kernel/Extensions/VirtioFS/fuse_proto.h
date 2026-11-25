@@ -8,7 +8,7 @@
 #include <sys/cdefs.h>
 #include "fuse.h"
 
-#define VIRTIOFS_NAME_MAX 255
+#define VIRTIOFS_NAME_MAX 1023
 
 struct virtiofs_dirent {
     uint64_t ino;
