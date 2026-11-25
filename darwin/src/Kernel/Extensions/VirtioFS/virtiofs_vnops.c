@@ -175,13 +175,44 @@ readers_wait_locked(struct virtiofs_node *np)
     }
 }
 
+static int handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh);
+static void handle_put(struct virtiofs_node *np);
+static void file_idle(struct virtiofs_node *np);
+
 static void
-page_drop(vnode_t vp, off_t page)
+page_drop(struct virtiofs_node *np, off_t page, off_t stale[2][2])
 {
-    for (int i = 0; i < 8 && ubc_page_op(vp, page, 0, NULL, NULL) == KERN_SUCCESS; i++)
-        ubc_msync(vp, page, page + PAGE_SIZE, NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
-    if (ubc_page_op(vp, page, 0, NULL, NULL) == KERN_SUCCESS)
+    vnode_t vp = np->vp;
+    upl_t upl = NULL;
+    upl_page_info_t *pl;
+    uint64_t fh;
+
+    ubc_msync(vp, page, page + PAGE_SIZE, NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+    if (ubc_page_op(vp, page, 0, NULL, NULL) != KERN_SUCCESS)
+        return;
+    bool held = handle_get(np, NULL, &fh) == 0;
+    int error = held ? 0 : EIO;
+    if (ubc_create_upl(vp, page, PAGE_SIZE, &upl, &pl, UPL_SET_LITE | UPL_WILL_MODIFY) != KERN_SUCCESS)
+        upl = NULL;
+    for (int i = 0; upl && !error && upl_valid_page(pl, 0) && i < 2; i++) {
+        off_t from = MAX(stale[i][0], page), to = MIN(stale[i][1], page + PAGE_SIZE);
+        struct fuse_read_in in = { .fh = fh, .offset = (uint64_t)from, .size = (uint32_t)(to - from) };
+        struct virtiofs_call c = {
+            .opcode = FUSE_READ, .flags = VIRTIOFS_ZERO_FILL, .nodeid = np->nodeid,
+            .arg = { &in }, .arglen = { sizeof(in) }, .datalen = (uint32_t)(to - from),
+            .upl = upl, .upl_offset = (uint32_t)(from - page),
+        };
+        if (from < to)
+            error = virtiofs_call(np->vmp, NULL, &c);
+    }
+    if (upl)
+        ubc_upl_abort_range(upl, 0, PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
+    if (!upl || error)
         ubc_msync(vp, page, page + PAGE_SIZE, NULL, UBC_INVALIDATE);
+    if (held) {
+        handle_put(np);
+        file_idle(np);
+    }
 }
 
 static bool
@@ -232,8 +263,9 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         ubc_setsize(vp, size);
     if (ubc_pages_resident(vp)) {
         ubc_msync(vp, 0, MAX(cached, size), NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+        off_t stale[2][2] = { { 0, 0 }, { old, size } };
         if (size > old && (old & PAGE_MASK))
-            page_drop(vp, old & ~(off_t)PAGE_MASK);
+            page_drop(np, old & ~(off_t)PAGE_MASK, stale);
     }
     IOLockLock(vmp->lock);
     np->push_limit = size;
@@ -338,8 +370,9 @@ node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exac
     off_t first = from & ~(off_t)PAGE_MASK, last = to & ~(off_t)PAGE_MASK;
     bool head = resident && (from & PAGE_MASK) && first < old;
     bool tail = resident && (to & PAGE_MASK) && to < old && !(head && last == first);
+    off_t stale[2][2] = { { from, to }, { resize && size > old ? old : 0, resize && size > old ? size : 0 } };
     if (head)
-        page_drop(vp, first);
+        page_drop(np, first, stale);
     IOLockLock(vmp->lock);
     if (head)
         np->skip_from = MAX(np->skip_from, first + PAGE_SIZE);
@@ -347,7 +380,7 @@ node_changed(struct virtiofs_node *np, off_t at, off_t to, off_t size, bool exac
         np->push_limit = size;
     IOLockUnlock(vmp->lock);
     if (tail) {
-        page_drop(vp, last);
+        page_drop(np, last, stale);
         IOLockLock(vmp->lock);
         np->skip_to = MIN(np->skip_to, last);
         IOLockUnlock(vmp->lock);
