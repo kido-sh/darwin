@@ -375,16 +375,6 @@ node_size(struct virtiofs_node *np)
     return size;
 }
 
-static off_t
-node_push_limit(struct virtiofs_node *np, off_t offset)
-{
-    IOLockLock(np->vmp->lock);
-    bool clip = (np->flags & VN_SIZING) && offset < round_page_64(np->push_limit);
-    off_t size = clip ? np->push_limit : (off_t)np->attr.size;
-    IOLockUnlock(np->vmp->lock);
-    return size;
-}
-
 static void
 node_skip(struct virtiofs_node *np, off_t from, off_t to)
 {
@@ -1500,7 +1490,7 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
         return 0;
     }
     return cluster_pageout(vp, ap->a_pl, ap->a_pl_offset, ap->a_f_offset, (int)ap->a_size,
-                           node_push_limit(VTON(vp), ap->a_f_offset), ap->a_flags);
+                           node_size(VTON(vp)), ap->a_flags);
 }
 
 static int
@@ -1586,23 +1576,31 @@ io_done(void *arg, int error)
 }
 
 static uint32_t
-write_spans(off_t offset, uint32_t count, off_t skip_from, off_t skip_to, uint32_t span[2][2])
+write_spans(off_t offset, uint32_t count, off_t cut[2][2], uint32_t span[3][2])
 {
-    off_t end = offset + count;
+    off_t at = offset, end = offset + count;
     uint32_t n = 0;
 
-    if (skip_from >= skip_to || skip_to <= offset || skip_from >= end) {
-        span[0][0] = 0;
-        span[0][1] = count;
-        return count ? 1 : 0;
+    if (cut[1][0] < cut[0][0]) {
+        off_t from = cut[0][0], to = cut[0][1];
+        cut[0][0] = cut[1][0];
+        cut[0][1] = cut[1][1];
+        cut[1][0] = from;
+        cut[1][1] = to;
     }
-    if (skip_from > offset) {
-        span[n][0] = 0;
-        span[n++][1] = (uint32_t)(skip_from - offset);
+    for (int i = 0; i < 2 && at < end; i++) {
+        off_t from = MAX(cut[i][0], at), to = MIN(cut[i][1], end);
+        if (from >= to)
+            continue;
+        if (from > at) {
+            span[n][0] = (uint32_t)(at - offset);
+            span[n++][1] = (uint32_t)(from - at);
+        }
+        at = to;
     }
-    if (skip_to < end) {
-        span[n][0] = (uint32_t)(skip_to - offset);
-        span[n++][1] = (uint32_t)(end - skip_to);
+    if (at < end) {
+        span[n][0] = (uint32_t)(at - offset);
+        span[n++][1] = (uint32_t)(end - at);
     }
     return n;
 }
@@ -1618,17 +1616,19 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     uint32_t count = buf_count(bp);
     uint32_t max = np->vmp->session.max_io;
     off_t offset = buf_blkno(bp) * vfs_devblocksize(vnode_mount(vp));
-    uint32_t span[2][2] = { { 0, count } }, spans = count ? 1 : 0;
+    uint32_t span[3][2] = { { 0, count } }, spans = count ? 1 : 0;
     uint64_t fh = 0;
 
     int error = write && vfs_isrdonly(vnode_mount(vp)) ? EROFS : 0;
     if (write) {
-        off_t size = node_push_limit(np, offset);
         IOLockLock(np->vmp->lock);
-        off_t skip_from = np->skip_from, skip_to = np->skip_to;
+        off_t size = (off_t)np->attr.size, limit = np->push_limit;
+        bool stale = (np->flags & VN_SIZING) && limit < size;
+        off_t cut[2][2] = { { np->skip_from, np->skip_to },
+                            { stale ? limit : 0, stale ? MIN(round_page_64(limit), size) : 0 } };
         IOLockUnlock(np->vmp->lock);
         count = offset >= size ? 0 : (uint32_t)MIN((off_t)count, size - offset);
-        spans = write_spans(offset, count, skip_from, skip_to, span);
+        spans = write_spans(offset, count, cut, span);
     }
     uint32_t chunks = 0;
     for (uint32_t p = 0; p < spans; p++)
