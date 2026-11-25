@@ -157,11 +157,16 @@ sizing_done(struct virtiofs_node *np, uint32_t also)
 static void
 sizing_after_waiters(struct virtiofs_node *np)
 {
-    uint64_t patience = deadline(0, NSEC_PER_MSEC);
+    uint64_t patience = 0;
 
-    while ((np->flags & VN_SIZING) || (np->waiters && mach_absolute_time() < patience)) {
+    while ((np->flags & VN_SIZING) || np->waiters) {
+        bool held = np->flags & VN_SIZING;
+        if (!held && !patience)
+            patience = deadline(0, NSEC_PER_MSEC);
+        if (!held && mach_absolute_time() >= patience)
+            break;
         np->flags |= VN_WANT;
-        if (np->flags & VN_SIZING)
+        if (held)
             IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
         else
             IOLockSleepDeadline(np->vmp->lock, np, patience, THREAD_UNINT);
