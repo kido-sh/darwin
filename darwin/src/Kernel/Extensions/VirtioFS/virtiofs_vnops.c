@@ -82,6 +82,7 @@ struct virtiofs_node {
     uint32_t ropens;
     uint32_t releasing;
     uint32_t paging;
+    uint32_t waiters;
     uint32_t flags;
     IOLock *wlock;
     thread_t creator;
@@ -126,8 +127,13 @@ static void
 wait_clear(struct virtiofs_node *np, uint32_t busy)
 {
     while (np->flags & busy) {
+        uint32_t sizing = (np->flags & busy & VN_SIZING) != 0;
         np->flags |= VN_WANT;
+        np->waiters += sizing;
         IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
+        np->waiters -= sizing;
+        if (sizing && !np->waiters)
+            wake(np, 0);
     }
 }
 
@@ -1506,7 +1512,10 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
 
     *written = 0;
     IOLockLock(vmp->lock);
-    wait_clear(np, VN_SIZING);
+    while ((np->flags & VN_SIZING) || np->waiters) {
+        np->flags |= VN_WANT;
+        IOLockSleep(vmp->lock, np, THREAD_UNINT);
+    }
     sizing_set(np);
     readers_wait_locked(np);
     off_t old = (off_t)np->attr.size;
