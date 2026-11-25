@@ -31,6 +31,7 @@
 #define DIRENT64_LEN(namlen) ((sizeof(struct direntry) + (namlen) - (MAXPATHLEN - 1) + 7) & ~7)
 #define READDIR_MIN          4096
 #define WRITE_DEPTH          8
+#define HOLD_PAGES           (UPL_SET_LITE | UPL_WILL_MODIFY)
 
 enum {
     VN_BUILDING = 0x01,
@@ -209,51 +210,21 @@ page_fill(struct virtiofs_node *np, upl_t upl, off_t page, off_t from, off_t to)
 }
 
 static void
-pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count, bool fresh)
+pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count, bool changed)
 {
-    for (int i = 0; i < count; i++) {
+    for (int i = 0, run = 1; i < count; i += run) {
         upl_offset_t at = (upl_offset_t)i * PAGE_SIZE;
+        bool keep = changed && upl_valid_page(pl, i), dirty = keep && upl_dirty_page(pl, i);
         int state = 0;
-        bool wired = ubc_page_op(vp, first + at, 0, NULL, &state) == KERN_SUCCESS && !(state & UPL_POP_BUSY);
-        bool dirty = wired || upl_dirty_page(pl, i);
-        if (fresh && upl_valid_page(pl, i))
+        for (run = 1; !keep && i + run < count && !(changed && upl_valid_page(pl, i + run)); run++)
+            ;
+        if (keep && !dirty)
+            dirty = ubc_page_op(vp, first + at, 0, NULL, &state) == KERN_SUCCESS && !(state & UPL_POP_BUSY);
+        if (keep)
             ubc_upl_commit_range(upl, at, PAGE_SIZE, UPL_COMMIT_FREE_ON_EMPTY | (dirty ? UPL_COMMIT_SET_DIRTY : 0));
         else
-            ubc_upl_abort_range(upl, at, PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
+            ubc_upl_abort_range(upl, at, (upl_size_t)run * PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
     }
-}
-
-static bool
-pages_fresh(struct virtiofs_node *np, upl_t upl, upl_page_info_t *pl, int count, off_t first, off_t at,
-            const char *buf, uint32_t written, uint32_t len, off_t old, off_t size)
-{
-    off_t reach = at + written, tail = old & ~(off_t)PAGE_MASK;
-    vm_offset_t addr = 0;
-    bool cached = false;
-    int error = 0;
-
-    for (int i = 0; i < count; i++)
-        cached |= upl_valid_page(pl, i);
-    if (!cached)
-        return true;
-    if (ubc_upl_map(upl, &addr) != KERN_SUCCESS)
-        return false;
-    for (int i = 0; i < count; i++) {
-        off_t page = first + (off_t)i * PAGE_SIZE, from = MAX(page, at), to = MIN(page + PAGE_SIZE, reach);
-        if (!upl_valid_page(pl, i))
-            continue;
-        if (page == tail && size > old)
-            memset((char *)addr + (old - first), 0, (size_t)(page + PAGE_SIZE - old));
-        if (from < to)
-            memcpy((char *)addr + (from - first), buf + (from - at), (size_t)(to - from));
-    }
-    ubc_upl_unmap(upl);
-    for (int i = 0; i < count && !error; i++) {
-        off_t page = first + (off_t)i * PAGE_SIZE, to = MIN(MIN(page + PAGE_SIZE, at + (off_t)len), old);
-        if (upl_valid_page(pl, i))
-            error = page_fill(np, upl, first, MAX(page, reach), to);
-    }
-    return !error;
 }
 
 static void
@@ -1508,8 +1479,11 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     vnode_t vp = np->vp;
     upl_t upl = NULL;
     upl_page_info_t *pl = NULL;
-    int flags = UPL_SET_LITE | UPL_WILL_MODIFY;
+    vm_offset_t addr = 0;
+    bool cached = false;
+    int error = 0;
 
+    *written = 0;
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
     np->flags |= VN_SIZING;
@@ -1519,14 +1493,24 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     off_t first = MIN(at, old) & ~(off_t)PAGE_MASK;
     off_t end = MIN((off_t)round_page_64(at + len), (off_t)round_page_64(old));
     int count = first < end ? (int)((end - first) / PAGE_SIZE) : 0;
-    int error = 0;
-    if (count && ubc_create_upl(vp, first, (int)(end - first), &upl, &pl, flags) != KERN_SUCCESS)
+    if (count && ubc_create_upl(vp, first, (int)(end - first), &upl, &pl, HOLD_PAGES) != KERN_SUCCESS)
         error = ENOMEM;
-    *written = 0;
+    for (int i = 0; upl && i < count; i++)
+        cached |= upl_valid_page(pl, i);
+    if (cached && at > old)
+        error = page_fill(np, upl, first, old, MIN(first + PAGE_SIZE, at));
+    if (!error && cached && ubc_upl_map(upl, &addr) != KERN_SUCCESS)
+        error = ENOMEM;
     if (!error)
         error = write_batch(np, ctx, fh, at, buf, len, written);
-    off_t size = *written ? MAX(old, at + *written) : old;
-    bool fresh = !upl || pages_fresh(np, upl, pl, count, first, at, buf, *written, len, old, size);
+    off_t reach = at + *written, size = *written ? MAX(old, reach) : old;
+    for (int i = 0; addr && i < count; i++) {
+        off_t page = first + (off_t)i * PAGE_SIZE, from = MAX(page, at), to = MIN(page + PAGE_SIZE, reach);
+        if (upl_valid_page(pl, i) && from < to)
+            memcpy((char *)addr + (from - first), buf + (from - at), (size_t)(to - from));
+    }
+    if (addr)
+        ubc_upl_unmap(upl);
     IOLockLock(vmp->lock);
     np->attr.size = (uint64_t)size;
     np->attr_version = ++vmp->version;
@@ -1535,9 +1519,7 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     if (size > old)
         ubc_setsize(vp, size);
     if (upl)
-        pages_release(vp, upl, pl, first, count, fresh);
-    if (!fresh)
-        ubc_msync(vp, first, end, NULL, UBC_INVALIDATE);
+        pages_release(vp, upl, pl, first, count, *written != 0);
     IOLockLock(vmp->lock);
     wake(np, VN_SIZING);
     IOLockUnlock(vmp->lock);
