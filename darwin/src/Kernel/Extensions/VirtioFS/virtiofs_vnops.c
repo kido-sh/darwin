@@ -783,14 +783,17 @@ static void
 whandle_adopt(struct virtiofs_node *np, uint64_t fh, thread_t creator, bool open)
 {
     IOLockLock(np->vmp->lock);
+    if (creator)
+        wait_clear(np, VN_WOPENING);
     bool adopt = !(np->flags & (VN_WOPEN | VN_WOPENING));
     if (adopt) {
         np->wfh = fh;
         np->flags |= VN_WOPEN;
-        np->creator = creator;
     } else {
         np->releasing++;
     }
+    if (creator)
+        np->creator = creator;
     if (open)
         np->wopens++;
     IOLockUnlock(np->vmp->lock);
