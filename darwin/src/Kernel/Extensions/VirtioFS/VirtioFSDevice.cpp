@@ -658,7 +658,7 @@ VirtioFSDevice::startSession(struct virtiofs_session *session)
             fSession.max_io = io > kMaxIO ? kMaxIO : (io < kMinIO ? kMinIO : io & ~(kMinIO - 1));
             fSession.flags = reply.flags & init.flags;
             fStarted = true;
-            IOLog("VirtioFS: FUSE %u.%u, flags 0x%x, %u-byte I/O\n", reply.major, reply.minor, reply.flags,
+            IOLog("VirtioFS: FUSE %u.%u, flags 0x%x, %u-byte I/O\n", reply.major, reply.minor, fSession.flags,
                   fSession.max_io);
         }
     }
