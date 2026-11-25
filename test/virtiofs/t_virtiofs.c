@@ -503,6 +503,22 @@ as_user(uid_t uid, gid_t gid, char **paths)
 }
 
 static int
+mount_as(uid_t uid, gid_t gid, const char *spec, const char *dir)
+{
+    struct {
+        const char *fspec;
+    } args = { spec };
+    if (setgid(gid) != 0 || setuid(uid) != 0)
+        return 1;
+    if (mount("virtiofs", dir, MNT_RDONLY, &args) != 0) {
+        printf("mount: %s\n", strerror(errno));
+        return 0;
+    }
+    printf("mounted\n");
+    return unmount(dir, 0) != 0;
+}
+
+static int
 lookups(int times, char **paths)
 {
     struct stat st;
@@ -621,6 +637,8 @@ main(int argc, char **argv)
         return small_readdir(argv[2], atoi(argv[3]));
     if (argc >= 5 && !strcmp(argv[1], "as"))
         return as_user((uid_t)atoi(argv[2]), (gid_t)atoi(argv[3]), argv + 4);
+    if (argc == 6 && !strcmp(argv[1], "mount-as"))
+        return mount_as((uid_t)atoi(argv[2]), (gid_t)atoi(argv[3]), argv[4], argv[5]);
     if (argc >= 4 && !strcmp(argv[1], "lookups"))
         return lookups(atoi(argv[2]), argv + 3);
     fprintf(stderr, "usage: t_virtiofs tree DIR | errors MNT SPEC | stress DIR THREADS ROUNDS | bench FILE |"

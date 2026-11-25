@@ -103,6 +103,9 @@ check "mount kido:empty" guest /sbin/mount -t virtiofs -o ro kido:empty /mnt/emp
 check "mount the device root" guest /sbin/mount -t virtiofs -o ro kido /mnt/root
 check "an unknown tag is refused" fails guest /sbin/mount -t virtiofs -o ro nope:data /mnt/x
 check "an unknown share is refused" fails guest /sbin/mount -t virtiofs -o ro kido:nope /mnt/x
+guest /bin/sh -c 'mkdir -p /tmp/u501 && chown 501:20 /tmp/u501'
+check "a user other than root cannot mount a share" prints "mount: Operation not permitted" \
+  guest /tmp/t_virtiofs mount-as 501 20 kido:data /tmp/u501
 guest /sbin/mount | grep virtiofs
 
 guest /tmp/t_virtiofs tree /mnt/data > "$work/tree.guest"

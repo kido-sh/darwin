@@ -101,6 +101,8 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
     char spec[VIRTIOFS_TAG_MAX + 1 + VIRTIOFS_NAME_MAX + 1];
     char tag[VIRTIOFS_TAG_MAX + 1];
 
+    if (vfs_context_suser(ctx))
+        return EPERM;
     if (vfs_isupdate(mp))
         return ENOTSUP;
     if (!vfs_isrdonly(mp))
