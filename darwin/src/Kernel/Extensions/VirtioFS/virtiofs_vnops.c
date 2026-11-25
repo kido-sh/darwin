@@ -1241,6 +1241,8 @@ virtiofs_vnop_close(struct vnop_close_args *ap)
         return 0;
     int error = (ap->a_fflag & FWRITE) ? push_dirty(ap->a_vp) : 0;
     file_closed(VTON(ap->a_vp), ap->a_fflag);
+    if (ap->a_fflag & FREAD)
+        file_idle(VTON(ap->a_vp));
     return error;
 }
 
@@ -1517,6 +1519,7 @@ virtiofs_vnop_mnomap(struct vnop_mnomap_args *ap)
     VTON(vp)->flags &= ~(VN_MAPPED | VN_MAPPED_WRITE);
     IOLockUnlock(VTON(vp)->vmp->lock);
     whandle_close(VTON(vp), false);
+    file_idle(VTON(vp));
     return error;
 }
 
