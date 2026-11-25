@@ -953,6 +953,25 @@ virtiofs_vnop_fsync(__unused struct vnop_fsync_args *ap)
     return 0;
 }
 
+static int
+virtiofs_vnop_ioctl(struct vnop_ioctl_args *ap)
+{
+    vnode_t vp = ap->a_vp;
+    struct radvisory *ra = (struct radvisory *)ap->a_data;
+    struct fuse_attr attr;
+
+    if (ap->a_command != F_RDADVISE)
+        return ENOTSUP;
+    if (!vnode_isreg(vp))
+        return EINVAL;
+    int error = node_attr(VTON(vp), ap->a_context, &attr);
+    if (error)
+        return error;
+    if (ra->ra_offset >= (off_t)attr.size)
+        return EFBIG;
+    return advisory_read(vp, (off_t)attr.size, ra->ra_offset, ra->ra_count);
+}
+
 static uint8_t
 dirent_type(uint32_t type)
 {
@@ -1197,6 +1216,7 @@ static const struct vnodeopv_entry_desc virtiofs_vnodeop_entries[] = {
     { &vnop_strategy_desc, (VOPFUNC)virtiofs_vnop_strategy },
     { &vnop_mmap_desc, (VOPFUNC)virtiofs_vnop_mmap },
     { &vnop_fsync_desc, (VOPFUNC)virtiofs_vnop_fsync },
+    { &vnop_ioctl_desc, (VOPFUNC)virtiofs_vnop_ioctl },
     { &vnop_readdir_desc, (VOPFUNC)virtiofs_vnop_readdir },
     { &vnop_readlink_desc, (VOPFUNC)virtiofs_vnop_readlink },
     { &vnop_pathconf_desc, (VOPFUNC)virtiofs_vnop_pathconf },
