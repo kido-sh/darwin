@@ -30,6 +30,7 @@ struct virtiofs_mount {
     int case_sensitive;
     struct virtiofs_bucket *hash;
     struct virtiofs_bucket *names;
+    char *spare;
     TAILQ_HEAD(virtiofs_idle, virtiofs_node) idle;
 };
 
@@ -47,6 +48,7 @@ int virtiofs_call(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs
 void virtiofs_submit(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_call *call, virtiofs_done_t done,
                      void *arg);
 uint64_t virtiofs_version(struct virtiofs_mount *vmp);
+uint32_t virtiofs_batch_size(struct virtiofs_mount *vmp);
 void virtiofs_vnode_push(vnode_t vp);
 int virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry, uint64_t version,
                       uint64_t nlookup, vnode_t dvp, struct componentname *cnp, vnode_t *vpp);

@@ -31,6 +31,7 @@
 #define DIRENT64_LEN(namlen) ((sizeof(struct direntry) + (namlen) - (MAXPATHLEN - 1) + 7) & ~7)
 #define READDIR_MIN          4096
 #define WRITE_DEPTH          8
+#define BATCH_SMALL          32768
 #define HOLD_PAGES           (UPL_SET_LITE | UPL_WILL_MODIFY)
 #define NODE_IDENTITY        (VNODE_ATTR_va_fsid | VNODE_ATTR_va_fsid64 | VNODE_ATTR_va_fileid)
 
@@ -1430,10 +1431,44 @@ virtiofs_vnop_getattr(struct vnop_getattr_args *ap)
     return 0;
 }
 
+uint32_t
+virtiofs_batch_size(struct virtiofs_mount *vmp)
+{
+    return vmp->session.max_io * WRITE_DEPTH;
+}
+
 static uint32_t
 batch_room(struct virtiofs_node *np, uio_t uio)
 {
-    return (uint32_t)MIN((user_ssize_t)np->vmp->session.max_io * WRITE_DEPTH, uio_resid(uio));
+    return (uint32_t)MIN((user_ssize_t)virtiofs_batch_size(np->vmp), uio_resid(uio));
+}
+
+static char *
+batch_get(struct virtiofs_mount *vmp, uint32_t room)
+{
+    if (room <= BATCH_SMALL)
+        return IOMalloc(room);
+    IOLockLock(vmp->lock);
+    char *buf = vmp->spare;
+    vmp->spare = NULL;
+    IOLockUnlock(vmp->lock);
+    return buf ? buf : IOMalloc(virtiofs_batch_size(vmp));
+}
+
+static void
+batch_put(struct virtiofs_mount *vmp, char *buf, uint32_t room)
+{
+    if (room > BATCH_SMALL) {
+        IOLockLock(vmp->lock);
+        bool spare = !vmp->spare;
+        if (spare)
+            vmp->spare = buf;
+        IOLockUnlock(vmp->lock);
+        buf = spare ? NULL : buf;
+        room = virtiofs_batch_size(vmp);
+    }
+    if (buf)
+        IOFree(buf, room);
 }
 
 static int
@@ -1450,7 +1485,7 @@ static int
 read_user(struct virtiofs_node *np, uio_t uio, off_t size, int ioflag)
 {
     uint32_t room = (uint32_t)MIN((off_t)batch_room(np, uio), MAX(size - uio_offset(uio), 1));
-    char *buf = IOMalloc(room);
+    char *buf = batch_get(np->vmp, room);
     uio_t part = buf ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
     int error = part ? 0 : ENOMEM;
 
@@ -1467,8 +1502,7 @@ read_user(struct virtiofs_node *np, uio_t uio, off_t size, int ioflag)
     }
     if (part)
         uio_free(part);
-    if (buf)
-        IOFree(buf, room);
+    batch_put(np->vmp, buf, room);
     return error;
 }
 
@@ -1679,7 +1713,7 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     if (!error && uio_resid(uio) > VIRTIOFS_SIZE_MAX - start)
         error = EFBIG;
     uint32_t room = batch_room(np, uio);
-    char *buf = error ? NULL : IOMalloc(room);
+    char *buf = error ? NULL : batch_get(np->vmp, room);
     if (!error && !buf)
         error = ENOMEM;
     while (!error && uio_resid(uio) > 0) {
@@ -1695,8 +1729,7 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
             break;
         }
     }
-    if (buf)
-        IOFree(buf, room);
+    batch_put(np->vmp, buf, room);
     if (uio_offset(uio) > start)
         error = (ap->a_ioflag & IO_SYNC) ? write_sync(np, ctx, fh, FUSE_FSYNC) : 0;
     whandle_put(np);

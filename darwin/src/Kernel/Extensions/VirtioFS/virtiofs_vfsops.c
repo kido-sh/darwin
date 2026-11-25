@@ -120,6 +120,8 @@ mount_free(struct virtiofs_mount *vmp)
         IOFree(vmp->hash, buckets);
     if (vmp->names)
         IOFree(vmp->names, buckets);
+    if (vmp->spare)
+        IOFree(vmp->spare, virtiofs_batch_size(vmp));
     if (vmp->lock)
         IOLockFree(vmp->lock);
     if (vmp->move_lock)
