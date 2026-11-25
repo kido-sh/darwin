@@ -30,8 +30,9 @@ virtiofs_errno(int32_t fuse_error)
     if (fuse_error > 0 || fuse_error <= -(int32_t)sizeof(from_linux))
         return EIO;
     int linux_errno = -fuse_error;
-    if (from_linux[linux_errno])
-        return from_linux[linux_errno];
+    int mapped = from_linux[linux_errno];
+    if (mapped)
+        return mapped;
     return linux_errno <= ERANGE ? linux_errno : EIO;
 }
 

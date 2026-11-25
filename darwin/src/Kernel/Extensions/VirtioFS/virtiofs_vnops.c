@@ -2447,9 +2447,11 @@ entry_reply(struct virtiofs_node *dnp, vfs_context_t ctx, struct virtiofs_call *
     error = virtiofs_call(dnp->vmp, ctx, c);
     bool alone;
     uint64_t version = dir_changed(dnp, cnp, before, &alone);
-    bool ok = !error && c->replylen == want && virtiofs_entry_ok(entry) && (!answered || S_ISREG(entry->attr.mode));
-    if (answered)
+    bool ok = !error && c->replylen == want && virtiofs_entry_ok(entry);
+    if (answered) {
+        ok = ok && S_ISREG(entry->attr.mode);
         *answered = ok;
+    }
     if (!error && !ok) {
         if (c->replylen == want && entry->nodeid)
             forget(dnp->vmp, entry->nodeid, 1);
