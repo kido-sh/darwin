@@ -351,7 +351,7 @@ room() {
 }
 refused_kept() {
   local holder status byte
-  dd if=/dev/zero of="$full/stored" bs=1 count=0 seek=65536 2>/dev/null
+  dd if=/dev/zero of="$full/stored" bs=1 count=0 seek=$((129 << 14)) 2>/dev/null
   guest /tmp/t_virtiofs map-fail /mnt/full/stored 3 > "$work/map-fail.out" 2>&1 &
   holder=$!
   sleep 1
@@ -360,13 +360,13 @@ refused_kept() {
   room
   wait $holder
   status=$?
-  byte=$(dd if="$full/stored" bs=1 skip=20000 count=1 2>/dev/null)
-  echo "on a volume of this Mac that ran full: $(cat "$work/map-fail.out"), and this Mac reads $byte"
-  [[ $status == 0 && $byte == $(sed -n 's/.*the store reads \(.\),.*/\1/p' "$work/map-fail.out") ]]
+  byte=$(dd if="$full/stored" bs=1 skip=$((16384 + 5000 + (127 << 14))) count=1 2>/dev/null)
+  echo "on a volume of this Mac that ran full: $(cat "$work/map-fail.out"), and this Mac reads $byte for the last"
+  [[ $status == 0 && $byte == $(sed -n 's/.*the last reads \(.\),.*/\1/p' "$work/map-fail.out") ]]
 }
 unpushed_kept() {
   local holder status byte mode
-  dd if=/dev/zero of="$full/unpushed" bs=1 count=0 seek=16384 2>/dev/null
+  dd if=/dev/zero of="$full/unpushed" bs=1 count=0 seek=$((128 << 14)) 2>/dev/null
   guest /tmp/t_virtiofs map-unpushed /mnt/full/unpushed 3 > "$work/unpushed.out" 2>&1 &
   holder=$!
   sleep 1
@@ -377,14 +377,16 @@ unpushed_kept() {
   wait $holder
   status=$?
   sleep 0.5
-  byte=$(dd if="$full/unpushed" bs=1 skip=100 count=1 2>/dev/null) mode=$(stat -f %Lp "$full/unpushed")
-  echo "a store whose pushes failed until its mapping was gone: $(cat "$work/unpushed.out"), then this Mac made the" \
-    "file mode $mode and room, and after sync(2) it reads $byte"
-  [[ $status == 0 && $byte == k && $mode == 444 ]]
+  byte=$(for page in 0 63 127; do dd if="$full/unpushed" bs=1 skip=$((100 + (page << 14))) count=1 2>/dev/null; done)
+  mode=$(stat -f %Lp "$full/unpushed")
+  echo "stores whose pushes failed until their mapping was gone: $(cat "$work/unpushed.out"), then this Mac made the" \
+    "file mode $mode and room, and after sync(2) it reads $byte in the first, a middle and the last page"
+  [[ $status == 0 && $byte == kkk && $mode == 444 ]]
 }
 short_kept() {
-  local holder status wrong
+  local holder status wrong lead first
   dd if=/dev/zero of="$full/short" bs=1 count=0 seek=$((2 << 20)) 2>/dev/null
+  head -c $((1 << 20)) /dev/zero | tr '\0' p > "$work/written"
   head -c $((640 << 10)) /dev/urandom > "$full/slack"
   fill
   rm -f "$full/slack"
@@ -393,12 +395,16 @@ short_kept() {
   guest /tmp/t_virtiofs short-write /mnt/full/short 2 > "$work/short.out" 2>&1 &
   holder=$!
   sleep 1.2
+  lead=$(cmp "$work/written" "$full/short" 2>/dev/null | sed -n 's/.*char \([0-9]*\),.*/\1/p')
+  lead=$((${lead:-1048577} - 1))
   room
   wait $holder
   status=$?
-  wrong=$(head -c $((1 << 20)) "$full/short" | tr -d p | wc -c | tr -d ' ')
-  echo "on a volume of this Mac with 640 KiB free: $(cat "$work/short.out"), $wrong bytes differ on this Mac"
-  [[ $status == 0 && $wrong == 0 ]]
+  first=$(sed -n 's/.*returned \(-*[0-9]*\) .*/\1/p' "$work/short.out")
+  wrong=$(cmp -l "$work/written" "$full/short" 2>/dev/null | wc -l | tr -d ' ')
+  echo "on a volume of this Mac with 640 KiB free: $(cat "$work/short.out"), this Mac held $lead bytes of it before" \
+    "there was room and $wrong bytes differ after"
+  [[ $status == 0 && $wrong == 0 && $lead -ge ${first:-0} && $lead -lt $((${first:-0} + 131072)) ]]
 }
 idle_kept() {
   local was held

@@ -653,8 +653,8 @@ store_loop(const char *path, const char *other, int seconds)
     atomic_store(&a.stop, 1);
     pthread_join(t, NULL);
     int rc = msync((void *)counter, 16384, MS_SYNC) != 0;
-    uint32_t held = counter[25];
-    int host = open(other, O_RDONLY);
+    uint32_t kept = counter[25];
+    int held = open(other, O_RDONLY), host = open(other, O_RDONLY);
     rc |= host < 0 || pread(host, &onfile, sizeof(onfile), 100) != sizeof(onfile);
     struct stat st;
     size_t appended = fstat(host, &st) == 0 && st.st_size > (off_t)sizeof(page) ? (size_t)st.st_size - sizeof(page) : 0;
@@ -664,58 +664,72 @@ store_loop(const char *path, const char *other, int seconds)
         wrong += tail[i] != 'a';
     free(tail);
     printf("a counter stored to in a tight loop beside %ld appends: %u stores, %u in memory, %u on the Mac, %zu bytes "
-           "appended since the last truncation, %zu of them wrong\n", a.appends, done, held, onfile, appended, wrong);
+           "appended since the last truncation, %zu of them wrong\n", a.appends, done, kept, onfile, appended, wrong);
     munmap((void *)counter, 16384);
     close(host);
+    close(held);
     close(a.fd);
     close(fd);
-    return rc || a.failed || a.appends == 0 || held != done || onfile != done || appended == 0 || wrong != 0;
+    return rc || a.failed || a.appends == 0 || kept != done || onfile != done || appended == 0 || wrong != 0;
 }
+
+enum { FULL_PAGES = 128 };
 
 static int
 map_fail(const char *path, int seconds)
 {
-    static char data[32768];
+    size_t size = (size_t)FULL_PAGES * 16384;
+    char *data = malloc(size);
     int fd = open(path, O_RDWR);
-    volatile char *map = fd < 0 ? MAP_FAILED : mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    volatile char *map = fd < 0 || !data ? MAP_FAILED : mmap(NULL, 16384 + size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) {
         printf("open and map %s: %s\n", path, strerror(errno));
         return 1;
     }
-    memset(data, 'w', sizeof(data));
-    map[20000] = 'm';
+    memset(data, 'w', size);
+    for (int i = 0; i < FULL_PAGES; i++)
+        map[16384 + 5000 + (off_t)i * 16384] = 'm';
     sleep((unsigned)seconds);
-    ssize_t wrote = pwrite(fd, data, sizeof(data), 16384);
-    int refused = wrote < 0 ? errno : 0;
-    char want = wrote > 20000 - 16384 ? 'w' : 'm', kept = map[20000];
+    ssize_t wrote = pwrite(fd, data, size, 16384);
+    int refused = wrote < 0 ? errno : 0, kept = 0;
+    for (int i = 0; i < FULL_PAGES; i++) {
+        off_t at = 5000 + (off_t)i * 16384;
+        kept += map[16384 + at] == (wrote > at ? 'w' : 'm');
+    }
+    char last = map[16384 + 5000 + (off_t)(FULL_PAGES - 1) * 16384];
     int pushed = fsync(fd), unpushed = pushed ? errno : 0;
     sleep((unsigned)seconds);
     int again = fsync(fd);
-    printf("a write over a stored page returned %zd (%s) and the store reads %c, fsync then said %s and later %s\n", wrote,
-           strerror(refused), kept, strerror(unpushed), again ? strerror(errno) : "ok");
-    munmap((void *)map, 65536);
+    printf("a write over %d stored pages returned %zd (%s), %d of the stores read as they should and the last reads %c, "
+           "fsync then said %s and later %s\n", FULL_PAGES, wrote, strerror(refused), kept, last, strerror(unpushed),
+           again ? strerror(errno) : "ok");
+    munmap((void *)map, 16384 + size);
     close(fd);
-    return !(wrote < (ssize_t)sizeof(data) && kept == want && pushed != 0 && again == 0);
+    free(data);
+    return !(wrote < (ssize_t)size && kept == FULL_PAGES && pushed != 0 && again == 0);
 }
 
 static int
 map_unpushed(const char *path, int seconds)
 {
+    size_t size = (size_t)FULL_PAGES * 16384;
     int fd = open(path, O_RDWR), reader = open(path, O_RDONLY);
-    volatile char *map = fd < 0 ? MAP_FAILED : mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    volatile char *map = fd < 0 ? MAP_FAILED : mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED || reader < 0) {
         printf("open and map %s: %s\n", path, strerror(errno));
         return 1;
     }
     close(fd);
     sleep((unsigned)seconds);
-    map[100] = 'k';
+    for (int i = 0; i < FULL_PAGES; i++)
+        map[100 + (off_t)i * 16384] = 'k';
     int pushed = fsync(reader), unpushed = pushed ? errno : 0;
-    munmap((void *)map, 16384);
+    munmap((void *)map, size);
     close(reader);
     sleep((unsigned)seconds);
     sync();
-    printf("fsync of a store said %s before the mapping and the last descriptor went away\n", strerror(unpushed));
+    printf("fsync of stores to %d pages said %s before the mapping and the last descriptor went away\n", FULL_PAGES,
+           strerror(unpushed));
     return pushed == 0;
 }
 
@@ -1833,10 +1847,10 @@ static bool
 on_host(const char *name, off_t at, char want)
 {
     char back = 0;
-    int fd = peer_open(name, O_RDONLY);
+    int held = peer_open(name, O_RDONLY), fd = peer_open(name, O_RDONLY);
     bool same = fd >= 0 && pread(fd, &back, 1, at) == 1 && back == want;
-    if (fd >= 0)
-        close(fd);
+    close(fd);
+    close(held);
     return same;
 }
 
@@ -2298,6 +2312,10 @@ rw_edge(const char *dir, const char *other)
 
     peer = other;
     CHECK(mkdir(dir, 0755) == 0 && chdir(dir) == 0, "mkdir %s: %s", dir, strerror(errno));
+    fd = open("view", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    CHECK(fd >= 0 && pwrite(fd, "1", 1, 0) == 1 && on_host("view", 0, '1') && pwrite(fd, "2", 1, 0) == 1 &&
+          on_host("view", 0, '2'), "the second mount does not show at once what the first one wrote: %s", strerror(errno));
+    close(fd);
     fd = open("readonly-made", O_WRONLY | O_CREAT | O_EXCL, 0444);
     CHECK(fd >= 0 && write(fd, "abc", 3) == 3 && close(fd) == 0, "a file created read-only is written by its creator: %s",
           strerror(errno));
