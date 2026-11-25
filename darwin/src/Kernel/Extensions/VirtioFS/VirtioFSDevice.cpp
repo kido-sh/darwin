@@ -308,8 +308,14 @@ VirtioFSDevice::pauseLocked(void *event)
     }
 }
 
+static bool
+slotReplied(void *slot)
+{
+    return __atomic_load_n(&((VirtioFSSlot *)slot)->replied, __ATOMIC_RELAXED);
+}
+
 void
-VirtioFSDevice::spinLocked(VirtioFSSlot *slot, uint32_t datalen)
+VirtioFSDevice::spinLocked(virtiofs_poll_t done, void *arg, uint32_t datalen)
 {
     VirtQueue *vq = &fQueues[kRequests];
     volatile VRingUsedHdr *used = (volatile VRingUsedHdr *)vq->used;
@@ -322,10 +328,10 @@ VirtioFSDevice::spinLocked(VirtioFSSlot *slot, uint32_t datalen)
     nanoseconds_to_absolutetime(((uint64_t)spin + datalen / 2048) * 1000, &limit);
     limit += mach_absolute_time();
     bool ready = true;
-    while (ready && !slot->replied && !fDead) {
+    while (ready && !done(arg) && !fDead && mach_absolute_time() < limit) {
         unlockAndReap();
-        while (!(ready = used->idx != __atomic_load_n(&vq->lastUsedIdx, __ATOMIC_RELAXED)) &&
-               !__atomic_load_n(&slot->replied, __ATOMIC_RELAXED) && mach_absolute_time() < limit)
+        while (!(ready = used->idx != __atomic_load_n(&vq->lastUsedIdx, __ATOMIC_RELAXED)) && !done(arg) &&
+               mach_absolute_time() < limit)
             __builtin_arm_yield();
         IOLockLock(fLock);
         if (ready)
@@ -543,7 +549,7 @@ VirtioFSDevice::call(struct virtiofs_call *c, uint32_t uid, uint32_t gid, uint32
     IOLockLock(fLock);
     VirtioFSSlot *slot = startLocked(c, &r, uid, gid, pid, false, NULL, NULL);
     if (slot) {
-        spinLocked(slot, c->datalen);
+        spinLocked(slotReplied, slot, c->datalen);
         while (!slot->replied && !fQuiesced)
             pauseLocked(slot);
         if (slot->replied) {
@@ -592,6 +598,14 @@ VirtioFSDevice::unlockAndReap()
         IOLockUnlock(fLock);
         done(arg, error);
     }
+}
+
+void
+VirtioFSDevice::poll(virtiofs_poll_t done, void *arg, uint32_t datalen)
+{
+    IOLockLock(fLock);
+    spinLocked(done, arg, datalen);
+    unlockAndReap();
 }
 
 void
@@ -705,6 +719,12 @@ void
 virtiofs_dev_forget(struct virtiofs_dev *dev, uint64_t nodeid, uint64_t nlookup)
 {
     ((VirtioFSDevice *)dev)->forget(nodeid, nlookup);
+}
+
+void
+virtiofs_dev_poll(struct virtiofs_dev *dev, virtiofs_poll_t done, void *arg, uint32_t datalen)
+{
+    ((VirtioFSDevice *)dev)->poll(done, arg, datalen);
 }
 
 }

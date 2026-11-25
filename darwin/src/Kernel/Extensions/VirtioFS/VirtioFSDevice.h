@@ -29,6 +29,7 @@ public:
     int call(struct virtiofs_call *call, uint32_t uid, uint32_t gid, uint32_t pid);
     void submit(struct virtiofs_call *call, virtiofs_done_t done, void *arg);
     void forget(uint64_t nodeid, uint64_t nlookup);
+    void poll(virtiofs_poll_t done, void *arg, uint32_t datalen);
 
 private:
     bool setupQueues();
@@ -38,7 +39,7 @@ private:
     void drainLocked(unsigned q);
     void failLocked(bool broken);
     void pauseLocked(void *event);
-    void spinLocked(VirtioFSSlot *slot, uint32_t datalen);
+    void spinLocked(virtiofs_poll_t done, void *arg, uint32_t datalen);
     void unlockAndReap();
     VirtioFSSlot *takeSlotLocked();
     void putSlotLocked(VirtioFSSlot *slot);
