@@ -1458,13 +1458,13 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     if (buf)
         IOFree(buf, room);
     off_t end = uio_offset(uio);
-    if (end > start)
-        error = (ap->a_ioflag & IO_SYNC) ? write_sync(np, ctx, fh, FUSE_FSYNC) : 0;
-    whandle_put(np);
     if (reach > start)
         node_changed(np, start, reach, end > start ? end : 0, false);
     else
         node_skip(np, 0, 0);
+    if (end > start)
+        error = (ap->a_ioflag & IO_SYNC) ? write_sync(np, ctx, fh, FUSE_FSYNC) : 0;
+    whandle_put(np);
     IOLockUnlock(np->wlock);
     return error;
 }
