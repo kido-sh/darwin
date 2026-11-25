@@ -1638,11 +1638,10 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     sizing_after_waiters(np);
     readers_wait_locked(np);
     off_t old = (off_t)np->attr.size;
-    bool mapped = np->flags & VN_MAPPED;
     IOLockUnlock(vmp->lock);
     off_t first = MIN(at, old) & ~(off_t)PAGE_MASK;
     off_t past = (off_t)round_page_64(old), last = (off_t)round_page_64(at + len);
-    off_t end = mapped && at <= past && pages_cached(vp, past, last) ? last : MIN(last, past);
+    off_t end = at <= first + PAGE_SIZE && pages_cached(vp, past, last) ? last : MIN(last, past);
     int count = first < end ? (int)((end - first) / PAGE_SIZE) : 0;
     if (count && ubc_create_upl(vp, first, (int)(end - first), &upl, &pl, HOLD_PAGES) != KERN_SUCCESS)
         error = ENOMEM;
