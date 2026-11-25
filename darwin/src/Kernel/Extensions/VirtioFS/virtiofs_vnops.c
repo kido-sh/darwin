@@ -32,6 +32,7 @@
 #define READDIR_MIN          4096
 #define WRITE_DEPTH          8
 #define HOLD_PAGES           (UPL_SET_LITE | UPL_WILL_MODIFY)
+#define NODE_IDENTITY        (VNODE_ATTR_va_fsid | VNODE_ATTR_va_fsid64 | VNODE_ATTR_va_fileid)
 
 enum {
     VN_BUILDING = 0x01,
@@ -466,6 +467,15 @@ node_size(struct virtiofs_node *np)
     off_t size = (off_t)np->attr.size;
     IOLockUnlock(np->vmp->lock);
     return size;
+}
+
+static uint64_t
+node_ino(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    uint64_t ino = np->attr.ino;
+    IOLockUnlock(np->vmp->lock);
+    return ino;
 }
 
 static bool
@@ -1353,6 +1363,11 @@ virtiofs_vnop_getattr(struct vnop_getattr_args *ap)
     kauth_cred_t cred = vfs_context_ucred(ap->a_context);
     struct fuse_attr attr;
 
+    if (!(vap->va_active & ~NODE_IDENTITY)) {
+        VATTR_RETURN(vap, va_fileid, node_ino(np));
+        VATTR_RETURN(vap, va_fsid, vfs_statfs(vnode_mount(vp))->f_fsid.val[0]);
+        return 0;
+    }
     int error = node_attr(np, ap->a_context, &attr);
     if (error)
         return error;
