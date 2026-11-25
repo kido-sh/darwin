@@ -1828,6 +1828,8 @@ virtiofs_vnop_ioctl(struct vnop_ioctl_args *ap)
         return EINVAL;
     IOLockLock(np->vmp->lock);
     bool reading = node_used_locked(np) && (np->flags & VN_OPEN);
+    if (reading)
+        np->users++;
     IOLockUnlock(np->vmp->lock);
     if (!reading)
         return 0;
@@ -1837,6 +1839,8 @@ virtiofs_vnop_ioctl(struct vnop_ioctl_args *ap)
         error = ra->ra_offset >= size ? EFBIG : advisory_read(vp, size, ra->ra_offset, ra->ra_count);
         reader_end(np);
     }
+    handle_put(np);
+    file_idle(np);
     return error;
 }
 
