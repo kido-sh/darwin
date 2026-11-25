@@ -516,6 +516,28 @@ as_user(uid_t uid, gid_t gid, char **paths)
 }
 
 static int
+read_close(const char *path, int rounds)
+{
+    static char buf[128 << 10];
+    long failures = 0;
+    off_t at = 0;
+
+    for (int r = 0; r < rounds; r++) {
+        int fd = open(path, O_RDONLY);
+        for (int i = 0; fd >= 0 && i < 4; i++, at += (off_t)sizeof(buf)) {
+            if (pread(fd, buf, sizeof(buf), at) != (ssize_t)sizeof(buf))
+                failures++;
+        }
+        if (fd < 0)
+            failures++;
+        else
+            close(fd);
+    }
+    printf("read-close: %d rounds of 512 KiB, %ld failures\n", rounds, failures);
+    return failures != 0;
+}
+
+static int
 classic_readdir(const char *dir)
 {
     struct old_dirent {
@@ -684,6 +706,8 @@ main(int argc, char **argv)
         return small_readdir(argv[2], atoi(argv[3]));
     if (argc >= 5 && !strcmp(argv[1], "as"))
         return as_user((uid_t)atoi(argv[2]), (gid_t)atoi(argv[3]), argv + 4);
+    if (argc == 4 && !strcmp(argv[1], "read-close"))
+        return read_close(argv[2], atoi(argv[3]));
     if (argc == 3 && !strcmp(argv[1], "classic-readdir"))
         return classic_readdir(argv[2]);
     if (argc == 6 && !strcmp(argv[1], "mount-as"))

@@ -112,6 +112,7 @@ check "a user other than root cannot mount a share" prints "mount: Operation not
   guest /tmp/t_virtiofs mount-as 501 20 kido:data /tmp/u501
 guest /sbin/mount | grep virtiofs
 
+check "files closed while their reads are in flight" guest /tmp/t_virtiofs read-close /mnt/data/big/64m 128
 guest /tmp/t_virtiofs tree /mnt/data > "$work/tree.guest"
 check "the guest sees the same tree as this Mac" diff -u "$work/tree.host" "$work/tree.guest"
 check "the empty share is empty" prints "" guest /bin/ls -A /mnt/empty
