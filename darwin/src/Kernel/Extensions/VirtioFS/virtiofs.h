@@ -24,7 +24,7 @@ struct virtiofs_mount {
     IOLock *lock;
     IOLock *move_lock;
     uint64_t rootid;
-    uint64_t attr_version;
+    uint64_t version;
     vnode_t root;
     struct virtiofs_bucket hash[1 << VIRTIOFS_HASH_BITS];
     struct virtiofs_bucket names[1 << VIRTIOFS_HASH_BITS];
@@ -39,6 +39,6 @@ extern struct vnodeopv_desc virtiofs_fifoop_opv_desc;
 int virtiofs_vfs_register(void);
 int virtiofs_vfs_unregister(void);
 int virtiofs_call(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_call *call);
-uint64_t virtiofs_attr_version(struct virtiofs_mount *vmp);
+uint64_t virtiofs_version(struct virtiofs_mount *vmp);
 int virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry, uint64_t version,
                       uint64_t nlookup, vnode_t dvp, struct componentname *cnp, vnode_t *vpp);

@@ -52,6 +52,7 @@ struct virtiofs_node {
     uint64_t attr_version;
     uint64_t parent;
     uint64_t entry_expire;
+    uint64_t name_version;
     char *name;
     uint32_t namelen;
     struct fuse_attr attr;
@@ -110,10 +111,10 @@ attr_changed(const struct fuse_attr *a, const struct fuse_attr *b)
 }
 
 uint64_t
-virtiofs_attr_version(struct virtiofs_mount *vmp)
+virtiofs_version(struct virtiofs_mount *vmp)
 {
     IOLockLock(vmp->lock);
-    uint64_t version = vmp->attr_version;
+    uint64_t version = vmp->version;
     IOLockUnlock(vmp->lock);
     return version;
 }
@@ -133,7 +134,7 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     bool changed = attr_changed(&np->attr, attr);
     np->attr = *attr;
     np->expire = deadline(sec, nsec);
-    np->attr_version = ++vmp->attr_version;
+    np->attr_version = ++vmp->version;
     if (!changed || !vnode_isreg(vp)) {
         IOLockUnlock(vmp->lock);
         return;
@@ -170,7 +171,7 @@ node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
         .opcode = FUSE_GETATTR, .nodeid = np->nodeid,
         .arg = { &in }, .arglen = { sizeof(in) }, .reply = &out, .replylen = sizeof(out),
     };
-    uint64_t version = virtiofs_attr_version(np->vmp);
+    uint64_t version = virtiofs_version(np->vmp);
     int error = virtiofs_call(np->vmp, ctx, &c);
     if (!error && (c.replylen != sizeof(out) || !virtiofs_attr_ok(&out.attr) ||
                    IFTOVT(out.attr.mode) != vnode_vtype(np->vp)))
@@ -325,7 +326,7 @@ virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry
     np->nlookup = nlookup;
     np->attr = entry->attr;
     np->expire = deadline(entry->attr_valid, entry->attr_valid_nsec);
-    np->attr_version = ++vmp->attr_version;
+    np->attr_version = ++vmp->version;
     np->flags = VN_BUILDING | VN_HASHED;
     LIST_INSERT_HEAD(head, np, link);
     IOLockUnlock(vmp->lock);
@@ -486,34 +487,46 @@ name_lookup(struct virtiofs_node *dnp, struct componentname *cnp)
 }
 
 static void
-name_remember(struct virtiofs_node *dnp, vnode_t vp, struct componentname *cnp, const struct fuse_entry_out *entry)
+name_remember(struct virtiofs_node *dnp, vnode_t vp, struct componentname *cnp, const struct fuse_entry_out *entry,
+              uint64_t version)
 {
     struct virtiofs_mount *vmp = dnp->vmp;
     struct virtiofs_node *np = VTON(vp), *other, *next;
     uint32_t len = (uint32_t)cnp->cn_namelen;
-
-    if (!virtiofs_entry_cache || (!entry->entry_valid && !entry->entry_valid_nsec))
-        return;
-    char *name = IOMalloc(len);
-    if (!name)
-        return;
-    memcpy(name, cnp->cn_nameptr, len);
+    bool keep = virtiofs_entry_cache && (entry->entry_valid || entry->entry_valid_nsec);
+    char *name = keep ? IOMalloc(len) : NULL;
     uint64_t expire = deadline(entry->entry_valid, entry->entry_valid_nsec);
-    struct virtiofs_bucket *head = name_bucket(vmp, dnp->nodeid, name, len);
+    struct virtiofs_bucket *head = name_bucket(vmp, dnp->nodeid, cnp->cn_nameptr, len);
+    bool newer = false;
 
+    if (name)
+        memcpy(name, cnp->cn_nameptr, len);
     IOLockLock(vmp->lock);
     LIST_FOREACH_SAFE(other, head, name_link, next) {
-        if (name_matches(other, dnp->nodeid, cnp))
+        if (!name_matches(other, dnp->nodeid, cnp))
+            continue;
+        if (other->name_version > version)
+            newer = true;
+        else
             name_drop_locked(other);
     }
-    name_drop_locked(np);
-    np->name = name;
-    np->namelen = len;
-    np->parent = dnp->nodeid;
-    np->entry_expire = expire;
-    np->flags |= VN_NAMED;
-    LIST_INSERT_HEAD(head, np, name_link);
+    if ((np->flags & VN_NAMED) && np->name_version > version)
+        newer = true;
+    else
+        name_drop_locked(np);
+    if (name && !newer) {
+        np->name = name;
+        np->namelen = len;
+        np->parent = dnp->nodeid;
+        np->entry_expire = expire;
+        np->name_version = ++vmp->version;
+        np->flags |= VN_NAMED;
+        LIST_INSERT_HEAD(head, np, name_link);
+        name = NULL;
+    }
     IOLockUnlock(vmp->lock);
+    if (name)
+        IOFree(name, len);
 }
 
 static int
@@ -524,7 +537,7 @@ lookup_name(struct virtiofs_node *dnp, vfs_context_t ctx, const char *name, uint
         .opcode = FUSE_LOOKUP, .nodeid = dnp->nodeid,
         .arg = { name, "" }, .arglen = { len, 1 }, .reply = entry, .replylen = sizeof(*entry),
     };
-    *version = virtiofs_attr_version(dnp->vmp);
+    *version = virtiofs_version(dnp->vmp);
     int error = virtiofs_call(dnp->vmp, ctx, &c);
     if (!error && c.replylen != sizeof(*entry))
         error = EIO;
@@ -572,7 +585,7 @@ virtiofs_vnop_lookup(struct vnop_lookup_args *ap)
     if (!error)
         error = virtiofs_node_get(dnp->vmp, &entry, version, 1, dvp, cnp, ap->a_vpp);
     if (!error)
-        name_remember(dnp, *ap->a_vpp, cnp, &entry);
+        name_remember(dnp, *ap->a_vpp, cnp, &entry, version);
     return error;
 }
 

@@ -40,7 +40,7 @@ static int
 root_entry(struct virtiofs_mount *vmp, const char *share, vfs_context_t ctx, struct fuse_entry_out *entry,
            uint64_t *version)
 {
-    *version = virtiofs_attr_version(vmp);
+    *version = virtiofs_version(vmp);
     if (*share) {
         struct virtiofs_call c = {
             .opcode = FUSE_LOOKUP, .nodeid = FUSE_ROOT_ID,
