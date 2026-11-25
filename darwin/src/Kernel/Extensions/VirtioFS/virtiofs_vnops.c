@@ -1423,7 +1423,7 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
         if (!error)
             uio_setoffset(uio, end);
     }
-    off_t start = uio_offset(uio), old = node_size(np), from = MIN(start, old);
+    off_t start = uio_offset(uio);
     if (!error)
         error = push_range(vp, start, start + uio_resid(uio));
     uint32_t room = (uint32_t)MIN((user_ssize_t)np->vmp->session.max_io * WRITE_DEPTH, uio_resid(uio));
@@ -1437,8 +1437,11 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
         off_t at = uio_offset(uio);
         error = uiomove(buf, (int)len, uio);
         if (!error) {
+            node_skip(np, start, at + len);
+            error = push_range(vp, at, at + len);
+        }
+        if (!error) {
             reach = at + len;
-            node_skip(np, from, reach);
             error = write_batch(np, ctx, fh, at, buf, len, &written);
         }
         if (error || written < len) {
@@ -1455,6 +1458,8 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     whandle_put(np);
     if (reach > start)
         node_changed(np, start, reach, end > start ? end : 0, false);
+    else
+        node_skip(np, 0, 0);
     IOLockUnlock(np->wlock);
     return error;
 }
