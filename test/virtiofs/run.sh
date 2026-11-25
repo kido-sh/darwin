@@ -8,8 +8,11 @@
 # times, link targets, hard links and contents read both with read and mmap. Then it checks the errors of a
 # read-only mount, reads every file from many threads at once, sees changes made on the Mac once the host's
 # one-second entry timeout has passed, and checks that the host releases what it opened for the guest: all
-# but a few files once the guest unmounts, and a file looked up 500 times once it is forgotten. It ends with
-# read and metadata timings. Needs a kido whose VMM attaches the directories named in KIDO_DEV_VIRTIOFS.
+# but a few files once the guest unmounts, and a file looked up 500 times once it is forgotten. On a
+# writable share the guest builds a tree that must come out on the Mac as the Mac itself builds it, its
+# errors and extended attributes must match the Mac's, and the Mac's permissions and read-only shares hold
+# for every change. It ends with read, write and metadata timings. Needs a kido whose VMM attaches the
+# directories named in KIDO_DEV_VIRTIOFS.
 # Each command in the container fails after TIMEOUT seconds (default 120). Uses a throwaway KIDO_HOME.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -55,8 +58,14 @@ owner_after() {
   [[ $(guest /bin/sh -c "/tmp/t_virtiofs as $1 $2 $paths >/dev/null; /tmp/t_virtiofs as $3 $4 $paths" |
     grep -c " uid=$3 gid=$4 ") == 3 ]]
 }
+host_open() {
+  lsof -p "$vm" 2>/dev/null | awk '$5 == "REG" || $5 == "DIR"' | grep -c "$1" || true
+}
+host_writing() {
+  lsof -p "$vm" 2>/dev/null | awk '$5 == "REG" && $4 ~ /[wu]$/' | grep -c "$1" || true
+}
 host_fds() {
-  lsof -p "$vm" 2>/dev/null | awk '$5 == "REG" || $5 == "DIR"' | grep -c "$share${1:-}" || true
+  host_open "$share${1:-}"
 }
 revoked() {
   local pause=$1 file=$2 mode=$3 was
@@ -88,6 +97,49 @@ held_open() {
   echo "a descriptor open across a refused open read: $(cat "$work/hold.out")"
   [[ $denied == 0 && $status == 0 ]]
 }
+ro_share_refuses() {
+  local out
+  out=$(guest /bin/sh -c 'mkdir -p /mnt/rwro && /sbin/mount -t virtiofs kido:data /mnt/rwro &&
+    /tmp/t_virtiofs ro-share /mnt/rwro; /sbin/umount /mnt/rwro') || return 1
+  echo "a writable mount of a read-only share: $(sed 's/^[^:]*: //' <<<"$out" | sort | uniq -c | tr -s ' ' | tr '\n' ',')"
+  [[ $(grep -c ': ok$' <<<"$out") == 0 && $(wc -l <<<"$out") -eq 12 ]]
+}
+nostamp() {
+  sed -E 's/ ctime=[0-9.]+//'
+}
+setuid_dropped() {
+  guest /bin/sh -c 'chmod 4755 /mnt/rw/w/exec && chmod 2755 /mnt/rw/w/d' || return 1
+  local file dir
+  file=$(stat -f %Lp "$rw/w/exec") dir=$(stat -f %Lp "$rw/w/d")
+  echo "chmod 4755 and 2755 in the guest leave $file and $dir on this Mac"
+  [[ $file == 755 && $dir == 755 ]]
+}
+write_revoked() {
+  local hold=$1 holder denied cut status
+  guest /bin/sh -c 'printf "a\n" > /mnt/rw/wr && cat /mnt/rw/wr > /dev/null' || return 1
+  guest /tmp/t_virtiofs "$hold" /mnt/rw/wr 3 > "$work/held.out" 2>&1 &
+  holder=$!
+  sleep 1
+  chmod 444 "$rw/wr"
+  fails guest /bin/sh -c 'printf "b\n" >> /mnt/rw/wr'
+  denied=$?
+  cut=1
+  [[ $hold == hold ]] && fails guest /tmp/t_virtiofs truncate /mnt/rw/wr 0 && cut=0
+  wait $holder
+  status=$?
+  chmod 644 "$rw/wr"
+  echo "with a descriptor from $hold: opening for writing was $( ((denied == 0)) && echo refused || echo allowed )," \
+    "truncating by name was $( ((cut == 0)) && echo refused || echo allowed ), the descriptor got $(cat "$work/held.out")"
+  [[ $denied == 0 && $status == 0 ]] || return 1
+  [[ $hold == hold-write ]] && [[ $(cat "$rw/wr") == $'a\nheld' ]] && return 0
+  [[ $hold == hold && $cut == 0 && $(cat "$rw/wr") == a ]]
+}
+removed_released() {
+  local held
+  held=$(host_open "$rw/gone")
+  echo "a file the guest removed before thousands of others is open $held times on this Mac"
+  [[ $held == 0 ]]
+}
 idle_kept() {
   local was held
   was=$(guest /bin/sh -c 'sysctl -n vfs.generic.virtiofs.idle_files') || return 1
@@ -104,7 +156,9 @@ xcrun clang -arch arm64 -mmacosx-version-min=15.0 -O2 -o "$work/t_virtiofs" "$he
 
 share=$work/share
 wide=$(printf '\xe4\xb8\xad%.0s' $(seq 1 85))
-mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,long,links,private} "$work/empty" "$work/locked" "$work/wide"
+rw=$work/rw
+mkdir -p "$share"/{small,big,deep/1/2/3/4/5,many,names,long,links,private} "$work/empty" "$work/locked" "$work/wide" \
+  "$rw"
 printf 'wide share\n' > "$work/wide/f"
 printf 'mine\n' > "$share/private/f"
 printf 'revoke\n' > "$share/revoke"
@@ -139,14 +193,14 @@ touch -t 200102030405.06 "$share/small/1"
 "$work/t_virtiofs" tree "$share" > "$work/tree.host" || { echo "FAIL the tree on this Mac"; rc=1; }
 
 "$kido" image import "$img" $name >/dev/null || exit 1
-KIDO_DEV_VIRTIOFS="data=$share:ro,empty=$work/empty:ro,locked=$work/locked:ro,$wide=$work/wide:ro" "$kido" run -d --name $name $name /bin/sleep 100000 \
-  >/dev/null || exit 1
+KIDO_DEV_VIRTIOFS="data=$share:ro,empty=$work/empty:ro,locked=$work/locked:ro,rw=$rw,$wide=$work/wide:ro" \
+  "$kido" run -d --name $name $name /bin/sleep 100000 >/dev/null || exit 1
 vm=$(pgrep -n -f com.apple.Virtualization.VirtualMachine)
 "$kido" cp "$work/t_virtiofs" $name:/tmp/t_virtiofs || exit 1
 before=$(host_fds)
 guest /bin/mkdir -p /mnt || exit 1
 
-check "a writable mount is refused" fails guest /sbin/mount -t virtiofs kido:data /mnt/rw
+check "a writable mount of a share the host made read-only refuses every change" ro_share_refuses
 check "mount kido:data" guest /sbin/mount -t virtiofs -o ro kido:data /mnt/data
 check "mount kido:empty" guest /sbin/mount -t virtiofs -o ro kido:empty /mnt/empty
 check "mount the device root" guest /sbin/mount -t virtiofs -o ro kido /mnt/root
@@ -163,7 +217,7 @@ check "fcntl F_RDADVISE brings a file into memory without a read" guest /tmp/t_v
 guest /tmp/t_virtiofs tree /mnt/data > "$work/tree.guest"
 check "the guest sees the same tree as this Mac" diff -u "$work/tree.host" "$work/tree.guest"
 check "the empty share is empty" prints "" guest /bin/ls -A /mnt/empty
-check "the device root lists the shares" prints "$(printf 'data\nempty\nlocked\n%s' "$wide")" \
+check "the device root lists the shares" prints "$(printf 'data\nempty\nlocked\nrw\n%s' "$wide")" \
   guest /bin/sh -c 'cd /mnt/root && printf "%s\n" *'
 check "a share with a 255-byte name mounts" prints "wide share" \
   guest /bin/sh -c "mkdir -p /mnt/wide && /sbin/mount -t virtiofs -o ro kido:$wide /mnt/wide && cat /mnt/wide/f && /sbin/umount /mnt/wide"
@@ -171,6 +225,8 @@ check "mount kido:locked" guest /sbin/mount -t virtiofs -o ro kido:locked /mnt/l
 check "a file the host cannot read cannot be opened" fails guest /bin/cat /mnt/locked/noaccess
 check "unmount kido:locked" guest /sbin/umount /mnt/locked
 check "errors of a read-only mount" guest /tmp/t_virtiofs errors /mnt/data kido:data
+check "the guest lists the extended attributes this Mac has" diff -u <("$work/t_virtiofs" xattr-list "$share/small/4097" all) \
+  <(guest /tmp/t_virtiofs xattr-list /mnt/data/small/4097 all)
 check "a 512-byte readdir buffer lists every entry" guest /tmp/t_virtiofs small-readdir /mnt/data/names 512
 check "a 256-byte readdir buffer stops only at an entry too large for it" \
   guest /tmp/t_virtiofs small-readdir /mnt/data/names 256
@@ -208,6 +264,37 @@ check "concurrent reads while every close releases a handle" guest /bin/sh -c 'w
   sysctl -w vfs.generic.virtiofs.idle_files=1 >/dev/null && /tmp/t_virtiofs stress /mnt/data 16 1; r=$?;
   sysctl -w vfs.generic.virtiofs.idle_files=$w >/dev/null; exit $r'
 
+rw_before=$(host_open "$rw")
+check "mount kido:rw for writing" guest /sbin/mount -t virtiofs kido:rw /mnt/rw
+"$work/t_virtiofs" write-tree "$work/expect" > /dev/null || { echo "FAIL the tree this Mac writes"; rc=1; }
+check "the guest writes a tree" guest /tmp/t_virtiofs write-tree /mnt/rw/w
+sleep 1.1
+"$work/t_virtiofs" tree "$work/expect" 2>/dev/null | nostamp > "$work/expect.tree"
+"$work/t_virtiofs" tree "$rw/w" > "$work/rw.host" 2>/dev/null
+check "what the guest wrote is on this Mac as this Mac writes it" diff -u "$work/expect.tree" <(nostamp < "$work/rw.host")
+guest /tmp/t_virtiofs tree /mnt/rw/w > "$work/rw.guest" 2>/dev/null
+check "the guest reads back what this Mac holds" diff -u "$work/rw.host" "$work/rw.guest"
+"$work/t_virtiofs" rw-errors "$work/errors" > "$work/errors.host"
+guest /tmp/t_virtiofs rw-errors /mnt/rw/e > "$work/errors.guest"
+check "errors of a writable mount match this Mac's" diff -u "$work/errors.host" "$work/errors.guest"
+"$work/t_virtiofs" xattrs "$work/xattrs" > "$work/xattrs.host"
+guest /tmp/t_virtiofs xattrs /mnt/rw/x > "$work/xattrs.guest"
+check "extended attributes match this Mac's" diff -u "$work/xattrs.host" "$work/xattrs.guest"
+check "this Mac holds the attributes the guest set" diff -u "$work/xattrs.guest" <("$work/t_virtiofs" xattr-list "$rw/x")
+check "writes, stores through a mapping and truncation agree" guest /tmp/t_virtiofs coherence /mnt/rw/coherent
+check "setuid and setgid bits set in the guest do not reach this Mac" setuid_dropped
+check "a file this Mac makes read-only cannot be opened for writing or truncated" write_revoked hold
+check "a descriptor already open for writing keeps writing" write_revoked hold-write
+guest /bin/sh -c 'cp /tmp/t_virtiofs /mnt/rw/gone && cat /mnt/rw/gone > /dev/null && rm /mnt/rw/gone'
+check "concurrent creates, writes, renames, unlinks and appends" guest /tmp/t_virtiofs rw-stress /mnt/rw/stress 8 5
+check "a file removed in the guest is released on this Mac" removed_released
+sleep 0.5
+check "no file stays open for writing on this Mac once the guest closed it" test "$(host_writing "$rw")" == 0
+check "unmount kido:rw" guest /sbin/umount /mnt/rw
+rw_after=$(host_open "$rw")
+echo "files of the writable share the host holds open: $rw_before before mounting, $rw_after after unmounting"
+check "the host closed all but a few of the files the guest wrote" test "$rw_after" -le $((rw_before + 64))
+
 check "unmount kido:data" guest /sbin/umount /mnt/data
 check "unmount kido:empty" guest /sbin/umount /mnt/empty
 check "unmount the device root" guest /sbin/umount /mnt/root
@@ -236,6 +323,14 @@ guest /sbin/umount /mnt/data
 guest /tmp/t_virtiofs bench /tmp/64m | sed 's/^read/read on the container disk/'
 "$work/t_virtiofs" bench "$share/big/64m" | sed 's/^read/read on this Mac/'
 "$work/t_virtiofs" bench-meta "$share/many" 3 | sed 's/^/on this Mac: /'
+guest /sbin/mount -t virtiofs kido:rw /mnt/rw
+guest /tmp/t_virtiofs bench-write /mnt/rw/bw 256
+guest /tmp/t_virtiofs bench-files /mnt/rw/bf 2000
+guest /sbin/umount /mnt/rw
+guest /tmp/t_virtiofs bench-write /tmp/bw 256 | sed 's/^write/write on the container disk/'
+guest /tmp/t_virtiofs bench-files /tmp/bf 2000 | sed 's/^/on the container disk: /'
+"$work/t_virtiofs" bench-write "$work/bw" 256 | sed 's/^write/write on this Mac/'
+"$work/t_virtiofs" bench-files "$work/bf" 2000 | sed 's/^/on this Mac: /'
 
 [[ $rc == 0 ]] && echo "virtiofs: all checks passed" || echo "virtiofs: FAILED"
 exit $rc

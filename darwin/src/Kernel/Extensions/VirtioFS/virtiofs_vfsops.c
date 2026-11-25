@@ -114,6 +114,8 @@ mount_free(struct virtiofs_mount *vmp)
         IOLockFree(vmp->lock);
     if (vmp->move_lock)
         IOLockFree(vmp->move_lock);
+    if (vmp->xattr_lock)
+        IOLockFree(vmp->xattr_lock);
     virtiofs_dev_release(vmp->dev);
     IOFree(vmp, sizeof(*vmp));
 }
@@ -128,8 +130,6 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
         return EPERM;
     if (vfs_isupdate(mp))
         return ENOTSUP;
-    if (!vfs_isrdonly(mp))
-        return EROFS;
     int error = copyin_spec(data, ctx, spec, sizeof(spec));
     if (error)
         return error;
@@ -157,6 +157,7 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
     vmp->dev = dev;
     vmp->lock = IOLockAlloc();
     vmp->move_lock = IOLockAlloc();
+    vmp->xattr_lock = IOLockAlloc();
     TAILQ_INIT(&vmp->idle);
     vmp->hash_bits = 10;
     while (vmp->hash_bits < 20 && (1 << vmp->hash_bits) < desiredvnodes / 8)
@@ -166,7 +167,7 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
     struct fuse_entry_out entry = {};
     uint64_t version = 0;
     vnode_t root = NULLVP;
-    error = vmp->lock && vmp->move_lock && vmp->hash && vmp->names ? 0 : ENOMEM;
+    error = vmp->lock && vmp->move_lock && vmp->xattr_lock && vmp->hash && vmp->names ? 0 : ENOMEM;
     if (!error)
         error = virtiofs_dev_start(dev, &vmp->session);
     if (!error)
@@ -254,6 +255,28 @@ virtiofs_getattr(mount_t mp, struct vfs_attr *fsap, vfs_context_t ctx)
     VFSATTR_RETURN(fsap, f_bused, st->blocks > st->bfree ? st->blocks - st->bfree : 0);
     VFSATTR_RETURN(fsap, f_files, st->files);
     VFSATTR_RETURN(fsap, f_ffree, st->ffree);
+    if (VFSATTR_IS_ACTIVE(fsap, f_capabilities)) {
+        vol_capabilities_attr_t *cap = &fsap->f_capabilities;
+        uint32_t format = VOL_CAP_FMT_SYMBOLICLINKS | VOL_CAP_FMT_HARDLINKS | VOL_CAP_FMT_CASE_PRESERVING |
+                          VOL_CAP_FMT_2TB_FILESIZE;
+        uint32_t interfaces = VOL_CAP_INT_ADVLOCK | VOL_CAP_INT_FLOCK | VOL_CAP_INT_EXTENDED_ATTR;
+        *cap = (vol_capabilities_attr_t){};
+        cap->capabilities[VOL_CAPABILITIES_FORMAT] = format;
+        cap->valid[VOL_CAPABILITIES_FORMAT] = format | VOL_CAP_FMT_JOURNAL | VOL_CAP_FMT_JOURNAL_ACTIVE |
+                                              VOL_CAP_FMT_NO_ROOT_TIMES | VOL_CAP_FMT_ZERO_RUNS |
+                                              VOL_CAP_FMT_FAST_STATFS | VOL_CAP_FMT_OPENDENYMODES |
+                                              VOL_CAP_FMT_HIDDEN_FILES | VOL_CAP_FMT_PATH_FROM_ID;
+        cap->capabilities[VOL_CAPABILITIES_INTERFACES] = interfaces;
+        cap->valid[VOL_CAPABILITIES_INTERFACES] = interfaces | VOL_CAP_INT_SEARCHFS | VOL_CAP_INT_ATTRLIST |
+                                                  VOL_CAP_INT_NFSEXPORT | VOL_CAP_INT_READDIRATTR |
+                                                  VOL_CAP_INT_EXCHANGEDATA | VOL_CAP_INT_COPYFILE |
+                                                  VOL_CAP_INT_ALLOCATE | VOL_CAP_INT_VOL_RENAME |
+                                                  VOL_CAP_INT_EXTENDED_SECURITY | VOL_CAP_INT_USERACCESS |
+                                                  VOL_CAP_INT_MANLOCK | VOL_CAP_INT_NAMEDSTREAMS |
+                                                  VOL_CAP_INT_CLONE | VOL_CAP_INT_RENAME_SWAP |
+                                                  VOL_CAP_INT_RENAME_EXCL;
+        VFSATTR_SET_SUPPORTED(fsap, f_capabilities);
+    }
     return 0;
 }
 
@@ -264,8 +287,17 @@ virtiofs_start(__unused mount_t mp, __unused int flags, __unused vfs_context_t c
 }
 
 static int
-virtiofs_sync(__unused mount_t mp, __unused int waitfor, __unused vfs_context_t ctx)
+sync_vnode(vnode_t vp, __unused void *arg)
 {
+    virtiofs_vnode_push(vp);
+    return VNODE_RETURNED;
+}
+
+static int
+virtiofs_sync(mount_t mp, __unused int waitfor, __unused vfs_context_t ctx)
+{
+    if (!vfs_isrdonly(mp))
+        vnode_iterate(mp, VNODE_ITERATE_ACTIVE, sync_vnode, NULL);
     return 0;
 }
 

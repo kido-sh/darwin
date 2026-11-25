@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #define CHUNK (64 * 1024)
+#define XATTR_PROVENANCE "com.apple.provenance"
 
 static int failures;
 
@@ -300,7 +301,7 @@ errors(const char *mnt, const char *spec)
 
     char value[16];
     expect_errno((int)getxattr(p, "user.test", value, sizeof(value), 0, 0), ENOATTR, "getxattr");
-    CHECK(listxattr(p, NULL, 0, 0) == 0, "listxattr returned %zd", listxattr(p, NULL, 0, 0));
+    CHECK(listxattr(p, NULL, 0, 0) >= 0, "listxattr: %s", strerror(errno));
 
     snprintf(q, sizeof(q), "%s/missing", mnt);
     expect_errno(open(q, O_RDONLY), ENOENT, "open of a missing file");
@@ -851,6 +852,590 @@ bench_meta(const char *dir, int rounds)
     return 0;
 }
 
+static unsigned
+seed_of(const char *name)
+{
+    return (unsigned)fnv(0xcbf29ce484222325ULL, (const unsigned char *)name, strlen(name));
+}
+
+static void
+fill(unsigned seed, off_t at, unsigned char *buf, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        buf[i] = (unsigned char)((((uint64_t)seed << 32) ^ (uint64_t)(at + (off_t)i)) * 0x9e3779b97f4a7c15ULL >> 56);
+}
+
+static int
+write_at(int fd, unsigned seed, off_t at, size_t size)
+{
+    unsigned char *buf = malloc(size ? size : 1);
+    fill(seed, at, buf, size);
+    ssize_t n = pwrite(fd, buf, size, at);
+    free(buf);
+    return n == (ssize_t)size ? 0 : -1;
+}
+
+static int
+put(const char *name, size_t size, size_t step, mode_t mode)
+{
+    int fd = open(name, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    CHECK(fd >= 0, "create %s: %s", name, strerror(errno));
+    if (fd < 0)
+        return -1;
+    unsigned char *buf = malloc(step);
+    for (size_t done = 0; done < size;) {
+        size_t n = size - done < step ? size - done : step;
+        fill(seed_of(name), (off_t)done, buf, n);
+        ssize_t w = write(fd, buf, n);
+        CHECK(w == (ssize_t)n, "write %s at %zu: %zd %s", name, done, w, strerror(errno));
+        if (w != (ssize_t)n)
+            break;
+        done += n;
+    }
+    free(buf);
+    CHECK(fchmod(fd, mode) == 0, "fchmod %s: %s", name, strerror(errno));
+    CHECK(close(fd) == 0, "close %s: %s", name, strerror(errno));
+    return 0;
+}
+
+static int stamps;
+
+static void
+stamp(const char *path)
+{
+    struct stat st;
+    CHECK(lstat(path, &st) == 0, "lstat %s: %s", path, strerror(errno));
+    if (S_ISDIR(st.st_mode)) {
+        DIR *d = opendir(path);
+        char **names = NULL;
+        size_t n = 0, cap = 0;
+        struct dirent *de;
+        while (d && (de = readdir(d)) != NULL) {
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, ".."))
+                continue;
+            if (n == cap)
+                names = realloc(names, (cap = cap ? cap * 2 : 64) * sizeof(*names));
+            names[n++] = strdup(de->d_name);
+        }
+        if (d)
+            closedir(d);
+        qsort(names, n, sizeof(*names), byname);
+        for (size_t i = 0; i < n; i++) {
+            char child[2048];
+            snprintf(child, sizeof(child), "%s/%s", path, names[i]);
+            stamp(child);
+            free(names[i]);
+        }
+        free(names);
+    }
+    struct timespec ts[2] = { { 981173106 + stamps, 123456789 }, { 981173106 + stamps, 987654321 } };
+    stamps++;
+    CHECK(utimensat(AT_FDCWD, path, ts, AT_SYMLINK_NOFOLLOW) == 0, "utimensat %s: %s", path, strerror(errno));
+}
+
+static int
+write_tree(const char *root)
+{
+    static const size_t sizes[] = { 0, 1, 4095, 4096, 4097, 16383, 16384, 16385, 131071, 131072, 131073, 1048583 };
+    char name[64];
+    int fd;
+
+    CHECK(mkdir(root, 0755) == 0 && chdir(root) == 0, "mkdir %s: %s", root, strerror(errno));
+    CHECK(mkdir("files", 0755) == 0 && mkdir("chunks", 0755) == 0, "mkdir: %s", strerror(errno));
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(*sizes); i++) {
+        snprintf(name, sizeof(name), "files/%zu", sizes[i]);
+        put(name, sizes[i], sizes[i] ? sizes[i] : 1, 0644);
+        snprintf(name, sizeof(name), "chunks/%zu", sizes[i]);
+        put(name, sizes[i], 1000, 0644);
+    }
+
+    put("inplace", 50000, 50000, 0644);
+    fd = open("inplace", O_WRONLY);
+    CHECK(fd >= 0 && write_at(fd, 7, 16000, 3000) == 0 && write_at(fd, 8, 49990, 20) == 0, "inplace: %s",
+          strerror(errno));
+    close(fd);
+
+    put("rewritten", 20000, 20000, 0644);
+    fd = open("rewritten", O_WRONLY);
+    unsigned char head[5000];
+    fill(11, 0, head, sizeof(head));
+    CHECK(fd >= 0 && write(fd, head, sizeof(head)) == (ssize_t)sizeof(head), "rewritten: %s", strerror(errno));
+    close(fd);
+
+    put("otrunc", 50000, 50000, 0644);
+    fd = open("otrunc", O_WRONLY | O_TRUNC);
+    CHECK(fd >= 0 && write(fd, head, 100) == 100, "otrunc: %s", strerror(errno));
+    close(fd);
+
+    put("truncated", 100000, 100000, 0644);
+    CHECK(truncate("truncated", 5000) == 0, "truncate: %s", strerror(errno));
+    fd = open("truncated", O_WRONLY);
+    CHECK(fd >= 0 && ftruncate(fd, 20000) == 0 && write_at(fd, 9, 30000, 10) == 0, "ftruncate: %s",
+          strerror(errno));
+    close(fd);
+
+    fd = open("appended", O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0644);
+    for (int i = 0; i < 10; i++) {
+        unsigned char rec[777];
+        fill(20 + (unsigned)i, 0, rec, sizeof(rec));
+        lseek(fd, 0, SEEK_SET);
+        CHECK(write(fd, rec, sizeof(rec)) == (ssize_t)sizeof(rec), "append %d: %s", i, strerror(errno));
+    }
+    close(fd);
+
+    put("mapped", 40000, 40000, 0644);
+    fd = open("mapped", O_RDWR);
+    char *map = fd < 0 ? MAP_FAILED : mmap(NULL, 40000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(map != MAP_FAILED, "mmap: %s", strerror(errno));
+    if (map != MAP_FAILED) {
+        memset(map, 'A', 100);
+        memset(map + 16380, 'B', 11);
+        memset(map + 39990, 'C', 10);
+        CHECK(msync(map, 40000, MS_SYNC) == 0, "msync: %s", strerror(errno));
+        memset(map + 20000, 'D', 11);
+        munmap(map, 40000);
+    }
+    close(fd);
+
+    fd = open("far", O_RDWR | O_CREAT | O_EXCL, 0644);
+    char far[3] = { 0 }, hole[3] = { 1, 1, 1 };
+    struct stat st;
+    CHECK(fd >= 0 && pwrite(fd, "far", 3, 5LL << 30) == 3, "write past 4 GiB: %s", strerror(errno));
+    CHECK(fstat(fd, &st) == 0 && st.st_size == (5LL << 30) + 3, "size past 4 GiB %lld", (long long)st.st_size);
+    CHECK(pread(fd, far, 3, 5LL << 30) == 3 && !memcmp(far, "far", 3), "read past 4 GiB");
+    CHECK(pread(fd, hole, 3, 4LL << 30) == 3 && !hole[0] && !hole[1] && !hole[2], "read of a hole");
+    CHECK(ftruncate(fd, 4096) == 0, "ftruncate from past 4 GiB: %s", strerror(errno));
+    close(fd);
+
+    CHECK(mkdir("d", 0755) == 0 && mkdir("d/a", 0755) == 0 && mkdir("d/a/b", 0755) == 0 &&
+          mkdir("d/a/b/c", 0755) == 0 && mkdir("d700", 0700) == 0 && mkdir("d750", 0750) == 0,
+          "mkdir: %s", strerror(errno));
+    CHECK(chmod("d700", 0700) == 0 && chmod("d750", 0750) == 0, "chmod of a directory: %s", strerror(errno));
+    char longer[1001];
+    memset(longer, 't', 1000);
+    longer[1000] = 0;
+    CHECK(symlink("files/4097", "l-rel") == 0 && symlink("/etc/hosts", "l-abs") == 0 &&
+          symlink("nowhere", "l-dangling") == 0 && symlink(longer, "l-long") == 0, "symlink: %s", strerror(errno));
+    CHECK(link("files/4096", "hard") == 0, "link: %s", strerror(errno));
+    CHECK(mkfifo("fifo", 0644) == 0 && chmod("fifo", 0644) == 0, "mkfifo: %s", strerror(errno));
+
+    put("r1", 10, 10, 0644);
+    CHECK(rename("r1", "r2") == 0, "rename: %s", strerror(errno));
+    put("r3", 20, 20, 0644);
+    put("r4", 30, 30, 0644);
+    CHECK(rename("r3", "r4") == 0, "rename over a file: %s", strerror(errno));
+    CHECK(mkdir("rd1", 0755) == 0, "mkdir rd1: %s", strerror(errno));
+    put("rd1/x", 5, 5, 0644);
+    CHECK(rename("rd1", "d/rd2") == 0, "rename of a directory: %s", strerror(errno));
+    put("moved", 7, 7, 0644);
+    CHECK(rename("moved", "d/a/moved") == 0, "rename into another directory: %s", strerror(errno));
+    put("gone", 100, 100, 0644);
+    CHECK(unlink("gone") == 0, "unlink: %s", strerror(errno));
+    CHECK(mkdir("gonedir", 0755) == 0 && rmdir("gonedir") == 0, "rmdir: %s", strerror(errno));
+    put("exec", 100, 100, 0644);
+    CHECK(chmod("exec", 0755) == 0 && chmod("files/1", 0600) == 0 && chmod("files/0", 0444) == 0,
+          "chmod: %s", strerror(errno));
+    stamp(".");
+    chdir("/");
+    printf("write-tree: %d failures\n", failures);
+    return failures ? 1 : 0;
+}
+
+static void
+outcome(const char *what, int rc)
+{
+    printf("%s: %s\n", what, rc < 0 ? strerror(errno) : "ok");
+}
+
+static int
+rw_errors(const char *root)
+{
+    char buf[128], name[300];
+    int fd;
+
+    if (mkdir(root, 0755) != 0 || chdir(root) != 0)
+        return 1;
+    outcome("mkdir", mkdir("d", 0755));
+    outcome("mkdir of an existing name", mkdir("d", 0755));
+    fd = open("d/f", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    outcome("create", fd);
+    close(fd);
+    outcome("rmdir of a directory that is not empty", rmdir("d"));
+    outcome("unlink of a directory", unlink("d"));
+    outcome("rmdir of a file", rmdir("d/f"));
+    outcome("rename of a directory into itself", rename("d", "d/sub"));
+    outcome("exclusive create of an existing file", open("d/f", O_WRONLY | O_CREAT | O_EXCL, 0644));
+    fd = open("d/f", O_RDONLY);
+    outcome("write to a descriptor open for reading", (int)write(fd, "x", 1));
+    close(fd);
+    outcome("truncate of a directory", truncate("d", 0));
+    outcome("open of a directory for writing", open("d", O_WRONLY));
+    outcome("hard link to a directory", link("d", "dl"));
+    outcome("hard link over an existing name", link("d/f", "d/f"));
+    memset(name, 'n', 256);
+    name[256] = 0;
+    outcome("create of a 256-byte name", open(name, O_WRONLY | O_CREAT, 0644));
+    name[255] = 0;
+    fd = open(name, O_WRONLY | O_CREAT, 0644);
+    outcome("create of a 255-byte name", fd);
+    close(fd);
+    outcome("unlink of a 255-byte name", unlink(name));
+    outcome("mkdir under a missing directory", mkdir("missing/x", 0755));
+    outcome("rename of a missing name", rename("missing", "x"));
+    outcome("unlink of a missing name", unlink("missing"));
+    fd = open("a", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    close(fd);
+    outcome("mkdir dir2", mkdir("dir2", 0755));
+    outcome("rename of a file over a directory", rename("a", "dir2"));
+    outcome("rename of a directory over a file", rename("dir2", "a"));
+    outcome("mkdir dir3", mkdir("dir3", 0755));
+    fd = open("dir3/x", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    close(fd);
+    outcome("rename over a directory that is not empty", rename("dir2", "dir3"));
+    outcome("rename over an empty directory", rename("dir2", "d/empty"));
+    outcome("symlink over an existing name", symlink("x", "a"));
+    outcome("symlink loop", symlink("loop", "loop"));
+    outcome("open of a symlink loop", open("loop", O_RDONLY));
+    outcome("getxattr of a missing attribute", (int)getxattr("a", "user.none", buf, sizeof(buf), 0, 0));
+    outcome("setxattr", setxattr("a", "user.x", "1", 1, 0, XATTR_CREATE));
+    outcome("XATTR_CREATE of an existing attribute", setxattr("a", "user.x", "2", 1, 0, XATTR_CREATE));
+    outcome("XATTR_REPLACE of a missing attribute", setxattr("a", "user.y", "2", 1, 0, XATTR_REPLACE));
+    outcome("removexattr of a missing attribute", removexattr("a", "user.none", 0));
+    memset(buf, 'v', 100);
+    outcome("setxattr of 100 bytes", setxattr("a", "user.big", buf, 100, 0, 0));
+    outcome("getxattr into a buffer too small", (int)getxattr("a", "user.big", buf, 10, 0, 0));
+    outcome("getxattr of a directory's missing attribute", (int)getxattr("d", "user.none", buf, sizeof(buf), 0, 0));
+    outcome("chflags 0", chflags("a", 0));
+    chdir("/");
+    return 0;
+}
+
+static int
+ro_share(const char *mnt)
+{
+    char p[1024], q[1024];
+
+    snprintf(p, sizeof(p), "%s/small/4097", mnt);
+    snprintf(q, sizeof(q), "%s/created", mnt);
+    outcome("create", open(q, O_WRONLY | O_CREAT, 0644));
+    outcome("mkdir", mkdir(q, 0755));
+    outcome("symlink", symlink("x", q));
+    outcome("link", link(p, q));
+    outcome("rename", rename(p, q));
+    outcome("unlink", unlink(p));
+    outcome("open for writing", open(p, O_WRONLY));
+    outcome("truncate", truncate(p, 0));
+    outcome("chmod", chmod(p, 0600));
+    outcome("utimes", utimes(p, NULL));
+    outcome("setxattr", setxattr(p, "user.test", "v", 1, 0, 0));
+    snprintf(q, sizeof(q), "%s/small", mnt);
+    outcome("rmdir", rmdir(q));
+    return 0;
+}
+
+static int
+xattr_list(const char *path, int all)
+{
+    char names[65536], value[65536];
+    ssize_t n = listxattr(path, names, sizeof(names), XATTR_NOFOLLOW);
+    if (n < 0) {
+        printf("listxattr: %s\n", strerror(errno));
+        return 1;
+    }
+    char *list[256];
+    int count = 0;
+    for (char *p = names; p < names + n && count < 256; p += strlen(p) + 1)
+        if (all || strcmp(p, XATTR_PROVENANCE))
+            list[count++] = p;
+    qsort(list, (size_t)count, sizeof(*list), byname);
+    for (int i = 0; i < count; i++) {
+        ssize_t size = getxattr(path, list[i], NULL, 0, 0, XATTR_NOFOLLOW);
+        ssize_t got = getxattr(path, list[i], value, sizeof(value), 0, XATTR_NOFOLLOW);
+        printf("%s size=%zd got=%zd fnv=%016llx\n", list[i], size, got,
+               (unsigned long long)fnv(0xcbf29ce484222325ULL, (unsigned char *)value, got > 0 ? (size_t)got : 0));
+    }
+    return 0;
+}
+
+static int
+xattrs(const char *path)
+{
+    unsigned char big[65536];
+    fill(30, 0, big, sizeof(big));
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    CHECK(fd >= 0, "create %s: %s", path, strerror(errno));
+    close(fd);
+    CHECK(setxattr(path, "user.empty", "", 0, 0, 0) == 0, "empty value: %s", strerror(errno));
+    CHECK(setxattr(path, "user.one", "1", 1, 0, 0) == 0, "one byte: %s", strerror(errno));
+    CHECK(setxattr(path, "com.example.big", big, sizeof(big), 0, 0) == 0, "64 KiB value: %s", strerror(errno));
+    CHECK(setxattr(path, "user.replaced", "old", 3, 0, 0) == 0, "set: %s", strerror(errno));
+    CHECK(setxattr(path, "user.replaced", "newer", 5, 0, XATTR_REPLACE) == 0, "replace: %s", strerror(errno));
+    CHECK(setxattr(path, "user.removed", "x", 1, 0, 0) == 0, "set: %s", strerror(errno));
+    CHECK(removexattr(path, "user.removed", 0) == 0, "remove: %s", strerror(errno));
+    unsigned char back[65536];
+    CHECK(getxattr(path, "com.example.big", back, sizeof(back), 0, 0) == (ssize_t)sizeof(big) &&
+          !memcmp(back, big, sizeof(big)), "64 KiB value read back");
+    xattr_list(path, 0);
+    return failures ? 1 : 0;
+}
+
+static int
+coherence(const char *path)
+{
+    unsigned char data[65536], got[4];
+    fill(40, 0, data, sizeof(data));
+    int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0644);
+    CHECK(fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data), "write: %s", strerror(errno));
+    char *map = mmap(NULL, sizeof(data), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    CHECK(map != MAP_FAILED, "mmap: %s", strerror(errno));
+    if (fd < 0 || map == MAP_FAILED)
+        return 1;
+    CHECK(!memcmp(map, data, sizeof(data)), "a mapping sees what write wrote");
+    CHECK(pwrite(fd, "xyz", 3, 20000) == 3 && !memcmp(map + 20000, "xyz", 3), "a mapping sees a later write");
+    memcpy(map + 30000, "MAP", 3);
+    CHECK(msync(map, sizeof(data), MS_SYNC) == 0 && pread(fd, got, 3, 30000) == 3 && !memcmp(got, "MAP", 3),
+          "read sees a store through the mapping after msync");
+    memcpy(map + 40000, "NOS", 3);
+    CHECK(pread(fd, got, 3, 40000) == 3 && !memcmp(got, "NOS", 3), "read sees a store through the mapping at once");
+    CHECK(pwrite(fd, "PW", 2, 40001) == 2 && !memcmp(map + 40000, "NPW", 3),
+          "a write next to a store through the mapping keeps both");
+    CHECK(ftruncate(fd, 10000) == 0 && pread(fd, got, 1, 9999) == 1 && pread(fd, got, 1, 10000) == 0,
+          "a shrunk file ends at its new size");
+    CHECK(ftruncate(fd, sizeof(data)) == 0 && map[20000] == 0 && map[9999] == (char)data[9999],
+          "a file grown again reads zeros where it was cut");
+    munmap(map, sizeof(data));
+    close(fd);
+    int again = open(path, O_RDONLY);
+    CHECK(again >= 0 && pread(again, got, 3, 40000) == 3 && !got[0], "the cut part stays zero after close");
+    close(again);
+    printf("coherence: %d failures\n", failures);
+    return failures ? 1 : 0;
+}
+
+static int
+hold_write(const char *path, int seconds)
+{
+    int fd = open(path, O_WRONLY | O_APPEND);
+    if (fd < 0) {
+        printf("open: %s\n", strerror(errno));
+        return 1;
+    }
+    sleep((unsigned)seconds);
+    ssize_t n = write(fd, "held\n", 5);
+    if (n < 0)
+        printf("write: %s\n", strerror(errno));
+    else
+        printf("%zd bytes\n", n);
+    int rc = close(fd);
+    return n != 5 || rc != 0;
+}
+
+struct rw_worker {
+    const char *dir;
+    int id;
+    double until;
+    long files;
+    int bad;
+};
+
+static void *
+rw_work(void *arg)
+{
+    struct rw_worker *w = arg;
+    char sub[1024], path[1200], moved[1200];
+    unsigned seed = (unsigned)w->id * 7919u + 1;
+    unsigned char *buf = malloc(300000), *back = malloc(300000);
+    snprintf(sub, sizeof(sub), "%s/t%d", w->dir, w->id);
+    if (mkdir(sub, 0755) != 0)
+        w->bad++;
+    for (long k = 0; now() < w->until; k++) {
+        seed = seed * 1103515245u + 12345u;
+        size_t size = seed % 300000, step = 1 + (seed >> 8) % 70000;
+        snprintf(path, sizeof(path), "%s/f%ld", sub, k);
+        snprintf(moved, sizeof(moved), "%s/g%ld", sub, k);
+        fill(seed, 0, buf, size);
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        for (size_t done = 0; fd >= 0 && done < size; done += step)
+            if (write(fd, buf + done, size - done < step ? size - done : step) < 0)
+                w->bad++;
+        if (fd < 0 || close(fd) != 0)
+            w->bad++;
+        if (rename(path, moved) != 0)
+            w->bad++;
+        fd = open(moved, O_RDONLY);
+        ssize_t n = fd < 0 ? -1 : read(fd, back, 300000);
+        if (n != (ssize_t)size || memcmp(buf, back, size) != 0)
+            w->bad++;
+        if (fd >= 0)
+            close(fd);
+        if (k % 2 && unlink(moved) != 0)
+            w->bad++;
+        w->files++;
+    }
+    free(buf);
+    free(back);
+    return NULL;
+}
+
+struct appender {
+    int fd, id, records;
+};
+
+static void *
+append_work(void *arg)
+{
+    struct appender *a = arg;
+    char rec[64];
+    for (int i = 0; i < a->records; i++) {
+        snprintf(rec, sizeof(rec), "%04d %08d %-48s\n", a->id, i, "record");
+        if (write(a->fd, rec, 63) != 63)
+            return (void *)1;
+    }
+    return NULL;
+}
+
+static int
+rw_stress(const char *dir, int threads, int seconds)
+{
+    pthread_t t[64];
+    struct rw_worker w[64];
+    struct appender a[64];
+    char log[1024];
+    long files = 0;
+    int bad = 0;
+
+    if (threads < 1 || threads > 64 || mkdir(dir, 0755) != 0)
+        return 2;
+    double until = now() + seconds;
+    for (int i = 0; i < threads; i++) {
+        w[i] = (struct rw_worker){ .dir = dir, .id = i, .until = until };
+        pthread_create(&t[i], NULL, rw_work, &w[i]);
+    }
+    for (int i = 0; i < threads; i++) {
+        pthread_join(t[i], NULL);
+        files += w[i].files;
+        bad += w[i].bad;
+    }
+    snprintf(log, sizeof(log), "%s/log", dir);
+    int fd = open(log, O_WRONLY | O_CREAT | O_EXCL | O_APPEND, 0644);
+    if (fd < 0)
+        return 1;
+    for (int i = 0; i < threads; i++) {
+        a[i] = (struct appender){ .fd = fd, .id = i, .records = 2000 };
+        pthread_create(&t[i], NULL, append_work, &a[i]);
+    }
+    for (int i = 0; i < threads; i++) {
+        void *r;
+        pthread_join(t[i], &r);
+        bad += r != NULL;
+    }
+    close(fd);
+    struct stat st;
+    long want = (long)threads * 2000 * 63;
+    FILE *f = fopen(log, "r");
+    int *next = calloc((size_t)threads, sizeof(int));
+    char line[128];
+    long lines = 0;
+    while (f && fgets(line, sizeof(line), f)) {
+        int id, seq;
+        if (sscanf(line, "%d %d", &id, &seq) != 2 || id < 0 || id >= threads || seq != next[id]++ ||
+            strlen(line) != 63)
+            bad++;
+        lines++;
+    }
+    if (f)
+        fclose(f);
+    free(next);
+    CHECK(stat(log, &st) == 0 && st.st_size == want, "appended log is %lld bytes, want %ld", (long long)st.st_size,
+          want);
+    CHECK(bad == 0, "%d bad results", bad);
+    printf("rw-stress: %d threads wrote and checked %ld files in %d s, then appended %ld records, %d failures\n",
+           threads, files, seconds, lines, failures);
+    return failures ? 1 : 0;
+}
+
+static int
+bench_write(const char *path, int mib)
+{
+    static const size_t steps[] = { 1 << 20, 128 << 10, 16 << 10, 4 << 10 };
+    unsigned char *buf = malloc(1 << 20);
+    fill(50, 0, buf, 1 << 20);
+    printf("write %s\n", path);
+    for (size_t s = 0; s < sizeof(steps) / sizeof(*steps); s++) {
+        size_t step = steps[s];
+        off_t total = (off_t)(step >= (128 << 10) ? mib : mib / 4) << 20;
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0)
+            return 1;
+        double t0 = now(), c0 = cpu();
+        for (off_t done = 0; done < total; done += (off_t)step)
+            if (write(fd, buf, step) != (ssize_t)step)
+                return 1;
+        double dt = now() - t0, dc = cpu() - c0;
+        double t1 = now();
+        fsync(fd);
+        double synced = now() - t1;
+        close(fd);
+        printf("  %zu KiB writes: %.0f MB/s, %.1f us per write, %.2f CPUs busy, then fsync %.1f ms\n", step >> 10,
+               total / dt / 1e6, dt / (total / (double)step) * 1e6, dc / dt, synced * 1e3);
+    }
+    unlink(path);
+    free(buf);
+    return 0;
+}
+
+static int
+bench_files(const char *dir, int count)
+{
+    char path[1024], other[1024];
+    unsigned char data[4096];
+    fill(60, 0, data, sizeof(data));
+    if (mkdir(dir, 0755) != 0)
+        return 1;
+    double t0 = now();
+    for (int i = 0; i < count; i++) {
+        snprintf(path, sizeof(path), "%s/f%d", dir, i);
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (fd < 0 || write(fd, data, sizeof(data)) != (ssize_t)sizeof(data) || close(fd) != 0)
+            return 1;
+    }
+    double created = (now() - t0) / count * 1e6;
+    t0 = now();
+    for (int i = 0; i < count; i++) {
+        snprintf(path, sizeof(path), "%s/f%d", dir, i);
+        int fd = open(path, O_WRONLY | O_APPEND);
+        if (fd < 0 || write(fd, data, 16) != 16 || close(fd) != 0)
+            return 1;
+    }
+    double appended = (now() - t0) / count * 1e6;
+    t0 = now();
+    for (int i = 0; i < count; i++) {
+        snprintf(path, sizeof(path), "%s/f%d", dir, i);
+        snprintf(other, sizeof(other), "%s/g%d", dir, i);
+        if (rename(path, other) != 0)
+            return 1;
+    }
+    double renamed = (now() - t0) / count * 1e6;
+    t0 = now();
+    for (int i = 0; i < count; i++) {
+        snprintf(other, sizeof(other), "%s/g%d", dir, i);
+        if (unlink(other) != 0)
+            return 1;
+    }
+    double removed = (now() - t0) / count * 1e6;
+    t0 = now();
+    for (int i = 0; i < count / 10; i++) {
+        snprintf(path, sizeof(path), "%s/d%d", dir, i);
+        if (mkdir(path, 0755) != 0 || rmdir(path) != 0)
+            return 1;
+    }
+    double dirs = (now() - t0) / (count / 10) * 1e6;
+    rmdir(dir);
+    printf("%s: %d files, us each: create+write 4 KiB+close %.1f, open+append+close %.1f, rename %.1f, "
+           "unlink %.1f, mkdir+rmdir %.1f\n", dir, count, created, appended, renamed, removed, dirs);
+    return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -889,6 +1474,31 @@ main(int argc, char **argv)
         return mount_as((uid_t)atoi(argv[2]), (gid_t)atoi(argv[3]), argv[4], argv[5]);
     if (argc >= 4 && !strcmp(argv[1], "lookups"))
         return lookups(atoi(argv[2]), argv + 3);
+    if (argc == 3 && !strcmp(argv[1], "ro-share"))
+        return ro_share(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "truncate")) {
+        int rc = truncate(argv[2], atoll(argv[3]));
+        outcome("truncate", rc);
+        return rc != 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "write-tree"))
+        return write_tree(argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "rw-errors"))
+        return rw_errors(argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "xattrs"))
+        return xattrs(argv[2]);
+    if ((argc == 3 || argc == 4) && !strcmp(argv[1], "xattr-list"))
+        return xattr_list(argv[2], argc == 4 && !strcmp(argv[3], "all"));
+    if (argc == 3 && !strcmp(argv[1], "coherence"))
+        return coherence(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "hold-write"))
+        return hold_write(argv[2], atoi(argv[3]));
+    if (argc == 5 && !strcmp(argv[1], "rw-stress"))
+        return rw_stress(argv[2], atoi(argv[3]), atoi(argv[4]));
+    if (argc == 4 && !strcmp(argv[1], "bench-write"))
+        return bench_write(argv[2], atoi(argv[3]));
+    if (argc == 4 && !strcmp(argv[1], "bench-files"))
+        return bench_files(argv[2], atoi(argv[3]));
     fprintf(stderr, "usage: t_virtiofs tree DIR | errors MNT SPEC | stress DIR THREADS ROUNDS | bench FILE |"
                     " bench-meta DIR ROUNDS\n");
     return 2;

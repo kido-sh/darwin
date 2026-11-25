@@ -16,7 +16,9 @@
 #include <sys/uio.h>
 #include <sys/unistd.h>
 #include <sys/vnode_if.h>
+#include <sys/xattr.h>
 #include <kern/clock.h>
+#include <kern/thread.h>
 #include <miscfs/fifofs/fifo.h>
 #include <vfs/vfs_support.h>
 #include <IOKit/IOLib.h>
@@ -38,7 +40,11 @@ enum {
     VN_IDLE = 0x40,
     VN_SIZING = 0x80,
     VN_NAMED = 0x100,
+    VN_WOPEN = 0x200,
+    VN_WOPENING = 0x400,
 };
+
+#define SETTABLE_MODE (ACCESSPERMS | S_ISVTX)
 
 struct virtiofs_node {
     LIST_ENTRY(virtiofs_node) link;
@@ -49,7 +55,9 @@ struct virtiofs_node {
     uint64_t nodeid;
     uint64_t nlookup;
     uint64_t fh;
+    uint64_t wfh;
     uint64_t fh_ctime;
+    uint64_t changed;
     uint64_t expire;
     uint64_t attr_version;
     uint64_t parent;
@@ -60,9 +68,13 @@ struct virtiofs_node {
     uint32_t fh_ctimensec;
     struct fuse_attr attr;
     uint32_t users;
+    uint32_t wusers;
+    uint32_t wopens;
     uint32_t releasing;
     uint32_t paging;
     uint32_t flags;
+    IOLock *wlock;
+    thread_t creator;
 };
 
 #define VTON(vp) ((struct virtiofs_node *)vnode_fsnode(vp))
@@ -149,9 +161,12 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     IOLockUnlock(vmp->lock);
 
     off_t cached = ubc_getsize(vp);
-    if (cached != size)
+    if (size < cached)
         ubc_setsize(vp, size);
-    ubc_msync(vp, 0, cached > size ? cached : size, NULL, UBC_INVALIDATE);
+    if (ubc_pages_resident(vp))
+        ubc_msync(vp, 0, MAX(cached, size), NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
+    if (size > cached)
+        ubc_setsize(vp, size);
 
     IOLockLock(vmp->lock);
     wake(np, VN_SIZING);
@@ -192,6 +207,14 @@ node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
         *attr = np->attr;
     IOLockUnlock(np->vmp->lock);
     return cached ? 0 : node_fetch(np, ctx, attr);
+}
+
+static void
+node_stale(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    np->expire = 0;
+    IOLockUnlock(np->vmp->lock);
 }
 
 static off_t
@@ -261,6 +284,14 @@ node_place(vnode_t vp, vnode_t dvp, struct componentname *cnp)
 }
 
 static void
+node_free(struct virtiofs_node *np)
+{
+    if (np->wlock)
+        IOLockFree(np->wlock);
+    IOFree(np, sizeof(*np));
+}
+
+static void
 forget(struct virtiofs_mount *vmp, uint64_t nodeid, uint64_t nlookup)
 {
     if (nodeid && nlookup)
@@ -297,7 +328,12 @@ virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry
     int error;
 
     error = virtiofs_entry_ok(entry) ? ENOMEM : EIO;
-    if (error == EIO || !(fresh = IOMallocZero(sizeof(*fresh)))) {
+    if (error == ENOMEM && (fresh = IOMallocZero(sizeof(*fresh))) && IFTOVT(entry->attr.mode) == VREG &&
+        !(fresh->wlock = IOLockAlloc())) {
+        IOFree(fresh, sizeof(*fresh));
+        fresh = NULL;
+    }
+    if (!fresh) {
         forget(vmp, entry->nodeid, nlookup);
         return error;
     }
@@ -319,7 +355,7 @@ virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry
         uint32_t vid = vnode_vid(vp);
         IOLockUnlock(vmp->lock);
         if (vnode_getwithvid(vp, vid) == 0) {
-            IOFree(fresh, sizeof(*fresh));
+            node_free(fresh);
             error = node_found(np, vp, entry, version, nlookup, dvp, cnp);
             if (!error)
                 *vpp = vp;
@@ -365,15 +401,15 @@ virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry
         *vpp = vp;
         return 0;
     }
-    IOFree(np, sizeof(*np));
+    node_free(np);
     forget(vmp, entry->nodeid, nlookup);
     return error;
 }
 
 static int
-handle_open(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
+handle_open(struct virtiofs_node *np, vfs_context_t ctx, uint32_t flags, uint64_t *fh)
 {
-    struct fuse_open_in in = {};
+    struct fuse_open_in in = { .flags = flags };
     struct fuse_open_out out = {};
     struct virtiofs_call c = {
         .opcode = vnode_isdir(np->vp) ? FUSE_OPENDIR : FUSE_OPEN, .nodeid = np->nodeid,
@@ -478,7 +514,7 @@ handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open)
     if (!*open || current)
         return 0;
 
-    error = handle_open(np, ctx, &fh);
+    error = handle_open(np, ctx, 0, &fh);
     IOLockLock(vmp->lock);
     bool drop = error && !np->users && !vnode_isinuse(np->vp, 0) && handle_drop_locked(np, &kept);
     bool adopt = !error && !(np->flags & (VN_OPEN | VN_OPENING));
@@ -519,7 +555,7 @@ handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
     uint32_t ctimensec = np->attr.ctimensec;
     IOLockUnlock(vmp->lock);
 
-    int error = handle_open(np, ctx, fh);
+    int error = handle_open(np, ctx, 0, fh);
 
     IOLockLock(vmp->lock);
     if (!error) {
@@ -554,6 +590,162 @@ file_open(struct virtiofs_node *np, vfs_context_t ctx)
     if (error || open)
         return error;
     return handle_check(np, ctx);
+}
+
+static int
+whandle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
+{
+    struct virtiofs_mount *vmp = np->vmp;
+
+    IOLockLock(vmp->lock);
+    wait_clear(np, VN_WOPENING);
+    if (np->flags & VN_WOPEN) {
+        np->wusers++;
+        *fh = np->wfh;
+        IOLockUnlock(vmp->lock);
+        return 0;
+    }
+    np->flags |= VN_WOPENING;
+    IOLockUnlock(vmp->lock);
+
+    int error = handle_open(np, ctx, VIRTIOFS_O_WRONLY, fh);
+
+    IOLockLock(vmp->lock);
+    if (!error) {
+        np->wfh = *fh;
+        np->flags |= VN_WOPEN;
+        np->wusers++;
+    }
+    wake(np, VN_WOPENING);
+    IOLockUnlock(vmp->lock);
+    return error;
+}
+
+static void
+whandle_put(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    if (--np->wusers == 0)
+        wake(np, 0);
+    IOLockUnlock(np->vmp->lock);
+}
+
+static void
+whandle_close(struct virtiofs_node *np)
+{
+    struct virtiofs_mount *vmp = np->vmp;
+    uint64_t fh = 0;
+
+    IOLockLock(vmp->lock);
+    while (np->wusers || (np->flags & VN_WOPENING)) {
+        np->flags |= VN_WANT;
+        IOLockSleep(vmp->lock, np, THREAD_UNINT);
+    }
+    bool release = np->flags & VN_WOPEN;
+    if (release) {
+        np->flags &= ~VN_WOPEN;
+        np->releasing++;
+        fh = np->wfh;
+    }
+    np->creator = NULL;
+    IOLockUnlock(vmp->lock);
+    if (release)
+        handle_release(np, fh);
+}
+
+static bool
+whandle_hold(struct virtiofs_node *np, uint64_t *fh)
+{
+    IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_WOPENING);
+    bool open = np->flags & VN_WOPEN;
+    if (open) {
+        np->wusers++;
+        *fh = np->wfh;
+    }
+    IOLockUnlock(np->vmp->lock);
+    return open;
+}
+
+static void
+whandle_adopt(struct virtiofs_node *np, uint64_t fh, thread_t creator)
+{
+    IOLockLock(np->vmp->lock);
+    bool adopt = !(np->flags & (VN_WOPEN | VN_WOPENING));
+    if (adopt) {
+        np->wfh = fh;
+        np->flags |= VN_WOPEN;
+        np->creator = creator;
+    } else {
+        np->releasing++;
+    }
+    IOLockUnlock(np->vmp->lock);
+    if (!adopt)
+        handle_release(np, fh);
+}
+
+static int
+wfile_check(struct virtiofs_node *np, vfs_context_t ctx)
+{
+    uint64_t fh;
+    int error = handle_open(np, ctx, VIRTIOFS_O_WRONLY, &fh);
+
+    if (!error)
+        whandle_adopt(np, fh, NULL);
+    return error;
+}
+
+static bool
+wfile_created(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    bool mine = np->creator == current_thread();
+    if (mine)
+        np->creator = NULL;
+    bool open = np->flags & VN_WOPEN;
+    IOLockUnlock(np->vmp->lock);
+    return mine && open;
+}
+
+static int
+wfile_open(struct virtiofs_node *np, vfs_context_t ctx, bool created)
+{
+    int error = created ? 0 : wfile_check(np, ctx);
+
+    if (!error) {
+        IOLockLock(np->vmp->lock);
+        np->wopens++;
+        IOLockUnlock(np->vmp->lock);
+    }
+    return error;
+}
+
+static void
+wfile_close(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    if (np->wopens)
+        np->wopens--;
+    IOLockUnlock(np->vmp->lock);
+}
+
+static int
+push_range(vnode_t vp, off_t start, off_t end)
+{
+    return ubc_pages_resident(vp) ? ubc_msync(vp, start, end, NULL, UBC_PUSHDIRTY | UBC_SYNC) : 0;
+}
+
+static int
+push_dirty(vnode_t vp)
+{
+    return push_range(vp, 0, ubc_getsize(vp));
+}
+
+void
+virtiofs_vnode_push(vnode_t vp)
+{
+    if (vnode_isreg(vp))
+        push_dirty(vp);
 }
 
 static void
@@ -671,7 +863,7 @@ name_remember(struct virtiofs_node *dnp, vnode_t vp, struct componentname *cnp, 
         else
             name_drop_locked(other);
     }
-    if ((np->flags & VN_NAMED) && np->name_version > version)
+    if (version < dnp->changed || ((np->flags & VN_NAMED) && np->name_version > version))
         newer = true;
     else
         name_drop_locked(np);
@@ -688,6 +880,23 @@ name_remember(struct virtiofs_node *dnp, vnode_t vp, struct componentname *cnp, 
     IOLockUnlock(vmp->lock);
     if (name)
         IOFree(name, len);
+}
+
+static uint64_t
+dir_changed(struct virtiofs_node *dnp, struct componentname *cnp)
+{
+    struct virtiofs_mount *vmp = dnp->vmp;
+    struct virtiofs_node *np, *next;
+
+    IOLockLock(vmp->lock);
+    LIST_FOREACH_SAFE(np, name_bucket(vmp, dnp->nodeid, cnp->cn_nameptr, (uint32_t)cnp->cn_namelen), name_link, next) {
+        if (name_matches(np, dnp->nodeid, cnp))
+            name_drop_locked(np);
+    }
+    uint64_t version = dnp->changed = ++vmp->version;
+    dnp->expire = 0;
+    IOLockUnlock(vmp->lock);
+    return version;
 }
 
 static int
@@ -756,10 +965,15 @@ virtiofs_vnop_open(struct vnop_open_args *ap)
     vnode_t vp = ap->a_vp;
 
     switch (vnode_vtype(vp)) {
-    case VREG:
-        if (ap->a_mode & (FWRITE | O_TRUNC))
+    case VREG: {
+        if ((ap->a_mode & (FWRITE | O_TRUNC)) && vfs_isrdonly(vnode_mount(vp)))
             return EROFS;
-        return file_open(VTON(vp), ap->a_context);
+        bool created = wfile_created(VTON(vp));
+        int error = (ap->a_mode & FREAD) ? file_open(VTON(vp), ap->a_context) : 0;
+        if (!error && (ap->a_mode & FWRITE))
+            error = wfile_open(VTON(vp), ap->a_context, created);
+        return error;
+    }
     case VDIR:
         if (ap->a_mode & (FWRITE | O_TRUNC))
             return EROFS;
@@ -775,9 +989,12 @@ virtiofs_vnop_open(struct vnop_open_args *ap)
 }
 
 static int
-virtiofs_vnop_close(__unused struct vnop_close_args *ap)
+virtiofs_vnop_close(struct vnop_close_args *ap)
 {
-    return 0;
+    if (!(ap->a_fflag & FWRITE) || !vnode_isreg(ap->a_vp))
+        return 0;
+    wfile_close(VTON(ap->a_vp));
+    return push_dirty(ap->a_vp);
 }
 
 static int
@@ -841,6 +1058,113 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
     return cluster_read(vp, uio, (off_t)attr.size, ap->a_ioflag);
 }
 
+static int
+write_sync(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh)
+{
+    struct fuse_fsync_in in = { .fh = fh };
+    struct virtiofs_call c = { .opcode = FUSE_FSYNC, .nodeid = np->nodeid, .arg = { &in }, .arglen = { sizeof(in) } };
+    int error = virtiofs_call(np->vmp, ctx, &c);
+
+    return error == ENOSYS ? 0 : error;
+}
+
+static int
+write_part(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, const char *buf, uint32_t len,
+           uint32_t *written)
+{
+    struct fuse_write_in in = { .fh = fh, .offset = (uint64_t)at, .size = len };
+    struct fuse_write_out out = {};
+    struct virtiofs_call c = {
+        .opcode = FUSE_WRITE, .flags = VIRTIOFS_DATA_OUT, .nodeid = np->nodeid,
+        .arg = { &in }, .arglen = { sizeof(in) }, .reply = &out, .replylen = sizeof(out),
+        .data = (void *)(uintptr_t)buf, .datalen = len,
+    };
+    int error = virtiofs_call(np->vmp, ctx, &c);
+
+    if (!error && (c.replylen != sizeof(out) || out.size > len))
+        error = EIO;
+    *written = error ? 0 : out.size;
+    return error;
+}
+
+static int
+virtiofs_vnop_write(struct vnop_write_args *ap)
+{
+    vnode_t vp = ap->a_vp;
+    uio_t uio = ap->a_uio;
+    vfs_context_t ctx = ap->a_context;
+    struct virtiofs_node *np = VTON(vp);
+    struct fuse_attr attr;
+    uint64_t fh;
+
+    if (vnode_isdir(vp))
+        return EISDIR;
+    if (!vnode_isreg(vp))
+        return EPERM;
+    if (uio_offset(uio) < 0)
+        return EINVAL;
+    if (vfs_isrdonly(vnode_mount(vp)))
+        return EROFS;
+    if (uio_resid(uio) == 0)
+        return 0;
+
+    IOLockLock(np->wlock);
+    int error = whandle_get(np, ctx, &fh);
+    if (error) {
+        IOLockUnlock(np->wlock);
+        return error;
+    }
+    if (ap->a_ioflag & IO_APPEND) {
+        error = node_fetch(np, ctx, &attr);
+        if (!error)
+            uio_setoffset(uio, (off_t)attr.size);
+    }
+    off_t start = uio_offset(uio);
+    if (!error)
+        error = push_range(vp, start, start + uio_resid(uio));
+    uint32_t room = (uint32_t)MIN((user_ssize_t)np->vmp->session.max_io, uio_resid(uio));
+    char *buf = error ? NULL : IOMalloc(room);
+    if (!error && !buf)
+        error = ENOMEM;
+    off_t reach = start;
+    while (!error && uio_resid(uio) > 0) {
+        uint32_t len = (uint32_t)MIN((user_ssize_t)room, uio_resid(uio)), written = 0;
+        user_ssize_t resid = uio_resid(uio);
+        off_t at = uio_offset(uio);
+        error = uiomove(buf, (int)len, uio);
+        if (!error) {
+            reach = at + len;
+            error = write_part(np, ctx, fh, at, buf, len, &written);
+        }
+        if (error || written < len) {
+            uio_setresid(uio, resid - written);
+            uio_setoffset(uio, at + written);
+            break;
+        }
+    }
+    if (buf)
+        IOFree(buf, room);
+    off_t end = uio_offset(uio);
+    if (end > start && (ap->a_ioflag & IO_SYNC) && !error)
+        error = write_sync(np, ctx, fh);
+    whandle_put(np);
+    if (reach > start) {
+        IOLockLock(np->vmp->lock);
+        bool grew = end > (off_t)np->attr.size;
+        if (grew)
+            np->attr.size = (uint64_t)end;
+        np->attr_version = ++np->vmp->version;
+        np->expire = 0;
+        IOLockUnlock(np->vmp->lock);
+        if (grew)
+            ubc_setsize(vp, end);
+        if (ubc_pages_resident(vp))
+            ubc_msync(vp, start, reach, NULL, UBC_INVALIDATE);
+    }
+    IOLockUnlock(np->wlock);
+    return error;
+}
+
 static bool
 pagein_done(void *np)
 {
@@ -863,10 +1187,22 @@ virtiofs_vnop_pagein(struct vnop_pagein_args *ap)
 static int
 virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
 {
-    if (ap->a_pl && !(ap->a_flags & UPL_NOCOMMIT))
-        ubc_upl_commit_range(ap->a_pl, ap->a_pl_offset, (upl_size_t)ap->a_size,
-                             UPL_COMMIT_CLEAR_DIRTY | UPL_COMMIT_FREE_ON_EMPTY);
-    return 0;
+    vnode_t vp = ap->a_vp;
+
+    if (vfs_isrdonly(vnode_mount(vp))) {
+        if (ap->a_pl && !(ap->a_flags & UPL_NOCOMMIT))
+            ubc_upl_commit_range(ap->a_pl, ap->a_pl_offset, (upl_size_t)ap->a_size,
+                                 UPL_COMMIT_CLEAR_DIRTY | UPL_COMMIT_FREE_ON_EMPTY);
+        return 0;
+    }
+    return cluster_pageout(vp, ap->a_pl, ap->a_pl_offset, ap->a_f_offset, (int)ap->a_size, node_size(VTON(vp)),
+                           ap->a_flags);
+}
+
+static int
+virtiofs_vnop_mnomap(struct vnop_mnomap_args *ap)
+{
+    return vnode_isreg(ap->a_vp) ? push_dirty(ap->a_vp) : 0;
 }
 
 static int
@@ -885,28 +1221,49 @@ virtiofs_vnop_blockmap(struct vnop_blockmap_args *ap)
     return 0;
 }
 
-struct virtiofs_read {
+struct virtiofs_io {
     buf_t bp;
     struct virtiofs_node *np;
     uint32_t pending;
+    uint32_t chunks;
+    uint32_t count;
     int error;
+    bool write;
+    struct fuse_write_out out[];
 };
 
-static void
-read_done(void *arg, int error)
+static size_t
+io_size(bool write, uint32_t chunks)
 {
-    struct virtiofs_read *rd = arg;
+    return sizeof(struct virtiofs_io) + (write ? chunks * sizeof(struct fuse_write_out) : 0);
+}
+
+static void
+io_done(void *arg, int error)
+{
+    struct virtiofs_io *io = arg;
 
     if (error)
-        __atomic_store_n(&rd->error, error, __ATOMIC_RELAXED);
-    if (__atomic_sub_fetch(&rd->pending, 1, __ATOMIC_ACQ_REL) != 0)
+        __atomic_store_n(&io->error, error, __ATOMIC_RELAXED);
+    if (__atomic_sub_fetch(&io->pending, 1, __ATOMIC_ACQ_REL) != 0)
         return;
-    buf_t bp = rd->bp;
-    error = __atomic_load_n(&rd->error, __ATOMIC_RELAXED);
-    if (buf_flags(bp) & B_PAGEIO)
-        __atomic_sub_fetch(&rd->np->paging, 1, __ATOMIC_RELEASE);
-    handle_put(rd->np);
-    IOFree(rd, sizeof(*rd));
+    buf_t bp = io->bp;
+    struct virtiofs_node *np = io->np;
+    uint32_t max = np->vmp->session.max_io;
+    error = __atomic_load_n(&io->error, __ATOMIC_RELAXED);
+    if (io->write) {
+        for (uint32_t i = 0; !error && i < io->chunks; i++) {
+            if (io->out[i].size != MIN(io->count - i * max, max))
+                error = EIO;
+        }
+        node_stale(np);
+        whandle_put(np);
+    } else {
+        if (buf_flags(bp) & B_PAGEIO)
+            __atomic_sub_fetch(&np->paging, 1, __ATOMIC_RELEASE);
+        handle_put(np);
+    }
+    IOFree(io, io_size(io->write, io->chunks));
     buf_seterror(bp, error);
     buf_setresid(bp, error ? buf_count(bp) : 0);
     buf_biodone(bp);
@@ -918,43 +1275,64 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     buf_t bp = ap->a_bp;
     vnode_t vp = buf_vnode(bp);
     struct virtiofs_node *np = VTON(vp);
-    struct virtiofs_read *rd = NULL;
+    struct virtiofs_io *io = NULL;
+    bool write = !(buf_flags(bp) & B_READ);
     uint32_t count = buf_count(bp);
     uint32_t max = np->vmp->session.max_io;
-    uint32_t chunks = (count + max - 1) / max;
     off_t offset = buf_blkno(bp) * vfs_devblocksize(vnode_mount(vp));
     uint64_t fh = 0;
 
-    int error = (buf_flags(bp) & B_READ) ? 0 : EROFS;
-    if (!error && chunks)
-        error = (rd = IOMallocZero(sizeof(*rd))) ? handle_get(np, NULL, &fh) : ENOMEM;
-    if (error && rd)
-        IOFree(rd, sizeof(*rd));
+    int error = write && vfs_isrdonly(vnode_mount(vp)) ? EROFS : 0;
+    if (write) {
+        off_t size = node_size(np);
+        count = offset >= size ? 0 : (uint32_t)MIN((off_t)count, size - offset);
+    }
+    uint32_t chunks = (count + max - 1) / max;
+    if (!error && chunks) {
+        io = IOMallocZero(io_size(write, chunks));
+        error = !io ? ENOMEM : write ? whandle_get(np, NULL, &fh) : handle_get(np, NULL, &fh);
+    }
+    if (error && io)
+        IOFree(io, io_size(write, chunks));
     if (error || !chunks) {
         buf_seterror(bp, error);
-        buf_setresid(bp, error ? count : 0);
+        buf_setresid(bp, error ? buf_count(bp) : 0);
         buf_biodone(bp);
         return 0;
     }
 
-    rd->bp = bp;
-    rd->np = np;
-    rd->pending = chunks;
-    if (buf_flags(bp) & B_PAGEIO)
+    io->bp = bp;
+    io->np = np;
+    io->pending = chunks;
+    io->chunks = chunks;
+    io->count = count;
+    io->write = write;
+    if (!write && (buf_flags(bp) & B_PAGEIO))
         __atomic_add_fetch(&np->paging, 1, __ATOMIC_RELAXED);
-    for (uint32_t done = 0; done < count; done += max) {
-        struct fuse_read_in in = { .fh = fh, .offset = (uint64_t)offset + done, .size = MIN(count - done, max) };
+    for (uint32_t i = 0, done = 0; done < count; i++, done += max) {
+        uint32_t len = MIN(count - done, max);
+        struct fuse_read_in rin = { .fh = fh, .offset = (uint64_t)offset + done, .size = len };
+        struct fuse_write_in win = { .fh = fh, .offset = (uint64_t)offset + done, .size = len };
         struct virtiofs_call c = {
-            .opcode = FUSE_READ, .flags = VIRTIOFS_ZERO_FILL, .nodeid = np->nodeid,
-            .arg = { &in }, .arglen = { sizeof(in) }, .datalen = in.size,
+            .opcode = write ? FUSE_WRITE : FUSE_READ, .flags = write ? VIRTIOFS_DATA_OUT : VIRTIOFS_ZERO_FILL,
+            .nodeid = np->nodeid, .datalen = len,
         };
+        if (write) {
+            c.arg[0] = &win;
+            c.arglen[0] = sizeof(win);
+            c.reply = &io->out[i];
+            c.replylen = sizeof(io->out[i]);
+        } else {
+            c.arg[0] = &rin;
+            c.arglen[0] = sizeof(rin);
+        }
         if (buf_upl(bp)) {
             c.upl = buf_upl(bp);
             c.upl_offset = buf_uploffset(bp) + done;
         } else {
             c.data = (void *)(buf_dataptr(bp) + done);
         }
-        virtiofs_dev_submit(np->vmp->dev, &c, read_done, rd);
+        virtiofs_dev_submit(np->vmp->dev, &c, io_done, io);
     }
     return 0;
 }
@@ -966,9 +1344,20 @@ virtiofs_vnop_mmap(__unused struct vnop_mmap_args *ap)
 }
 
 static int
-virtiofs_vnop_fsync(__unused struct vnop_fsync_args *ap)
+virtiofs_vnop_fsync(struct vnop_fsync_args *ap)
 {
-    return 0;
+    vnode_t vp = ap->a_vp;
+    struct virtiofs_node *np = VTON(vp);
+    uint64_t fh;
+
+    if (!vnode_isreg(vp) || vfs_isrdonly(vnode_mount(vp)))
+        return 0;
+    int error = push_dirty(vp);
+    if (!error && whandle_hold(np, &fh)) {
+        error = write_sync(np, ap->a_context, fh);
+        whandle_put(np);
+    }
+    return error;
 }
 
 static int
@@ -1159,26 +1548,471 @@ virtiofs_vnop_pathconf(struct vnop_pathconf_args *ap)
 }
 
 static int
-virtiofs_vnop_getxattr(__unused struct vnop_getxattr_args *ap)
+truncate_begin(struct virtiofs_node *np, vfs_context_t ctx, off_t size, uint64_t *fh)
 {
-    return ENOATTR;
+    IOLockLock(np->vmp->lock);
+    bool opened = np->wopens != 0;
+    IOLockUnlock(np->vmp->lock);
+    int error = opened ? 0 : wfile_check(np, ctx);
+    if (!error)
+        error = whandle_get(np, ctx, fh);
+    if (error || size >= ubc_getsize(np->vp))
+        return error;
+    IOLockLock(np->vmp->lock);
+    np->attr.size = (uint64_t)size;
+    np->attr_version = ++np->vmp->version;
+    IOLockUnlock(np->vmp->lock);
+    ubc_setsize(np->vp, size);
+    return 0;
+}
+
+static int
+virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
+{
+    vnode_t vp = ap->a_vp;
+    struct vnode_attr *vap = ap->a_vap;
+    struct virtiofs_node *np = VTON(vp);
+    struct fuse_setattr_in in = {};
+    struct fuse_attr_out out = {};
+    struct virtiofs_call c = {
+        .opcode = FUSE_SETATTR, .nodeid = np->nodeid,
+        .arg = { &in }, .arglen = { sizeof(in) }, .reply = &out, .replylen = sizeof(out),
+    };
+    bool truncate = VATTR_IS_ACTIVE(vap, va_data_size) && vnode_isreg(vp);
+    uint64_t fh;
+
+    if (vfs_isrdonly(vnode_mount(vp)))
+        return EROFS;
+    if (VATTR_IS_ACTIVE(vap, va_acl) || VATTR_IS_ACTIVE(vap, va_uuuid) || VATTR_IS_ACTIVE(vap, va_guuid) ||
+        (VATTR_IS_ACTIVE(vap, va_flags) && vap->va_flags))
+        return ENOTSUP;
+    if (VATTR_IS_ACTIVE(vap, va_data_size) && vnode_isdir(vp))
+        return EISDIR;
+    VATTR_SET_SUPPORTED(vap, va_flags);
+    VATTR_SET_SUPPORTED(vap, va_data_size);
+    if (VATTR_IS_ACTIVE(vap, va_mode)) {
+        in.valid |= FATTR_MODE;
+        in.mode = vap->va_mode & SETTABLE_MODE;
+        VATTR_SET_SUPPORTED(vap, va_mode);
+    }
+    if (VATTR_IS_ACTIVE(vap, va_uid)) {
+        in.valid |= FATTR_UID;
+        in.uid = vap->va_uid;
+        VATTR_SET_SUPPORTED(vap, va_uid);
+    }
+    if (VATTR_IS_ACTIVE(vap, va_gid)) {
+        in.valid |= FATTR_GID;
+        in.gid = vap->va_gid;
+        VATTR_SET_SUPPORTED(vap, va_gid);
+    }
+    if (VATTR_IS_ACTIVE(vap, va_access_time)) {
+        in.valid |= (vap->va_vaflags & VA_UTIMES_NULL) ? FATTR_ATIME_NOW : FATTR_ATIME;
+        in.atime = (uint64_t)vap->va_access_time.tv_sec;
+        in.atimensec = (uint32_t)vap->va_access_time.tv_nsec;
+        VATTR_SET_SUPPORTED(vap, va_access_time);
+    }
+    if (VATTR_IS_ACTIVE(vap, va_modify_time)) {
+        in.valid |= (vap->va_vaflags & VA_UTIMES_NULL) ? FATTR_MTIME_NOW : FATTR_MTIME;
+        in.mtime = (uint64_t)vap->va_modify_time.tv_sec;
+        in.mtimensec = (uint32_t)vap->va_modify_time.tv_nsec;
+        VATTR_SET_SUPPORTED(vap, va_modify_time);
+    }
+    if (truncate) {
+        in.valid |= FATTR_SIZE | FATTR_FH;
+        in.size = (uint64_t)vap->va_data_size;
+    }
+    if (!in.valid)
+        return 0;
+
+    if (truncate) {
+        IOLockLock(np->wlock);
+        int error = truncate_begin(np, ap->a_context, vap->va_data_size, &fh);
+        if (error) {
+            IOLockUnlock(np->wlock);
+            return error;
+        }
+        in.fh = fh;
+    }
+    uint64_t version = virtiofs_version(np->vmp);
+    int error = virtiofs_call(np->vmp, ap->a_context, &c);
+    if (!error && (c.replylen != sizeof(out) || !virtiofs_attr_ok(&out.attr) ||
+                   IFTOVT(out.attr.mode) != vnode_vtype(vp)))
+        error = EIO;
+    if (!error)
+        node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
+    else
+        node_stale(np);
+    if (truncate) {
+        whandle_put(np);
+        IOLockLock(np->vmp->lock);
+        bool idle = !np->wopens && !vnode_isinuse(vp, 0);
+        IOLockUnlock(np->vmp->lock);
+        if (idle)
+            whandle_close(np);
+        IOLockUnlock(np->wlock);
+    }
+    return error;
+}
+
+static int
+name_check(struct componentname *cnp)
+{
+    if (virtiofs_name_ok(cnp->cn_nameptr, (uint32_t)cnp->cn_namelen))
+        return 0;
+    return cnp->cn_namelen > VIRTIOFS_NAME_MAX ? ENAMETOOLONG : EINVAL;
+}
+
+static int
+entry_reply(struct virtiofs_node *dnp, vfs_context_t ctx, struct virtiofs_call *c, struct fuse_entry_out *entry,
+            uint32_t want, struct componentname *cnp, vnode_t *vpp)
+{
+    int error = name_check(cnp);
+
+    if (error)
+        return error;
+    error = virtiofs_call(dnp->vmp, ctx, c);
+    uint64_t version = dir_changed(dnp, cnp);
+    if (!error && (c->replylen != want || !entry->nodeid))
+        error = EIO;
+    if (!error)
+        error = virtiofs_node_get(dnp->vmp, entry, version, 1, dnp->vp, cnp, vpp);
+    if (!error)
+        name_remember(dnp, *vpp, cnp, entry, version);
+    return error;
+}
+
+static int
+make_node(struct virtiofs_node *dnp, vfs_context_t ctx, struct componentname *cnp, uint32_t mode, vnode_t *vpp)
+{
+    struct fuse_mknod_in in = { .mode = mode };
+    struct fuse_entry_out out = {};
+    struct virtiofs_call c = {
+        .opcode = FUSE_MKNOD, .nodeid = dnp->nodeid,
+        .arg = { &in, cnp->cn_nameptr, "" }, .arglen = { sizeof(in), (uint32_t)cnp->cn_namelen, 1 },
+        .reply = &out, .replylen = sizeof(out),
+    };
+
+    return entry_reply(dnp, ctx, &c, &out, sizeof(out), cnp, vpp);
+}
+
+static int
+virtiofs_vnop_create(struct vnop_create_args *ap)
+{
+    struct virtiofs_node *dnp = VTON(ap->a_dvp);
+    struct componentname *cnp = ap->a_cnp;
+    uint32_t mode = (uint32_t)(S_IFREG | (ap->a_vap->va_mode & SETTABLE_MODE));
+    struct fuse_create_in in = { .flags = VIRTIOFS_O_WRONLY | VIRTIOFS_O_CREAT | VIRTIOFS_O_EXCL, .mode = mode };
+    struct {
+        struct fuse_entry_out entry;
+        struct fuse_open_out open;
+    } out = {};
+    struct virtiofs_call c = {
+        .opcode = FUSE_CREATE, .nodeid = dnp->nodeid,
+        .arg = { &in, cnp->cn_nameptr, "" }, .arglen = { sizeof(in), (uint32_t)cnp->cn_namelen, 1 },
+        .reply = &out, .replylen = sizeof(out),
+    };
+
+    if (vfs_isrdonly(vnode_mount(ap->a_dvp)))
+        return EROFS;
+    if (ap->a_vap->va_type != VREG)
+        return EINVAL;
+    int error = entry_reply(dnp, ap->a_context, &c, &out.entry, sizeof(out), cnp, ap->a_vpp);
+    if (error == ENOSYS)
+        return make_node(dnp, ap->a_context, cnp, mode, ap->a_vpp);
+    if (!error)
+        whandle_adopt(VTON(*ap->a_vpp), out.open.fh, current_thread());
+    return error;
+}
+
+static int
+virtiofs_vnop_mknod(struct vnop_mknod_args *ap)
+{
+    enum vtype type = ap->a_vap->va_type;
+
+    if (vfs_isrdonly(vnode_mount(ap->a_dvp)))
+        return EROFS;
+    if (type != VFIFO && type != VSOCK)
+        return ENOTSUP;
+    uint32_t mode = (uint32_t)((type == VFIFO ? S_IFIFO : S_IFSOCK) | (ap->a_vap->va_mode & SETTABLE_MODE));
+    return make_node(VTON(ap->a_dvp), ap->a_context, ap->a_cnp, mode, ap->a_vpp);
+}
+
+static int
+virtiofs_vnop_mkdir(struct vnop_mkdir_args *ap)
+{
+    struct virtiofs_node *dnp = VTON(ap->a_dvp);
+    struct componentname *cnp = ap->a_cnp;
+    struct fuse_mkdir_in in = { .mode = (uint32_t)(ap->a_vap->va_mode & SETTABLE_MODE) };
+    struct fuse_entry_out out = {};
+    struct virtiofs_call c = {
+        .opcode = FUSE_MKDIR, .nodeid = dnp->nodeid,
+        .arg = { &in, cnp->cn_nameptr, "" }, .arglen = { sizeof(in), (uint32_t)cnp->cn_namelen, 1 },
+        .reply = &out, .replylen = sizeof(out),
+    };
+
+    if (vfs_isrdonly(vnode_mount(ap->a_dvp)))
+        return EROFS;
+    return entry_reply(dnp, ap->a_context, &c, &out, sizeof(out), cnp, ap->a_vpp);
+}
+
+static int
+virtiofs_vnop_symlink(struct vnop_symlink_args *ap)
+{
+    struct virtiofs_node *dnp = VTON(ap->a_dvp);
+    struct componentname *cnp = ap->a_cnp;
+    size_t len = strnlen(ap->a_target, MAXPATHLEN);
+    struct fuse_entry_out out = {};
+    struct virtiofs_call c = {
+        .opcode = FUSE_SYMLINK, .flags = VIRTIOFS_DATA_OUT, .nodeid = dnp->nodeid,
+        .arg = { cnp->cn_nameptr, "" }, .arglen = { (uint32_t)cnp->cn_namelen, 1 },
+        .reply = &out, .replylen = sizeof(out), .data = (void *)(uintptr_t)ap->a_target, .datalen = (uint32_t)len + 1,
+    };
+
+    if (vfs_isrdonly(vnode_mount(ap->a_dvp)))
+        return EROFS;
+    if (len == 0 || len >= MAXPATHLEN)
+        return len ? ENAMETOOLONG : ENOENT;
+    return entry_reply(dnp, ap->a_context, &c, &out, sizeof(out), cnp, ap->a_vpp);
+}
+
+static int
+virtiofs_vnop_link(struct vnop_link_args *ap)
+{
+    struct virtiofs_node *tdnp = VTON(ap->a_tdvp);
+    struct componentname *cnp = ap->a_cnp;
+    struct fuse_link_in in = { .oldnodeid = VTON(ap->a_vp)->nodeid };
+    struct fuse_entry_out out = {};
+    struct virtiofs_call c = {
+        .opcode = FUSE_LINK, .nodeid = tdnp->nodeid,
+        .arg = { &in, cnp->cn_nameptr, "" }, .arglen = { sizeof(in), (uint32_t)cnp->cn_namelen, 1 },
+        .reply = &out, .replylen = sizeof(out),
+    };
+    vnode_t vp;
+
+    if (vfs_isrdonly(vnode_mount(ap->a_vp)))
+        return EROFS;
+    if (vnode_isdir(ap->a_vp))
+        return EPERM;
+    int error = entry_reply(tdnp, ap->a_context, &c, &out, sizeof(out), cnp, &vp);
+    if (!error)
+        vnode_put(vp);
+    return error;
+}
+
+static void
+node_gone(vnode_t vp)
+{
+    struct virtiofs_node *np = VTON(vp);
+
+    IOLockLock(np->vmp->lock);
+    bool last = vnode_isdir(vp) || np->attr.nlink <= 1;
+    if (last)
+        name_drop_locked(np);
+    np->expire = 0;
+    IOLockUnlock(np->vmp->lock);
+    if (last)
+        vnode_recycle(vp);
+}
+
+static int
+remove_name(vnode_t dvp, vnode_t vp, struct componentname *cnp, uint32_t opcode, vfs_context_t ctx)
+{
+    struct virtiofs_node *dnp = VTON(dvp);
+    struct virtiofs_call c = {
+        .opcode = opcode, .nodeid = dnp->nodeid,
+        .arg = { cnp->cn_nameptr, "" }, .arglen = { (uint32_t)cnp->cn_namelen, 1 },
+    };
+
+    if (vfs_isrdonly(vnode_mount(dvp)))
+        return EROFS;
+    int error = name_check(cnp);
+    if (error)
+        return error;
+    error = virtiofs_call(dnp->vmp, ctx, &c);
+    dir_changed(dnp, cnp);
+    if (!error)
+        node_gone(vp);
+    return error;
+}
+
+static int
+virtiofs_vnop_remove(struct vnop_remove_args *ap)
+{
+    if ((ap->a_flags & VNODE_REMOVE_NODELETEBUSY) && vnode_isinuse(ap->a_vp, 0))
+        return EBUSY;
+    return remove_name(ap->a_dvp, ap->a_vp, ap->a_cnp, FUSE_UNLINK, ap->a_context);
+}
+
+static int
+virtiofs_vnop_rmdir(struct vnop_rmdir_args *ap)
+{
+    return remove_name(ap->a_dvp, ap->a_vp, ap->a_cnp, FUSE_RMDIR, ap->a_context);
+}
+
+static int
+virtiofs_vnop_rename(struct vnop_rename_args *ap)
+{
+    struct virtiofs_node *fdnp = VTON(ap->a_fdvp), *tdnp = VTON(ap->a_tdvp);
+    struct componentname *fcnp = ap->a_fcnp, *tcnp = ap->a_tcnp;
+    struct fuse_rename_in in = { .newdir = tdnp->nodeid };
+    uint32_t tlen = (uint32_t)tcnp->cn_namelen + 1;
+
+    if (vfs_isrdonly(vnode_mount(ap->a_fdvp)))
+        return EROFS;
+    int error = name_check(fcnp);
+    if (!error)
+        error = name_check(tcnp);
+    if (error)
+        return error;
+    char *target = IOMalloc(tlen);
+    if (!target)
+        return ENOMEM;
+    memcpy(target, tcnp->cn_nameptr, tlen - 1);
+    target[tlen - 1] = '\0';
+    struct virtiofs_call c = {
+        .opcode = FUSE_RENAME, .flags = VIRTIOFS_DATA_OUT, .nodeid = fdnp->nodeid,
+        .arg = { &in, fcnp->cn_nameptr, "" }, .arglen = { sizeof(in), (uint32_t)fcnp->cn_namelen, 1 },
+        .data = target, .datalen = tlen,
+    };
+    error = virtiofs_call(fdnp->vmp, ap->a_context, &c);
+    IOFree(target, tlen);
+    dir_changed(fdnp, fcnp);
+    dir_changed(tdnp, tcnp);
+    if (!error) {
+        node_stale(VTON(ap->a_fvp));
+        if (ap->a_tvp && ap->a_tvp != ap->a_fvp)
+            node_gone(ap->a_tvp);
+    }
+    return error;
+}
+
+static int
+xattr_get(vnode_t vp, vfs_context_t ctx, uint32_t opcode, const char *name, uio_t uio, size_t *size)
+{
+    struct virtiofs_node *np = VTON(vp);
+    uint32_t namelen = name ? (uint32_t)strlen(name) : 0;
+    uint32_t room = uio ? (uint32_t)MIN(uio_resid(uio), (user_ssize_t)np->vmp->session.max_io) : 0;
+    struct fuse_getxattr_in in = { .size = room };
+    struct fuse_getxattr_out out = {};
+    struct virtiofs_call c = {
+        .opcode = opcode, .nodeid = np->nodeid,
+        .arg = { &in, name, name ? "" : NULL }, .arglen = { sizeof(in), namelen, name ? 1 : 0 },
+    };
+    char *buf = NULL;
+
+    if (uio && uio_offset(uio) != 0)
+        return ENOTSUP;
+    if (room) {
+        if (!(buf = IOMalloc(room)))
+            return ENOMEM;
+        c.data = buf;
+        c.datalen = room;
+    } else {
+        c.reply = &out;
+        c.replylen = sizeof(out);
+    }
+    int error = virtiofs_call(np->vmp, ctx, &c);
+    if (!error && !room && c.replylen != sizeof(out))
+        error = EIO;
+    if (!error && room && opcode == FUSE_LISTXATTR && !virtiofs_xattr_list_ok(buf, c.datalen))
+        error = EIO;
+    if (!error && room)
+        error = uiomove(buf, (int)c.datalen, uio);
+    if (!error && !room && size)
+        *size = out.size;
+    if (buf)
+        IOFree(buf, room);
+    return error;
+}
+
+static int
+virtiofs_vnop_getxattr(struct vnop_getxattr_args *ap)
+{
+    return xattr_get(ap->a_vp, ap->a_context, FUSE_GETXATTR, ap->a_name, ap->a_uio, ap->a_size);
 }
 
 static int
 virtiofs_vnop_listxattr(struct vnop_listxattr_args *ap)
 {
-    if (!ap->a_uio)
-        *ap->a_size = 0;
-    return 0;
+    return xattr_get(ap->a_vp, ap->a_context, FUSE_LISTXATTR, NULL, ap->a_uio, ap->a_size);
+}
+
+static int
+virtiofs_vnop_setxattr(struct vnop_setxattr_args *ap)
+{
+    vnode_t vp = ap->a_vp;
+    struct virtiofs_node *np = VTON(vp);
+    uio_t uio = ap->a_uio;
+    uint32_t len = (uint32_t)uio_resid(uio);
+    struct fuse_setxattr_in in = {
+        .size = len,
+        .flags = ((ap->a_options & XATTR_CREATE) ? VIRTIOFS_XATTR_CREATE : 0) |
+                 ((ap->a_options & XATTR_REPLACE) ? VIRTIOFS_XATTR_REPLACE : 0),
+    };
+    uint32_t inlen = (np->vmp->session.flags & FUSE_SETXATTR_EXT) ? sizeof(in) : FUSE_COMPAT_SETXATTR_IN_SIZE;
+
+    if (vfs_isrdonly(vnode_mount(vp)))
+        return EROFS;
+    if (uio_offset(uio) != 0)
+        return ENOTSUP;
+    if (uio_resid(uio) > (user_ssize_t)np->vmp->session.max_io)
+        return E2BIG;
+    char *buf = len ? IOMalloc(len) : NULL;
+    if (len && !buf)
+        return ENOMEM;
+    int error = len ? uiomove(buf, (int)len, uio) : 0;
+    struct virtiofs_call c = {
+        .opcode = FUSE_SETXATTR, .flags = VIRTIOFS_DATA_OUT, .nodeid = np->nodeid,
+        .arg = { &in, ap->a_name, "" }, .arglen = { inlen, (uint32_t)strlen(ap->a_name), 1 },
+        .data = buf, .datalen = len,
+    };
+    IOLockLock(np->vmp->xattr_lock);
+    if (!error && in.flags) {
+        error = xattr_get(vp, ap->a_context, FUSE_GETXATTR, ap->a_name, NULL, NULL);
+        if (error == 0 && (in.flags & VIRTIOFS_XATTR_CREATE))
+            error = EEXIST;
+        else if (error == ENOATTR && (in.flags & VIRTIOFS_XATTR_CREATE))
+            error = 0;
+    }
+    if (!error)
+        error = virtiofs_call(np->vmp, ap->a_context, &c);
+    IOLockUnlock(np->vmp->xattr_lock);
+    if (buf)
+        IOFree(buf, len);
+    node_stale(np);
+    return error;
+}
+
+static int
+virtiofs_vnop_removexattr(struct vnop_removexattr_args *ap)
+{
+    struct virtiofs_node *np = VTON(ap->a_vp);
+    struct virtiofs_call c = {
+        .opcode = FUSE_REMOVEXATTR, .nodeid = np->nodeid,
+        .arg = { ap->a_name, "" }, .arglen = { (uint32_t)strlen(ap->a_name), 1 },
+    };
+
+    if (vfs_isrdonly(vnode_mount(ap->a_vp)))
+        return EROFS;
+    IOLockLock(np->vmp->xattr_lock);
+    int error = virtiofs_call(np->vmp, ap->a_context, &c);
+    IOLockUnlock(np->vmp->xattr_lock);
+    node_stale(np);
+    return error;
 }
 
 static int
 virtiofs_vnop_inactive(struct vnop_inactive_args *ap)
 {
-    if (vnode_isreg(ap->a_vp))
-        file_idle(VTON(ap->a_vp));
-    else
-        dir_close(VTON(ap->a_vp));
+    vnode_t vp = ap->a_vp;
+
+    if (vnode_isreg(vp)) {
+        push_dirty(vp);
+        whandle_close(VTON(vp));
+        file_idle(VTON(vp));
+    } else {
+        dir_close(VTON(vp));
+    }
     return 0;
 }
 
@@ -1190,6 +2024,7 @@ virtiofs_vnop_reclaim(struct vnop_reclaim_args *ap)
     struct virtiofs_mount *vmp = np->vmp;
     uint64_t fh;
 
+    whandle_close(np);
     IOLockLock(vmp->lock);
     while (np->users || (np->flags & VN_OPENING)) {
         np->flags |= VN_WANT;
@@ -1215,7 +2050,7 @@ virtiofs_vnop_reclaim(struct vnop_reclaim_args *ap)
         virtiofs_dev_forget(vmp->dev, np->nodeid, nlookup);
     vnode_removefsref(vp);
     vnode_clearfsnode(vp);
-    IOFree(np, sizeof(*np));
+    node_free(np);
     return 0;
 }
 
@@ -1227,7 +2062,18 @@ static const struct vnodeopv_entry_desc virtiofs_vnodeop_entries[] = {
     { &vnop_open_desc, (VOPFUNC)virtiofs_vnop_open },
     { &vnop_close_desc, (VOPFUNC)virtiofs_vnop_close },
     { &vnop_getattr_desc, (VOPFUNC)virtiofs_vnop_getattr },
+    { &vnop_setattr_desc, (VOPFUNC)virtiofs_vnop_setattr },
     { &vnop_read_desc, (VOPFUNC)virtiofs_vnop_read },
+    { &vnop_write_desc, (VOPFUNC)virtiofs_vnop_write },
+    { &vnop_create_desc, (VOPFUNC)virtiofs_vnop_create },
+    { &vnop_mknod_desc, (VOPFUNC)virtiofs_vnop_mknod },
+    { &vnop_mkdir_desc, (VOPFUNC)virtiofs_vnop_mkdir },
+    { &vnop_symlink_desc, (VOPFUNC)virtiofs_vnop_symlink },
+    { &vnop_link_desc, (VOPFUNC)virtiofs_vnop_link },
+    { &vnop_remove_desc, (VOPFUNC)virtiofs_vnop_remove },
+    { &vnop_rmdir_desc, (VOPFUNC)virtiofs_vnop_rmdir },
+    { &vnop_rename_desc, (VOPFUNC)virtiofs_vnop_rename },
+    { &vnop_mnomap_desc, (VOPFUNC)virtiofs_vnop_mnomap },
     { &vnop_pagein_desc, (VOPFUNC)virtiofs_vnop_pagein },
     { &vnop_pageout_desc, (VOPFUNC)virtiofs_vnop_pageout },
     { &vnop_blockmap_desc, (VOPFUNC)virtiofs_vnop_blockmap },
@@ -1240,6 +2086,8 @@ static const struct vnodeopv_entry_desc virtiofs_vnodeop_entries[] = {
     { &vnop_pathconf_desc, (VOPFUNC)virtiofs_vnop_pathconf },
     { &vnop_getxattr_desc, (VOPFUNC)virtiofs_vnop_getxattr },
     { &vnop_listxattr_desc, (VOPFUNC)virtiofs_vnop_listxattr },
+    { &vnop_setxattr_desc, (VOPFUNC)virtiofs_vnop_setxattr },
+    { &vnop_removexattr_desc, (VOPFUNC)virtiofs_vnop_removexattr },
     { &vnop_inactive_desc, (VOPFUNC)virtiofs_vnop_inactive },
     { &vnop_reclaim_desc, (VOPFUNC)virtiofs_vnop_reclaim },
     { NULL, NULL }
@@ -1253,6 +2101,7 @@ static const struct vnodeopv_entry_desc virtiofs_fifoop_entries[] = {
     { &vnop_open_desc, (VOPFUNC)fifo_open },
     { &vnop_close_desc, (VOPFUNC)fifo_close },
     { &vnop_getattr_desc, (VOPFUNC)virtiofs_vnop_getattr },
+    { &vnop_setattr_desc, (VOPFUNC)virtiofs_vnop_setattr },
     { &vnop_read_desc, (VOPFUNC)fifo_read },
     { &vnop_write_desc, (VOPFUNC)fifo_write },
     { &vnop_ioctl_desc, (VOPFUNC)fifo_ioctl },
@@ -1263,6 +2112,8 @@ static const struct vnodeopv_entry_desc virtiofs_fifoop_entries[] = {
     { &vnop_pathconf_desc, (VOPFUNC)fifo_pathconf },
     { &vnop_getxattr_desc, (VOPFUNC)virtiofs_vnop_getxattr },
     { &vnop_listxattr_desc, (VOPFUNC)virtiofs_vnop_listxattr },
+    { &vnop_setxattr_desc, (VOPFUNC)virtiofs_vnop_setxattr },
+    { &vnop_removexattr_desc, (VOPFUNC)virtiofs_vnop_removexattr },
     { &vnop_inactive_desc, (VOPFUNC)virtiofs_vnop_inactive },
     { &vnop_reclaim_desc, (VOPFUNC)virtiofs_vnop_reclaim },
     { NULL, NULL }

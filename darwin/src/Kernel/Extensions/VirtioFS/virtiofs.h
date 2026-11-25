@@ -21,6 +21,7 @@ struct virtiofs_mount {
     struct virtiofs_session session;
     IOLock *lock;
     IOLock *move_lock;
+    IOLock *xattr_lock;
     uint64_t rootid;
     uint64_t version;
     vnode_t root;
@@ -43,5 +44,6 @@ int virtiofs_vfs_register(void);
 int virtiofs_vfs_unregister(void);
 int virtiofs_call(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_call *call);
 uint64_t virtiofs_version(struct virtiofs_mount *vmp);
+void virtiofs_vnode_push(vnode_t vp);
 int virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry, uint64_t version,
                       uint64_t nlookup, vnode_t dvp, struct componentname *cnp, vnode_t *vpp);
