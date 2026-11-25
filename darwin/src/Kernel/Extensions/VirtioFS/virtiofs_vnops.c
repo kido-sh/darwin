@@ -80,6 +80,7 @@ struct virtiofs_node {
     uint32_t readers;
     uint32_t pageouts[2];
     uint32_t pageout_gen;
+    uint32_t push_failures;
     uint32_t wusers;
     uint32_t wopens;
     uint32_t ropens;
@@ -1052,16 +1053,28 @@ push_range(vnode_t vp, off_t start, off_t end)
     return ubc_pages_resident(vp) ? ubc_msync(vp, start, end, NULL, UBC_PUSHDIRTY | UBC_SYNC) : 0;
 }
 
+static void
+push_failed(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    np->push_failures++;
+    np->flags |= VN_UNPUSHED;
+    IOLockUnlock(np->vmp->lock);
+}
+
 static int
 push_dirty(vnode_t vp)
 {
     struct virtiofs_node *np = VTON(vp);
-    int error = push_range(vp, 0, ubc_getsize(vp));
 
     IOLockLock(np->vmp->lock);
+    uint32_t failures = np->push_failures;
+    IOLockUnlock(np->vmp->lock);
+    int error = push_range(vp, 0, ubc_getsize(vp));
     if (error)
-        np->flags |= VN_UNPUSHED;
-    else
+        push_failed(np);
+    IOLockLock(np->vmp->lock);
+    if (!error && np->push_failures == failures)
         np->flags &= ~VN_UNPUSHED;
     IOLockUnlock(np->vmp->lock);
     return error;
@@ -1677,6 +1690,8 @@ io_done(void *arg, int error)
             if (io->part[i].out.size != io->part[i].want)
                 error = EIO;
         }
+        if (error)
+            push_failed(np);
         node_stale(np);
         whandle_put(np);
         pageout_done(np, io->gen);
@@ -1761,6 +1776,8 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
         IOFree(io, io_size(write, chunks));
     if (error && counted)
         pageout_done(np, gen);
+    if (error && write)
+        push_failed(np);
     if (error || !chunks) {
         buf_seterror(bp, error);
         buf_setresid(bp, error ? buf_count(bp) : 0);
