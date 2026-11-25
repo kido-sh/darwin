@@ -212,10 +212,10 @@ node_fetch(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
         error = EIO;
     if (error)
         return error;
-    node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
+    bool applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
     IOLockLock(np->vmp->lock);
     wait_clear(np, VN_SIZING);
-    *attr = np->attr;
+    *attr = applied ? np->attr : out.attr;
     IOLockUnlock(np->vmp->lock);
     return 0;
 }
