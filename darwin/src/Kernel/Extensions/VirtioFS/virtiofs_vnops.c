@@ -192,17 +192,29 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
 
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
+    if (np->attr_version > version) {
+        IOLockUnlock(vmp->lock);
+        return false;
+    }
+    if (np->flags & VN_TRUNCATING) {
+        uint64_t kept = np->attr.size;
+        np->attr = *attr;
+        np->attr.size = kept;
+        np->expire = 0;
+        np->attr_version = ++vmp->version;
+        IOLockUnlock(vmp->lock);
+        return true;
+    }
     bool changed = vnode_isreg(vp) && attr_changed(&np->attr, attr);
-    bool sizing = changed && np->attr_version <= version && !(np->flags & VN_TRUNCATING);
     off_t size = (off_t)attr->size, old = (off_t)np->attr.size;
-    if (sizing) {
+    if (changed) {
         np->flags |= VN_SIZING;
         np->push_limit = old;
         if (size != old)
             readers_wait_locked(np);
     }
     if (np->attr_version > version || (np->flags & VN_TRUNCATING)) {
-        if (sizing)
+        if (changed)
             wake(np, VN_SIZING);
         IOLockUnlock(vmp->lock);
         return false;
