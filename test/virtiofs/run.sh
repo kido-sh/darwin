@@ -16,7 +16,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 img=$1
 kido=${KIDO:-kido}
 limit=${TIMEOUT:-120}
-work=$(mktemp -d "${TMPDIR:-/tmp}/kido-virtiofs.XXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/kido-virtiofs.XXXX") && work=$(cd "$work" && pwd -P) || exit 1
 name=virtiofs-test
 export KIDO_HOME=$work/home KIDO_BACKEND=vz
 trap '"$kido" rm -f $name >/dev/null 2>&1; chmod -R u+rwX "$work"; rm -rf "$work"' EXIT
@@ -123,6 +123,7 @@ check "a FIFO on the share works as a pipe" prints hello guest /bin/sh -c 'echo 
 check "concurrent reads" guest /tmp/t_virtiofs stress /mnt/data 16 2
 
 mid=$(host_fds)
+check "the host opened files of the share for the guest" test "$mid" -gt "$before"
 printf 'changed\n' >> "$share/small/16384"
 rm "$share/many/f1"
 mv "$share/deep/1/2/3/4" "$share/deep/1/2/3/four"
