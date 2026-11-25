@@ -898,6 +898,7 @@ virtiofs_vnop_readdir(struct vnop_readdir_args *ap)
             .arg = { &in }, .arglen = { sizeof(in) }, .datalen = size, .data = buf,
         };
         struct virtiofs_dirent d;
+        uint64_t start = cookie;
         uint32_t pos = 0;
         int more = 0;
 
@@ -915,7 +916,7 @@ virtiofs_vnop_readdir(struct vnop_readdir_args *ap)
                 cookie = d.off;
             }
         }
-        if (!error && !full && more < 0 && count == 0)
+        if (!error && !full && count == 0 && (more < 0 || (skipped && cookie == start)))
             error = EIO;
         eof = !error && c.datalen == 0;
     } while (!error && !eof && !full && count == 0 && skipped);
