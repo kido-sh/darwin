@@ -64,12 +64,14 @@ struct virtiofs_node {
     uint64_t attr_version;
     uint64_t parent;
     uint64_t entry_expire;
+    off_t push_limit;
     uint64_t name_version;
     char *name;
     uint32_t namelen;
     uint32_t fh_ctimensec;
     struct fuse_attr attr;
     uint32_t users;
+    uint32_t readers;
     uint32_t wusers;
     uint32_t wopens;
     uint32_t ropens;
@@ -139,6 +141,15 @@ virtiofs_version(struct virtiofs_mount *vmp)
     return version;
 }
 
+static void
+readers_wait_locked(struct virtiofs_node *np)
+{
+    while (np->readers) {
+        np->flags |= VN_WANT;
+        IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
+    }
+}
+
 static bool
 node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec, uint32_t nsec, uint64_t version)
 {
@@ -147,23 +158,27 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
 
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
+    bool changed = vnode_isreg(vp) && attr_changed(&np->attr, attr);
+    off_t size = (off_t)attr->size, old = (off_t)np->attr.size;
+    if (changed) {
+        np->flags |= VN_SIZING;
+        np->push_limit = old;
+        if (size != old)
+            readers_wait_locked(np);
+    }
     if (np->attr_version > version) {
+        if (changed)
+            wake(np, VN_SIZING);
         IOLockUnlock(vmp->lock);
         return false;
     }
-    if (!attr_changed(&np->attr, attr) || !vnode_isreg(vp)) {
-        np->attr = *attr;
-        np->expire = deadline(sec, nsec);
-        np->attr_version = ++vmp->version;
-        IOLockUnlock(vmp->lock);
-        return true;
-    }
-    np->flags |= VN_SIZING;
-    off_t size = (off_t)attr->size;
-    if (attr->size < np->attr.size)
-        np->attr.size = attr->size;
+    np->push_limit = MIN(old, size);
+    np->attr = *attr;
+    np->expire = deadline(sec, nsec);
     np->attr_version = ++vmp->version;
     IOLockUnlock(vmp->lock);
+    if (!changed)
+        return true;
 
     off_t cached = ubc_getsize(vp);
     if (size < cached)
@@ -172,11 +187,7 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         ubc_msync(vp, 0, MAX(cached, size), NULL, UBC_PUSHDIRTY | UBC_SYNC | UBC_INVALIDATE);
     if (size > cached)
         ubc_setsize(vp, size);
-
     IOLockLock(vmp->lock);
-    np->attr = *attr;
-    np->expire = deadline(sec, nsec);
-    np->attr_version = ++vmp->version;
     wake(np, VN_SIZING);
     IOLockUnlock(vmp->lock);
     return true;
@@ -226,17 +237,20 @@ node_changed(struct virtiofs_node *np, off_t from, off_t to, off_t size, bool ex
 
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
+    off_t old = (off_t)np->attr.size;
+    bool resize = exact ? size != old : size > old;
     np->flags |= VN_SIZING;
+    np->push_limit = old;
+    if (resize) {
+        readers_wait_locked(np);
+        np->push_limit = MIN(old, size);
+        np->attr.size = (uint64_t)size;
+    }
     np->attr_version = ++vmp->version;
     np->expire = 0;
     IOLockUnlock(vmp->lock);
     if (to > from && ubc_pages_resident(vp))
         ubc_msync(vp, from, to, NULL, UBC_INVALIDATE);
-    IOLockLock(vmp->lock);
-    bool resize = exact ? size != (off_t)np->attr.size : size > (off_t)np->attr.size;
-    if (resize)
-        np->attr.size = (uint64_t)size;
-    IOLockUnlock(vmp->lock);
     if (resize)
         ubc_setsize(vp, size);
     IOLockLock(vmp->lock);
@@ -264,6 +278,15 @@ node_size(struct virtiofs_node *np)
 {
     IOLockLock(np->vmp->lock);
     off_t size = (off_t)np->attr.size;
+    IOLockUnlock(np->vmp->lock);
+    return size;
+}
+
+static off_t
+node_push_limit(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    off_t size = (np->flags & VN_SIZING) ? np->push_limit : (off_t)np->attr.size;
     IOLockUnlock(np->vmp->lock);
     return size;
 }
@@ -1138,7 +1161,17 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
         error = node_attr(np, ap->a_context, &attr);
     if (error)
         return error;
-    return cluster_read(vp, uio, (off_t)attr.size, ap->a_ioflag);
+    IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_SIZING);
+    np->readers++;
+    off_t size = (off_t)np->attr.size;
+    IOLockUnlock(np->vmp->lock);
+    error = cluster_read(vp, uio, size, ap->a_ioflag);
+    IOLockLock(np->vmp->lock);
+    if (--np->readers == 0)
+        wake(np, 0);
+    IOLockUnlock(np->vmp->lock);
+    return error;
 }
 
 static int
@@ -1345,7 +1378,7 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
                                  UPL_COMMIT_CLEAR_DIRTY | UPL_COMMIT_FREE_ON_EMPTY);
         return 0;
     }
-    return cluster_pageout(vp, ap->a_pl, ap->a_pl_offset, ap->a_f_offset, (int)ap->a_size, node_size(VTON(vp)),
+    return cluster_pageout(vp, ap->a_pl, ap->a_pl_offset, ap->a_f_offset, (int)ap->a_size, node_push_limit(VTON(vp)),
                            ap->a_flags);
 }
 
@@ -1442,7 +1475,7 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
 
     int error = write && vfs_isrdonly(vnode_mount(vp)) ? EROFS : 0;
     if (write) {
-        off_t size = node_size(np);
+        off_t size = node_push_limit(np);
         count = offset >= size ? 0 : (uint32_t)MIN((off_t)count, size - offset);
     }
     uint32_t chunks = (count + max - 1) / max;
@@ -1781,6 +1814,9 @@ node_resize(struct virtiofs_node *np, off_t size)
     IOLockLock(np->vmp->lock);
     wait_clear(np, VN_SIZING);
     np->flags |= VN_SIZING;
+    np->push_limit = (off_t)np->attr.size;
+    readers_wait_locked(np);
+    np->push_limit = MIN((off_t)np->attr.size, size);
     np->attr.size = (uint64_t)size;
     np->attr_version = ++np->vmp->version;
     IOLockUnlock(np->vmp->lock);
