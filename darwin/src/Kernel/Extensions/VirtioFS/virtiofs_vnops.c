@@ -1231,8 +1231,9 @@ virtiofs_vnop_close(struct vnop_close_args *ap)
 {
     if (!vnode_isreg(ap->a_vp))
         return 0;
+    int error = (ap->a_fflag & FWRITE) ? push_dirty(ap->a_vp) : 0;
     file_closed(VTON(ap->a_vp), ap->a_fflag);
-    return (ap->a_fflag & FWRITE) ? push_dirty(ap->a_vp) : 0;
+    return error;
 }
 
 static int
@@ -1502,6 +1503,7 @@ virtiofs_vnop_mnomap(struct vnop_mnomap_args *ap)
     IOLockLock(VTON(vp)->vmp->lock);
     VTON(vp)->flags &= ~(VN_MAPPED | VN_MAPPED_WRITE);
     IOLockUnlock(VTON(vp)->vmp->lock);
+    whandle_close(VTON(vp), false);
     return error;
 }
 
@@ -1693,8 +1695,13 @@ file_sync(vnode_t vp, vfs_context_t ctx)
     if (vfs_isrdonly(vnode_mount(vp)) || !(vnode_isreg(vp) || vnode_isdir(vp)))
         return 0;
     int error = vnode_isreg(vp) ? push_dirty(vp) : 0;
-    if (error || vnode_isrecycled(vp))
+    if (vnode_isrecycled(vp))
         return error;
+    if (error) {
+        if (vnode_isreg(vp))
+            whandle_close(np, false);
+        return error;
+    }
     if (vnode_isreg(vp) && whandle_hold(np, &fh)) {
         error = write_sync(np, ctx, fh, FUSE_FSYNC);
         whandle_put(np);
