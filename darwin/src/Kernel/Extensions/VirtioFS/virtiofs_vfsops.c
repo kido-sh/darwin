@@ -155,6 +155,7 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
     }
     vmp->mp = mp;
     vmp->dev = dev;
+    vmp->case_sensitive = -1;
     vmp->lock = IOLockAlloc();
     vmp->move_lock = IOLockAlloc();
     vmp->xattr_lock = IOLockAlloc();
@@ -261,8 +262,12 @@ virtiofs_getattr(mount_t mp, struct vfs_attr *fsap, vfs_context_t ctx)
                           VOL_CAP_FMT_2TB_FILESIZE;
         uint32_t interfaces = VOL_CAP_INT_ADVLOCK | VOL_CAP_INT_FLOCK | VOL_CAP_INT_EXTENDED_ATTR;
         *cap = (vol_capabilities_attr_t){};
+        int sensitive = __atomic_load_n(&vmp->case_sensitive, __ATOMIC_RELAXED);
+        if (sensitive > 0)
+            format |= VOL_CAP_FMT_CASE_SENSITIVE;
         cap->capabilities[VOL_CAPABILITIES_FORMAT] = format;
-        cap->valid[VOL_CAPABILITIES_FORMAT] = format | VOL_CAP_FMT_JOURNAL | VOL_CAP_FMT_JOURNAL_ACTIVE |
+        cap->valid[VOL_CAPABILITIES_FORMAT] = format | (sensitive >= 0 ? VOL_CAP_FMT_CASE_SENSITIVE : 0) |
+                                              VOL_CAP_FMT_JOURNAL | VOL_CAP_FMT_JOURNAL_ACTIVE |
                                               VOL_CAP_FMT_NO_ROOT_TIMES | VOL_CAP_FMT_ZERO_RUNS |
                                               VOL_CAP_FMT_FAST_STATFS | VOL_CAP_FMT_OPENDENYMODES |
                                               VOL_CAP_FMT_HIDDEN_FILES | VOL_CAP_FMT_PATH_FROM_ID;

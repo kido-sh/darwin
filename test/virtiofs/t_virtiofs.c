@@ -1106,6 +1106,20 @@ rw_errors(const char *root)
     outcome("getxattr into a buffer too small", (int)getxattr("a", "user.big", buf, 10, 0, 0));
     outcome("getxattr of a directory's missing attribute", (int)getxattr("d", "user.none", buf, sizeof(buf), 0, 0));
     outcome("chflags 0", chflags("a", 0));
+    fd = open("case", O_WRONLY | O_CREAT | O_EXCL, 0644);
+    close(fd);
+    long sensitive = pathconf("case", _PC_CASE_SENSITIVE);
+    printf("case sensitive: %ld\n", sensitive);
+    outcome("rename to another case", rename("case", "CASE"));
+    DIR *d = opendir(".");
+    struct dirent *de;
+    while (d && (de = readdir(d)) != NULL)
+        if (!strcasecmp(de->d_name, "case"))
+            printf("listed after the rename: %s\n", de->d_name);
+    if (d)
+        closedir(d);
+    struct stat st;
+    outcome("lookup in another case", stat("cAsE", &st));
     chdir("/");
     return 0;
 }

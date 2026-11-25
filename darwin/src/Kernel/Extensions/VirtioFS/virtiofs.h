@@ -27,6 +27,7 @@ struct virtiofs_mount {
     vnode_t root;
     uint32_t hash_bits;
     uint32_t nidle;
+    int case_sensitive;
     struct virtiofs_bucket *hash;
     struct virtiofs_bucket *names;
     TAILQ_HEAD(virtiofs_idle, virtiofs_node) idle;

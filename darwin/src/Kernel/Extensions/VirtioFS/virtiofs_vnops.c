@@ -1575,9 +1575,60 @@ virtiofs_vnop_readlink(struct vnop_readlink_args *ap)
 }
 
 static int
+case_sensitive(vnode_t vp, vfs_context_t ctx, int32_t *retval)
+{
+    struct virtiofs_node *np = VTON(vp);
+    struct virtiofs_mount *vmp = np->vmp;
+    int known = __atomic_load_n(&vmp->case_sensitive, __ATOMIC_RELAXED);
+
+    if (known >= 0) {
+        *retval = known;
+        return 0;
+    }
+    vnode_t dvp = vnode_getparent(vp);
+    const char *name = vnode_getname(vp);
+    size_t len = name ? strnlen(name, VIRTIOFS_NAME_MAX + 1) : 0;
+    char *flipped = len && len <= VIRTIOFS_NAME_MAX && dvp ? IOMalloc(len) : NULL;
+    bool letters = false;
+
+    for (size_t i = 0; flipped && i < len; i++) {
+        char c = name[i];
+        letters |= (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        flipped[i] = c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c;
+    }
+    if (letters) {
+        struct fuse_entry_out entry;
+        uint64_t version;
+        int error = lookup_name(VTON(dvp), ctx, flipped, (uint32_t)len, &entry, &version);
+        if (!error) {
+            forget(vmp, entry.nodeid, 1);
+            known = entry.nodeid != np->nodeid;
+        } else if (error == ENOENT) {
+            known = 1;
+        }
+    }
+    if (flipped)
+        IOFree(flipped, len);
+    if (name)
+        vnode_putname(name);
+    if (dvp)
+        vnode_put(dvp);
+    if (known < 0)
+        return EINVAL;
+    __atomic_store_n(&vmp->case_sensitive, known, __ATOMIC_RELAXED);
+    *retval = known;
+    return 0;
+}
+
+static int
 virtiofs_vnop_pathconf(struct vnop_pathconf_args *ap)
 {
     switch (ap->a_name) {
+    case _PC_CASE_SENSITIVE:
+        return case_sensitive(ap->a_vp, ap->a_context, ap->a_retval);
+    case _PC_CASE_PRESERVING:
+        *ap->a_retval = 1;
+        return 0;
     case _PC_LINK_MAX:
         *ap->a_retval = LINK_MAX;
         return 0;
