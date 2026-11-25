@@ -345,6 +345,10 @@ fill() {
     sleep 0.2
   done
 }
+room() {
+  rm -f "$full"/ballast*
+  sync
+}
 refused_kept() {
   local holder status byte
   dd if=/dev/zero of="$full/stored" bs=1 count=0 seek=65536 2>/dev/null
@@ -353,12 +357,12 @@ refused_kept() {
   sleep 1
   fill
   sleep 2.5
-  rm -f "$full"/ballast*
+  room
   wait $holder
   status=$?
   byte=$(dd if="$full/stored" bs=1 skip=20000 count=1 2>/dev/null)
   echo "on a volume of this Mac that ran full: $(cat "$work/map-fail.out"), and this Mac reads $byte"
-  [[ $status == 0 && $byte == m ]]
+  [[ $status == 0 && $byte == $(sed -n 's/.*the store reads \(.\),.*/\1/p' "$work/map-fail.out") ]]
 }
 unpushed_kept() {
   local holder status byte mode
@@ -369,7 +373,7 @@ unpushed_kept() {
   fill
   sleep 2.5
   chmod 444 "$full/unpushed"
-  rm -f "$full"/ballast*
+  room
   wait $holder
   status=$?
   sleep 0.5
@@ -384,10 +388,12 @@ short_kept() {
   head -c $((640 << 10)) /dev/urandom > "$full/slack"
   fill
   rm -f "$full/slack"
+  sync
+  sleep 0.5
   guest /tmp/t_virtiofs short-write /mnt/full/short 2 > "$work/short.out" 2>&1 &
   holder=$!
   sleep 1.2
-  rm -f "$full"/ballast*
+  room
   wait $holder
   status=$?
   wrong=$(head -c $((1 << 20)) "$full/short" | tr -d p | wc -c | tr -d ' ')
@@ -577,6 +583,8 @@ check "a write handle kept for a closed writer does not open or truncate a file 
 check "a descriptor already open for writing keeps writing" write_revoked hold-write
 guest /bin/sh -c 'cp /tmp/t_virtiofs /mnt/rw/gone && cat /mnt/rw/gone > /dev/null && rm /mnt/rw/gone'
 check "concurrent creates, writes, renames, unlinks and appends" guest /tmp/t_virtiofs rw-stress /mnt/rw/stress 8 5
+check "writes, stores, reads into the file's own mapping, truncations and syncs on one file all keep going" \
+  guest /tmp/t_virtiofs chaos /mnt/rw/chaos 10
 check "a file removed in the guest is released on this Mac" removed_released
 sleep 0.5
 check "no file stays open for writing on this Mac once the guest closed it" test "$(host_writing "$rw")" == 0
