@@ -200,6 +200,9 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         if (size > old && (old & PAGE_MASK))
             page_drop(vp, old & ~(off_t)PAGE_MASK);
     }
+    IOLockLock(vmp->lock);
+    np->push_limit = size;
+    IOLockUnlock(vmp->lock);
     if (size > cached)
         ubc_setsize(vp, size);
     IOLockLock(vmp->lock);
@@ -264,14 +267,17 @@ node_changed(struct virtiofs_node *np, off_t tail, off_t from, off_t to, off_t s
     np->attr_version = ++vmp->version;
     np->expire = 0;
     IOLockUnlock(vmp->lock);
-    if (ubc_pages_resident(vp)) {
-        if (tail >= 0) {
-            page_drop(vp, tail);
-            from = MAX(from, tail + PAGE_SIZE);
-        }
-        if (to > from)
-            ubc_msync(vp, from, to, NULL, UBC_INVALIDATE);
+    if (tail >= 0 && ubc_pages_resident(vp)) {
+        page_drop(vp, tail);
+        from = MAX(from, tail + PAGE_SIZE);
     }
+    if (resize && size > old) {
+        IOLockLock(vmp->lock);
+        np->push_limit = size;
+        IOLockUnlock(vmp->lock);
+    }
+    if (to > from && ubc_pages_resident(vp))
+        ubc_msync(vp, from, to, NULL, UBC_INVALIDATE);
     if (resize)
         ubc_setsize(vp, size);
     IOLockLock(vmp->lock);
@@ -304,10 +310,11 @@ node_size(struct virtiofs_node *np)
 }
 
 static off_t
-node_push_limit(struct virtiofs_node *np)
+node_push_limit(struct virtiofs_node *np, off_t offset)
 {
     IOLockLock(np->vmp->lock);
-    off_t size = (np->flags & VN_SIZING) ? np->push_limit : (off_t)np->attr.size;
+    bool clip = (np->flags & VN_SIZING) && offset < round_page_64(np->push_limit);
+    off_t size = clip ? np->push_limit : (off_t)np->attr.size;
     IOLockUnlock(np->vmp->lock);
     return size;
 }
@@ -1396,8 +1403,8 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
                                  UPL_COMMIT_CLEAR_DIRTY | UPL_COMMIT_FREE_ON_EMPTY);
         return 0;
     }
-    return cluster_pageout(vp, ap->a_pl, ap->a_pl_offset, ap->a_f_offset, (int)ap->a_size, node_push_limit(VTON(vp)),
-                           ap->a_flags);
+    return cluster_pageout(vp, ap->a_pl, ap->a_pl_offset, ap->a_f_offset, (int)ap->a_size,
+                           node_push_limit(VTON(vp), ap->a_f_offset), ap->a_flags);
 }
 
 static int
@@ -1493,7 +1500,7 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
 
     int error = write && vfs_isrdonly(vnode_mount(vp)) ? EROFS : 0;
     if (write) {
-        off_t size = node_push_limit(np);
+        off_t size = node_push_limit(np, offset);
         count = offset >= size ? 0 : (uint32_t)MIN((off_t)count, size - offset);
     }
     uint32_t chunks = (count + max - 1) / max;
