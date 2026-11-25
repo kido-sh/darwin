@@ -282,6 +282,7 @@ guest /tmp/t_virtiofs xattrs /mnt/rw/x > "$work/xattrs.guest"
 check "extended attributes match this Mac's" diff -u "$work/xattrs.host" "$work/xattrs.guest"
 check "this Mac holds the attributes the guest set" diff -u "$work/xattrs.guest" <("$work/t_virtiofs" xattr-list "$rw/x")
 check "writes, stores through a mapping and truncation agree" guest /tmp/t_virtiofs coherence /mnt/rw/coherent
+check "a descriptor keeps working after its file is removed or renamed" guest /tmp/t_virtiofs open-unlink /mnt/rw/ou
 check "setuid and setgid bits set in the guest do not reach this Mac" setuid_dropped
 check "a file this Mac makes read-only cannot be opened for writing or truncated" write_revoked hold
 check "a descriptor already open for writing keeps writing" write_revoked hold-write

@@ -1227,6 +1227,38 @@ coherence(const char *path)
 }
 
 static int
+open_unlink(const char *dir)
+{
+    char held[1024], moved[1024], buf[8] = { 0 };
+    struct stat st;
+
+    snprintf(held, sizeof(held), "%s/held", dir);
+    snprintf(moved, sizeof(moved), "%s/moved", dir);
+    CHECK(mkdir(dir, 0755) == 0, "mkdir %s: %s", dir, strerror(errno));
+    int fd = open(held, O_RDWR | O_CREAT | O_EXCL, 0644);
+    CHECK(fd >= 0 && write(fd, "one", 3) == 3, "create: %s", strerror(errno));
+    CHECK(unlink(held) == 0, "unlink of an open file: %s", strerror(errno));
+    CHECK(access(held, F_OK) != 0, "the removed name is gone");
+    CHECK(write(fd, "two", 3) == 3, "write after the unlink: %s", strerror(errno));
+    CHECK(pread(fd, buf, 6, 0) == 6 && !memcmp(buf, "onetwo", 6), "read after the unlink: %s", strerror(errno));
+    CHECK(fstat(fd, &st) == 0 && st.st_size == 6, "fstat after the unlink: size %lld", (long long)st.st_size);
+    CHECK(fsync(fd) == 0 && fcntl(fd, F_FULLFSYNC) == 0 && fcntl(fd, F_BARRIERFSYNC) == 0, "sync: %s",
+          strerror(errno));
+    CHECK(close(fd) == 0, "close: %s", strerror(errno));
+    fd = open(held, O_RDWR | O_CREAT | O_EXCL, 0644);
+    CHECK(fd >= 0 && write(fd, "abc", 3) == 3, "create again: %s", strerror(errno));
+    CHECK(rename(held, moved) == 0, "rename of an open file: %s", strerror(errno));
+    CHECK(write(fd, "def", 3) == 3, "write after the rename: %s", strerror(errno));
+    CHECK(close(fd) == 0, "close: %s", strerror(errno));
+    memset(buf, 0, sizeof(buf));
+    fd = open(moved, O_RDONLY);
+    CHECK(fd >= 0 && read(fd, buf, 6) == 6 && !memcmp(buf, "abcdef", 6), "the renamed file has both writes");
+    close(fd);
+    printf("open-unlink: %d failures\n", failures);
+    return failures ? 1 : 0;
+}
+
+static int
 hold_write(const char *path, int seconds)
 {
     int fd = open(path, O_WRONLY | O_APPEND);
@@ -1505,6 +1537,8 @@ main(int argc, char **argv)
         return xattr_list(argv[2], argc == 4 && !strcmp(argv[3], "all"));
     if (argc == 3 && !strcmp(argv[1], "coherence"))
         return coherence(argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "open-unlink"))
+        return open_unlink(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "hold-write"))
         return hold_write(argv[2], atoi(argv[3]));
     if (argc == 5 && !strcmp(argv[1], "rw-stress"))
