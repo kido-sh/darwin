@@ -2370,9 +2370,12 @@ virtiofs_vnop_rename(struct vnop_rename_args *ap)
         node_stale(VTON(ap->a_fvp));
         if (node_place(ap->a_fvp, ap->a_tdvp, tcnp)) {
             IOLockLock(fdnp->vmp->move_lock);
-            vnode_update_identity(ap->a_fvp, NULLVP, tcnp->cn_nameptr, tcnp->cn_namelen, tcnp->cn_hash,
-                                  VNODE_UPDATE_PARENT | VNODE_UPDATE_NAME);
+            const char *had = vnode_getname(ap->a_fvp);
+            vnode_update_identity(ap->a_fvp, NULLVP, had ? NULL : tcnp->cn_nameptr, had ? 0 : tcnp->cn_namelen,
+                                  had ? 0 : tcnp->cn_hash, VNODE_UPDATE_PARENT | VNODE_UPDATE_NAME);
             IOLockUnlock(fdnp->vmp->move_lock);
+            if (had)
+                vnode_putname(had);
         }
         if (ap->a_tvp && ap->a_tvp != ap->a_fvp)
             node_gone(ap->a_tvp);
