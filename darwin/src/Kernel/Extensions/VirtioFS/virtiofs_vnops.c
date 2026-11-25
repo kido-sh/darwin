@@ -153,6 +153,21 @@ sizing_done(struct virtiofs_node *np, uint32_t also)
     wake(np, VN_SIZING | also);
 }
 
+static void
+sizing_after_waiters(struct virtiofs_node *np)
+{
+    uint64_t patience = deadline(0, NSEC_PER_MSEC);
+
+    while ((np->flags & VN_SIZING) || (np->waiters && mach_absolute_time() < patience)) {
+        np->flags |= VN_WANT;
+        if (np->flags & VN_SIZING)
+            IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
+        else
+            IOLockSleepDeadline(np->vmp->lock, np, patience, THREAD_UNINT);
+    }
+    sizing_set(np);
+}
+
 static bool
 attr_changed(const struct fuse_attr *a, const struct fuse_attr *b)
 {
@@ -1546,11 +1561,7 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
 
     *written = 0;
     IOLockLock(vmp->lock);
-    while ((np->flags & VN_SIZING) || np->waiters) {
-        np->flags |= VN_WANT;
-        IOLockSleep(vmp->lock, np, THREAD_UNINT);
-    }
-    sizing_set(np);
+    sizing_after_waiters(np);
     readers_wait_locked(np);
     off_t old = (off_t)np->attr.size;
     bool mapped = np->flags & VN_MAPPED;
