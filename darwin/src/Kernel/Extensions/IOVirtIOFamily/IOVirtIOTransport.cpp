@@ -49,6 +49,7 @@ enum {
     kCommonQueueDesc           = 32,
     kCommonQueueDriver         = 40,
     kCommonQueueDevice         = 48,
+    kCommonCfgLength           = 56,
 };
 
 static inline void w8(volatile uint8_t *p, uint8_t v)   { *p = v; }
@@ -132,7 +133,7 @@ static IOMemoryMap *mapBar(IOPCIDevice *pci, uint8_t bar)
 IOVirtIOTransport::IOVirtIOTransport()
     : fPCIDevice(0), fCommonCfgMap(0), fNotifyCfgMap(0), fIsrCfgMap(0), fDeviceCfgMap(0),
       fCommonCfg(0), fNotifyCfg(0), fIsrCfg(0), fDeviceCfg(0), fNotifyOffMultiplier(0),
-      fShmCount(0)
+      fNotifyLength(0), fDeviceCfgLength(0), fShmCount(0)
 {
 }
 
@@ -185,6 +186,12 @@ IOVirtIOTransport::attach(IOPCIDevice *pci)
             IOLog("IOVirtIOTransport: failed to map BAR%u for cap type=%u\n", bar, cfgType);
             continue;
         }
+        if ((uint64_t)off + len > map->getLength() || !len ||
+            (cfgType == VIRTIO_PCI_CAP_COMMON_CFG && len < kCommonCfgLength)) {
+            IOLog("IOVirtIOTransport: cap type=%u window 0x%x+0x%x does not fit BAR%u\n", cfgType, off, len, bar);
+            map->release();
+            continue;
+        }
         volatile uint8_t *base_va = (volatile uint8_t *)map->getVirtualAddress() + off;
 
         switch (cfgType) {
@@ -192,14 +199,14 @@ IOVirtIOTransport::attach(IOPCIDevice *pci)
             fCommonCfgMap = map; fCommonCfg = base_va;
             break;
         case VIRTIO_PCI_CAP_NOTIFY_CFG:
-            fNotifyCfgMap = map; fNotifyCfg = base_va;
+            fNotifyCfgMap = map; fNotifyCfg = base_va; fNotifyLength = len;
             fNotifyOffMultiplier = pci->configRead32((UInt8)(base + kCapNotifyMult));
             break;
         case VIRTIO_PCI_CAP_ISR_CFG:
             fIsrCfgMap = map; fIsrCfg = base_va;
             break;
         case VIRTIO_PCI_CAP_DEVICE_CFG:
-            fDeviceCfgMap = map; fDeviceCfg = base_va;
+            fDeviceCfgMap = map; fDeviceCfg = base_va; fDeviceCfgLength = len;
             break;
         default:
             map->release();
@@ -255,6 +262,7 @@ IOVirtIOTransport::detach()
     if (fIsrCfgMap)    { fIsrCfgMap->release();    fIsrCfgMap = 0; }
     if (fDeviceCfgMap) { fDeviceCfgMap->release();  fDeviceCfgMap = 0; }
     fCommonCfg = fNotifyCfg = fIsrCfg = fDeviceCfg = 0;
+    fNotifyLength = fDeviceCfgLength = 0;
     fPCIDevice = 0;
 }
 
@@ -343,6 +351,9 @@ IOVirtIOTransport::initQueue(VirtQueue *vq, uint16_t index, uint16_t size)
         return false;
     if (size > maxSize) size = maxSize;
     vq->queueSize = size;
+    size_t notifyOff = (size_t)r16(fCommonCfg + kCommonQueueNotifyOff) * fNotifyOffMultiplier;
+    if (notifyOff + sizeof(uint16_t) > fNotifyLength)
+        return false;
 
     size_t descBytes  = sizeof(VRingDesc) * size;
     size_t availBytes = sizeof(VRingAvailHdr) + sizeof(uint16_t) * size;
@@ -370,8 +381,7 @@ IOVirtIOTransport::initQueue(VirtQueue *vq, uint16_t index, uint16_t size)
     w16(fCommonCfg + kCommonQueueSize, vq->queueSize);
     w16(fCommonCfg + kCommonQueueEnable, 1);
 
-    vq->notifyAddr = fNotifyCfg +
-        (size_t)r16(fCommonCfg + kCommonQueueNotifyOff) * fNotifyOffMultiplier;
+    vq->notifyAddr = fNotifyCfg + notifyOff;
     return true;
 }
 

@@ -120,6 +120,7 @@ public:
     bool sharedMemoryRegion(uint8_t shmid, uint64_t *outPhys, uint64_t *outLength);
 
     volatile uint8_t *deviceConfig() const { return fDeviceCfg; }
+    uint32_t deviceConfigLength() const { return fDeviceCfgLength; }
     uint8_t readIsr(); // clears the ISR status bits on read, per spec
     // msi-x table entries for one queue and for config changes, kNoVector leaves one silent
     enum { kNoVector = 0xffff };
@@ -138,6 +139,8 @@ private:
     volatile uint8_t  *fIsrCfg;
     volatile uint8_t  *fDeviceCfg;
     uint32_t           fNotifyOffMultiplier;
+    uint32_t           fNotifyLength;
+    uint32_t           fDeviceCfgLength;
 
     struct SharedMemoryCap { uint8_t id, bar; uint64_t offset, length; };
     enum { kMaxSharedMemoryCaps = 4 };

@@ -66,7 +66,7 @@ VirtioFSDevice::start(IOService *provider)
     fIndirect = features != 0;
     volatile uint8_t *cfg = fTransport.deviceConfig();
     char tag[37] = {};
-    for (unsigned i = 0; cfg && i < 36; i++)
+    for (unsigned i = 0; cfg && i < 36 && i < fTransport.deviceConfigLength(); i++)
         tag[i] = (char)cfg[i];
 
     if (!tag[0] || !fTransport.negotiateFeatures(features) || !setupQueues() || !setupSlots() ||
