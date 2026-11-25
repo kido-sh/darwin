@@ -493,7 +493,7 @@ IOVirtIOTransport::pollForCompletion(VirtQueue *vq, unsigned timeoutMs, uint32_t
         if (outLen) *outLen = elem->len;
         if (outId)  *outId  = (uint16_t)elem->id;
     }
-    vq->lastUsedIdx = (uint16_t)(vq->lastUsedIdx + 1);
+    __atomic_store_n(&vq->lastUsedIdx, (uint16_t)(vq->lastUsedIdx + 1), __ATOMIC_RELAXED);
     return true;
 }
 

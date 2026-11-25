@@ -246,12 +246,12 @@ VirtioFSDevice::drainLocked(unsigned q)
             putSlotLocked(slot);
         } else if (slot->async) {
             slot->used = used;
-            slot->replied = true;
+            __atomic_store_n(&slot->replied, true, __ATOMIC_RELAXED);
             slot->next = fReaped;
             fReaped = slot;
         } else {
             slot->used = used;
-            slot->replied = true;
+            __atomic_store_n(&slot->replied, true, __ATOMIC_RELAXED);
             IOLockWakeup(fLock, slot, true);
         }
     }
@@ -312,7 +312,6 @@ VirtioFSDevice::spinLocked(VirtioFSSlot *slot, uint32_t datalen)
 {
     VirtQueue *vq = &fQueues[kRequests];
     volatile VRingUsedHdr *used = (volatile VRingUsedHdr *)vq->used;
-    volatile bool *replied = &slot->replied;
     int spin = __atomic_load_n(&virtiofs_spin_us, __ATOMIC_RELAXED);
     uint64_t limit;
 
@@ -325,7 +324,8 @@ VirtioFSDevice::spinLocked(VirtioFSSlot *slot, uint32_t datalen)
     while (ready && !slot->replied && !fDead) {
         IOLockUnlock(fLock);
         reap();
-        while (!(ready = used->idx != vq->lastUsedIdx) && !*replied && mach_absolute_time() < limit)
+        while (!(ready = used->idx != __atomic_load_n(&vq->lastUsedIdx, __ATOMIC_RELAXED)) &&
+               !__atomic_load_n(&slot->replied, __ATOMIC_RELAXED) && mach_absolute_time() < limit)
             __builtin_arm_yield();
         IOLockLock(fLock);
         if (ready)
@@ -577,8 +577,6 @@ VirtioFSDevice::submit(struct virtiofs_call *c, virtiofs_done_t done, void *arg)
 void
 VirtioFSDevice::reap()
 {
-    if (!fReaped)
-        return;
     IOLockLock(fLock);
     VirtioFSSlot *list = fReaped;
     fReaped = NULL;
