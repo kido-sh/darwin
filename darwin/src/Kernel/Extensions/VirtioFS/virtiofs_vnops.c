@@ -139,7 +139,7 @@ virtiofs_version(struct virtiofs_mount *vmp)
     return version;
 }
 
-static void
+static bool
 node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec, uint32_t nsec, uint64_t version)
 {
     struct virtiofs_mount *vmp = np->vmp;
@@ -149,18 +149,20 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     wait_clear(np, VN_SIZING);
     if (np->attr_version > version) {
         IOLockUnlock(vmp->lock);
-        return;
+        return false;
     }
-    bool changed = attr_changed(&np->attr, attr);
-    np->attr = *attr;
-    np->expire = deadline(sec, nsec);
-    np->attr_version = ++vmp->version;
-    if (!changed || !vnode_isreg(vp)) {
+    if (!attr_changed(&np->attr, attr) || !vnode_isreg(vp)) {
+        np->attr = *attr;
+        np->expire = deadline(sec, nsec);
+        np->attr_version = ++vmp->version;
         IOLockUnlock(vmp->lock);
-        return;
+        return true;
     }
     np->flags |= VN_SIZING;
-    off_t size = (off_t)np->attr.size;
+    off_t size = (off_t)attr->size;
+    if (attr->size < np->attr.size)
+        np->attr.size = attr->size;
+    np->attr_version = ++vmp->version;
     IOLockUnlock(vmp->lock);
 
     off_t cached = ubc_getsize(vp);
@@ -172,8 +174,12 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         ubc_setsize(vp, size);
 
     IOLockLock(vmp->lock);
+    np->attr = *attr;
+    np->expire = deadline(sec, nsec);
+    np->attr_version = ++vmp->version;
     wake(np, VN_SIZING);
     IOLockUnlock(vmp->lock);
+    return true;
 }
 
 static int
@@ -210,6 +216,32 @@ node_attr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
         *attr = np->attr;
     IOLockUnlock(np->vmp->lock);
     return cached ? 0 : node_fetch(np, ctx, attr);
+}
+
+static void
+node_changed(struct virtiofs_node *np, off_t from, off_t to, off_t size, bool exact)
+{
+    struct virtiofs_mount *vmp = np->vmp;
+    vnode_t vp = np->vp;
+
+    IOLockLock(vmp->lock);
+    wait_clear(np, VN_SIZING);
+    np->flags |= VN_SIZING;
+    np->attr_version = ++vmp->version;
+    np->expire = 0;
+    IOLockUnlock(vmp->lock);
+    if (to > from && ubc_pages_resident(vp))
+        ubc_msync(vp, from, to, NULL, UBC_INVALIDATE);
+    IOLockLock(vmp->lock);
+    bool resize = exact ? size != (off_t)np->attr.size : size > (off_t)np->attr.size;
+    if (resize)
+        np->attr.size = (uint64_t)size;
+    IOLockUnlock(vmp->lock);
+    if (resize)
+        ubc_setsize(vp, size);
+    IOLockLock(vmp->lock);
+    wake(np, VN_SIZING);
+    IOLockUnlock(vmp->lock);
 }
 
 static void
@@ -1093,10 +1125,10 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
 }
 
 static int
-write_sync(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh)
+write_sync(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, uint32_t opcode)
 {
     struct fuse_fsync_in in = { .fh = fh };
-    struct virtiofs_call c = { .opcode = FUSE_FSYNC, .nodeid = np->nodeid, .arg = { &in }, .arglen = { sizeof(in) } };
+    struct virtiofs_call c = { .opcode = opcode, .nodeid = np->nodeid, .arg = { &in }, .arglen = { sizeof(in) } };
     int error = virtiofs_call(np->vmp, ctx, &c);
 
     return error == ENOSYS ? 0 : error;
@@ -1139,7 +1171,7 @@ write_batch_done(void *arg)
 
 static int
 write_batch(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, const char *buf, uint32_t len,
-            uint32_t *written)
+            uint32_t *written, bool *stray)
 {
     struct virtiofs_mount *vmp = np->vmp;
     uint32_t max = vmp->session.max_io, parts = (len + max - 1) / max;
@@ -1164,17 +1196,33 @@ write_batch(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, 
     IOLockUnlock(vmp->lock);
 
     int error = 0;
+    uint32_t bad = parts;
     *written = 0;
-    for (uint32_t i = 0; i < parts && !error; i++) {
+    for (uint32_t i = 0; i < parts && bad == parts; i++) {
         uint32_t size = MIN(len - i * max, max), done = batch.part[i].out.size;
         error = batch.part[i].error ? batch.part[i].error : done > size ? EIO : 0;
-        if (error)
-            break;
-        *written += done;
-        if (done < size)
-            break;
+        if (error || done < size)
+            bad = i;
+        if (!error)
+            *written += done;
     }
+    *stray = false;
+    for (uint32_t i = bad + 1; i < parts; i++)
+        *stray |= !batch.part[i].error && batch.part[i].out.size;
     return error;
+}
+
+static void
+write_cut(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t size)
+{
+    struct fuse_setattr_in in = { .valid = FATTR_SIZE | FATTR_FH, .fh = fh, .size = (uint64_t)size };
+    struct fuse_attr_out out = {};
+    struct virtiofs_call c = {
+        .opcode = FUSE_SETATTR, .nodeid = np->nodeid,
+        .arg = { &in }, .arglen = { sizeof(in) }, .reply = &out, .replylen = sizeof(out),
+    };
+
+    virtiofs_call(np->vmp, ctx, &c);
 }
 
 static int
@@ -1209,22 +1257,26 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
         if (!error)
             uio_setoffset(uio, (off_t)attr.size);
     }
-    off_t start = uio_offset(uio);
+    off_t start = uio_offset(uio), old = node_size(np);
+    off_t first = start > old ? old & ~(off_t)PAGE_MASK : start;
     if (!error)
-        error = push_range(vp, start, start + uio_resid(uio));
+        error = push_range(vp, first, start + uio_resid(uio));
     uint32_t room = (uint32_t)MIN((user_ssize_t)np->vmp->session.max_io * WRITE_DEPTH, uio_resid(uio));
     char *buf = error ? NULL : IOMalloc(room);
     if (!error && !buf)
         error = ENOMEM;
     off_t reach = start;
+    bool cut = false;
     while (!error && uio_resid(uio) > 0) {
         uint32_t len = (uint32_t)MIN((user_ssize_t)room, uio_resid(uio)), written = 0;
         user_ssize_t resid = uio_resid(uio);
         off_t at = uio_offset(uio);
         error = uiomove(buf, (int)len, uio);
         if (!error) {
+            bool stray;
             reach = at + len;
-            error = write_batch(np, ctx, fh, at, buf, len, &written);
+            error = write_batch(np, ctx, fh, at, buf, len, &written, &stray);
+            cut |= stray;
         }
         if (error || written < len) {
             uio_setresid(uio, resid - written);
@@ -1235,22 +1287,13 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     if (buf)
         IOFree(buf, room);
     off_t end = uio_offset(uio);
-    if (end > start && (ap->a_ioflag & IO_SYNC) && !error)
-        error = write_sync(np, ctx, fh);
+    if (cut && reach > MAX(old, end))
+        write_cut(np, ctx, fh, MAX(old, end));
+    if (end > start)
+        error = (ap->a_ioflag & IO_SYNC) ? write_sync(np, ctx, fh, FUSE_FSYNC) : 0;
     whandle_put(np);
-    if (reach > start) {
-        IOLockLock(np->vmp->lock);
-        bool grew = end > (off_t)np->attr.size;
-        if (grew)
-            np->attr.size = (uint64_t)end;
-        np->attr_version = ++np->vmp->version;
-        np->expire = 0;
-        IOLockUnlock(np->vmp->lock);
-        if (grew)
-            ubc_setsize(vp, end);
-        if (ubc_pages_resident(vp))
-            ubc_msync(vp, start, reach, NULL, UBC_INVALIDATE);
-    }
+    if (reach > start)
+        node_changed(np, first, reach, end, false);
     IOLockUnlock(np->wlock);
     return error;
 }
@@ -1458,7 +1501,7 @@ file_sync(vnode_t vp, vfs_context_t ctx)
         return 0;
     int error = push_dirty(vp);
     if (!error && whandle_hold(np, &fh)) {
-        error = write_sync(np, ctx, fh);
+        error = write_sync(np, ctx, fh, FUSE_FSYNC);
         whandle_put(np);
     }
     return error;
@@ -1710,8 +1753,23 @@ virtiofs_vnop_pathconf(struct vnop_pathconf_args *ap)
     }
 }
 
+static void
+node_resize(struct virtiofs_node *np, off_t size)
+{
+    IOLockLock(np->vmp->lock);
+    wait_clear(np, VN_SIZING);
+    np->flags |= VN_SIZING;
+    np->attr.size = (uint64_t)size;
+    np->attr_version = ++np->vmp->version;
+    IOLockUnlock(np->vmp->lock);
+    ubc_setsize(np->vp, size);
+    IOLockLock(np->vmp->lock);
+    wake(np, VN_SIZING);
+    IOLockUnlock(np->vmp->lock);
+}
+
 static int
-truncate_begin(struct virtiofs_node *np, vfs_context_t ctx, off_t size, uint64_t *fh)
+truncate_begin(struct virtiofs_node *np, vfs_context_t ctx, off_t size, uint64_t *fh, off_t *was)
 {
     IOLockLock(np->vmp->lock);
     bool opened = np->wopens != 0;
@@ -1719,13 +1777,19 @@ truncate_begin(struct virtiofs_node *np, vfs_context_t ctx, off_t size, uint64_t
     int error = opened ? 0 : wfile_check(np, ctx, false);
     if (!error)
         error = whandle_get(np, ctx, fh);
-    if (error || size >= ubc_getsize(np->vp))
+    if (error)
         return error;
-    IOLockLock(np->vmp->lock);
-    np->attr.size = (uint64_t)size;
-    np->attr_version = ++np->vmp->version;
-    IOLockUnlock(np->vmp->lock);
-    ubc_setsize(np->vp, size);
+    *was = node_size(np);
+    if (size < *was)
+        error = push_dirty(np->vp);
+    else if (*was & PAGE_MASK)
+        error = push_range(np->vp, *was & ~(off_t)PAGE_MASK, *was);
+    if (error) {
+        whandle_put(np);
+        return error;
+    }
+    if (size < *was)
+        node_resize(np, size);
     return 0;
 }
 
@@ -1787,9 +1851,10 @@ virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
     if (!in.valid)
         return 0;
 
+    off_t was = 0;
     if (truncate) {
         IOLockLock(np->wlock);
-        int error = truncate_begin(np, ap->a_context, vap->va_data_size, &fh);
+        int error = truncate_begin(np, ap->a_context, vap->va_data_size, &fh, &was);
         if (error) {
             IOLockUnlock(np->wlock);
             return error;
@@ -1801,10 +1866,17 @@ virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
     if (!error && (c.replylen != sizeof(out) || !virtiofs_attr_ok(&out.attr) ||
                    IFTOVT(out.attr.mode) != vnode_vtype(vp)))
         error = EIO;
-    if (!error)
-        node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
-    else
+    if (!error && truncate) {
+        off_t size = vap->va_data_size;
+        node_changed(np, size > was ? was & ~(off_t)PAGE_MASK : 0, size > was ? size : 0, size, true);
+    } else if (!error) {
+        if (!node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version))
+            node_stale(np);
+    } else {
+        if (truncate && was > vap->va_data_size)
+            node_resize(np, was);
         node_stale(np);
+    }
     if (truncate) {
         whandle_put(np);
         whandle_close(np, false);
