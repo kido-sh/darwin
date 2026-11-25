@@ -39,7 +39,7 @@ struct VirtioFSSlot {
     uint64_t inPhys;
     uint64_t outPhys;
     VirtioFSSlot *next;
-    struct virtiofs_call *call;
+    struct virtiofs_call call;
     IOMemoryDescriptor *data;
     virtiofs_done_t done;
     void *arg;
@@ -518,7 +518,8 @@ VirtioFSDevice::startLocked(struct virtiofs_call *c, VirtioFSRequest *r, uint32_
         memcpy((uint8_t *)(in + 1) + c->arglen[0], c->arg[1], c->arglen[1]);
     r->chain[0] = { slot->inPhys, inLen, false, false };
     r->chain[r->replyAt] = { slot->outPhys, (uint32_t)(sizeof(struct fuse_out_header) + c->replylen), true, false };
-    slot->call = done ? c : NULL;
+    if (async)
+        slot->call = *c;
     slot->data = r->data;
     slot->done = done;
     slot->arg = arg;
@@ -559,7 +560,7 @@ void
 VirtioFSDevice::submit(struct virtiofs_call *c, virtiofs_done_t done, void *arg)
 {
     VirtioFSRequest r;
-    int error = done || (!c->replylen && !c->datalen) ? buildRequest(c, &r) : EINVAL;
+    int error = buildRequest(c, &r);
     if (!error) {
         IOLockLock(fLock);
         if (!startLocked(c, &r, 0, 0, 0, true, done, arg))
@@ -568,7 +569,7 @@ VirtioFSDevice::submit(struct virtiofs_call *c, virtiofs_done_t done, void *arg)
         if (error)
             finishData(r.data, c, error);
     }
-    if (error && done)
+    if (error)
         done(arg, error);
     reap();
 }
@@ -587,17 +588,13 @@ VirtioFSDevice::reap()
         VirtioFSSlot *slot = list;
         virtiofs_done_t done = slot->done;
         void *arg = slot->arg;
-        int error = 0;
         list = slot->next;
-        if (done) {
-            error = slot->replied ? parseReply(slot, slot->call) : EIO;
-            finishData(slot->data, slot->call, error);
-        }
+        int error = slot->replied ? parseReply(slot, &slot->call) : EIO;
+        finishData(slot->data, &slot->call, error);
         IOLockLock(fLock);
         putSlotLocked(slot);
         IOLockUnlock(fLock);
-        if (done)
-            done(arg, error);
+        done(arg, error);
     }
 }
 

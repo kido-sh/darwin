@@ -57,6 +57,7 @@ struct virtiofs_node {
     uint32_t namelen;
     struct fuse_attr attr;
     uint32_t users;
+    uint32_t releasing;
     uint32_t flags;
 };
 
@@ -392,7 +393,7 @@ handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
     IOLockLock(vmp->lock);
     if (!error) {
         np->fh = out.fh;
-        np->flags |= VN_OPEN;
+        np->flags = (np->flags | VN_OPEN) & ~VN_CLOSING;
         np->users++;
         *fh = out.fh;
     }
@@ -402,29 +403,50 @@ handle_get(struct virtiofs_node *np, vfs_context_t ctx, uint64_t *fh)
 }
 
 static void
-handle_put(struct virtiofs_node *np, bool close)
+handle_put(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    if (--np->users == 0)
+        wake(np, 0);
+    IOLockUnlock(np->vmp->lock);
+}
+
+static void
+release_done(void *arg, __unused int error)
+{
+    struct virtiofs_node *np = arg;
+
+    IOLockLock(np->vmp->lock);
+    if (--np->releasing == 0)
+        wake(np, 0);
+    IOLockUnlock(np->vmp->lock);
+}
+
+static void
+handle_close(struct virtiofs_node *np)
 {
     struct virtiofs_mount *vmp = np->vmp;
     struct fuse_release_in in = {};
     struct virtiofs_call c = { .arg = { &in }, .arglen = { sizeof(in) } };
 
     IOLockLock(vmp->lock);
-    if (!close)
-        np->users--;
-    else if (np->flags & VN_OPEN)
-        np->flags |= VN_CLOSING;
-    bool release = np->users == 0 && (np->flags & VN_CLOSING);
+    np->flags |= VN_CLOSING;
+    while ((np->flags & VN_CLOSING) && (np->users || (np->flags & VN_OPENING))) {
+        np->flags |= VN_WANT;
+        IOLockSleep(vmp->lock, np, THREAD_UNINT);
+    }
+    bool release = (np->flags & (VN_OPEN | VN_CLOSING)) == (VN_OPEN | VN_CLOSING);
+    np->flags &= ~VN_CLOSING;
     if (release) {
-        np->flags &= ~(VN_OPEN | VN_CLOSING);
+        np->flags &= ~VN_OPEN;
+        np->releasing++;
         in.fh = np->fh;
         c.opcode = vnode_isdir(np->vp) ? FUSE_RELEASEDIR : FUSE_RELEASE;
         c.nodeid = np->nodeid;
     }
-    if (np->users == 0)
-        wake(np, 0);
     IOLockUnlock(vmp->lock);
     if (release)
-        virtiofs_dev_submit(vmp->dev, &c, NULL, NULL);
+        virtiofs_dev_submit(vmp->dev, &c, release_done, np);
 }
 
 static int
@@ -434,7 +456,7 @@ handle_check(struct virtiofs_node *np, vfs_context_t ctx)
     int error = handle_get(np, ctx, &fh);
 
     if (!error)
-        handle_put(np, false);
+        handle_put(np);
     return error;
 }
 
@@ -715,13 +737,8 @@ virtiofs_vnop_blockmap(struct vnop_blockmap_args *ap)
 struct virtiofs_read {
     buf_t bp;
     struct virtiofs_node *np;
-    uint32_t size;
     uint32_t pending;
     int error;
-    struct {
-        struct fuse_read_in in;
-        struct virtiofs_call call;
-    } chunk[];
 };
 
 static void
@@ -735,8 +752,8 @@ read_done(void *arg, int error)
         return;
     buf_t bp = rd->bp;
     error = __atomic_load_n(&rd->error, __ATOMIC_RELAXED);
-    handle_put(rd->np, false);
-    IOFree(rd, rd->size);
+    handle_put(rd->np);
+    IOFree(rd, sizeof(*rd));
     buf_seterror(bp, error);
     buf_setresid(bp, error ? buf_count(bp) : 0);
     buf_biodone(bp);
@@ -752,15 +769,14 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     uint32_t count = buf_count(bp);
     uint32_t max = np->vmp->session.max_io;
     uint32_t chunks = (count + max - 1) / max;
-    uint32_t size = (uint32_t)(sizeof(*rd) + chunks * sizeof(rd->chunk[0]));
     off_t offset = buf_blkno(bp) * vfs_devblocksize(vnode_mount(vp));
     uint64_t fh = 0;
 
     int error = (buf_flags(bp) & B_READ) ? 0 : EROFS;
     if (!error && chunks)
-        error = (rd = IOMallocZero(size)) ? handle_get(np, NULL, &fh) : ENOMEM;
+        error = (rd = IOMallocZero(sizeof(*rd))) ? handle_get(np, NULL, &fh) : ENOMEM;
     if (error && rd)
-        IOFree(rd, size);
+        IOFree(rd, sizeof(*rd));
     if (error || !chunks) {
         buf_seterror(bp, error);
         buf_setresid(bp, error ? count : 0);
@@ -770,23 +786,20 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
 
     rd->bp = bp;
     rd->np = np;
-    rd->size = size;
     rd->pending = chunks;
-    for (uint32_t i = 0, done = 0; i < chunks; i++, done += max) {
-        struct fuse_read_in *in = &rd->chunk[i].in;
-        struct virtiofs_call *c = &rd->chunk[i].call;
-        *in = (struct fuse_read_in){ .fh = fh, .offset = (uint64_t)offset + done, .size = MIN(count - done, max) };
-        *c = (struct virtiofs_call){
+    for (uint32_t done = 0; done < count; done += max) {
+        struct fuse_read_in in = { .fh = fh, .offset = (uint64_t)offset + done, .size = MIN(count - done, max) };
+        struct virtiofs_call c = {
             .opcode = FUSE_READ, .flags = VIRTIOFS_ZERO_FILL, .nodeid = np->nodeid,
-            .arg = { in }, .arglen = { sizeof(*in) }, .datalen = in->size,
+            .arg = { &in }, .arglen = { sizeof(in) }, .datalen = in.size,
         };
         if (buf_upl(bp)) {
-            c->upl = buf_upl(bp);
-            c->upl_offset = buf_uploffset(bp) + done;
+            c.upl = buf_upl(bp);
+            c.upl_offset = buf_uploffset(bp) + done;
         } else {
-            c->data = (void *)(buf_dataptr(bp) + done);
+            c.data = (void *)(buf_dataptr(bp) + done);
         }
-        virtiofs_dev_submit(np->vmp->dev, c, read_done, rd);
+        virtiofs_dev_submit(np->vmp->dev, &c, read_done, rd);
     }
     return 0;
 }
@@ -911,7 +924,7 @@ virtiofs_vnop_readdir(struct vnop_readdir_args *ap)
     IOLockLock(vmp->lock);
     wake(np, VN_LISTING);
     IOLockUnlock(vmp->lock);
-    handle_put(np, false);
+    handle_put(np);
     uio_setoffset(uio, (off_t)cookie);
     IOFree(buf, size);
     if (ap->a_eofflag)
@@ -987,7 +1000,7 @@ virtiofs_vnop_listxattr(struct vnop_listxattr_args *ap)
 static int
 virtiofs_vnop_inactive(struct vnop_inactive_args *ap)
 {
-    handle_put(VTON(ap->a_vp), true);
+    handle_close(VTON(ap->a_vp));
     return 0;
 }
 
@@ -998,14 +1011,12 @@ virtiofs_vnop_reclaim(struct vnop_reclaim_args *ap)
     struct virtiofs_node *np = VTON(vp);
     struct virtiofs_mount *vmp = np->vmp;
 
+    handle_close(np);
     IOLockLock(vmp->lock);
-    while (np->users) {
+    while (np->releasing) {
         np->flags |= VN_WANT;
         IOLockSleep(vmp->lock, np, THREAD_UNINT);
     }
-    IOLockUnlock(vmp->lock);
-    handle_put(np, true);
-    IOLockLock(vmp->lock);
     if (np->flags & VN_HASHED) {
         LIST_REMOVE(np, link);
         np->flags &= ~VN_HASHED;
