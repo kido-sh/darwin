@@ -159,6 +159,7 @@ guest /sbin/mount | grep virtiofs
 
 check "files closed while their reads are in flight" guest /tmp/t_virtiofs read-close /mnt/data/big/64m 128
 check "a close is not held up by reads that start after it" guest /tmp/t_virtiofs reopen-close /mnt/data/big/32m 40
+check "fcntl F_RDADVISE brings a file into memory without a read" guest /tmp/t_virtiofs rdadvise /mnt/data/small/1048583
 guest /tmp/t_virtiofs tree /mnt/data > "$work/tree.guest"
 check "the guest sees the same tree as this Mac" diff -u "$work/tree.host" "$work/tree.guest"
 check "the empty share is empty" prints "" guest /bin/ls -A /mnt/empty

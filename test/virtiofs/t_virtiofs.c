@@ -612,6 +612,46 @@ reopen_close(const char *path, int rounds)
     return slow || bad;
 }
 
+static size_t
+resident(void *map, size_t len, char *vec)
+{
+    size_t pages = (len + (size_t)getpagesize() - 1) / (size_t)getpagesize(), n = 0;
+
+    if (mincore(map, len, vec) != 0)
+        return 0;
+    for (size_t i = 0; i < pages; i++)
+        n += (vec[i] & MINCORE_INCORE) != 0;
+    return n;
+}
+
+static int
+rdadvise(const char *path)
+{
+    struct stat st;
+    int fd = open(path, O_RDONLY);
+    if (fd < 0 || fstat(fd, &st) != 0 || st.st_size == 0)
+        return 1;
+    size_t len = (size_t)st.st_size, pages = (len + (size_t)getpagesize() - 1) / (size_t)getpagesize();
+    void *map = mmap(NULL, len, PROT_READ, MAP_SHARED, fd, 0);
+    char *vec = malloc(pages);
+    if (map == MAP_FAILED || !vec)
+        return 1;
+    size_t before = resident(map, len, vec), after = 0;
+    struct radvisory ra = { 0, (int)len }, past = { st.st_size, 1 };
+    int err = fcntl(fd, F_RDADVISE, &ra) == 0 ? 0 : errno;
+    double t0 = now();
+    while (!err && (after = resident(map, len, vec)) < pages && now() < t0 + 2)
+        usleep(1000);
+    double took = now() - t0;
+    int past_err = fcntl(fd, F_RDADVISE, &past) == 0 ? 0 : errno;
+    printf("rdadvise: %zu of %zu pages resident before, %zu %.1f ms after the advice, which gave %s, %s past the end\n",
+           before, pages, after, took * 1e3, err ? strerror(err) : "no error",
+           past_err ? strerror(past_err) : "no error");
+    munmap(map, len);
+    close(fd);
+    return !(before == 0 && !err && after == pages && past_err == EFBIG);
+}
+
 static int
 hold(const char *path, int seconds)
 {
@@ -806,6 +846,8 @@ main(int argc, char **argv)
         return reopen_close(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "hold"))
         return hold(argv[2], atoi(argv[3]));
+    if (argc == 3 && !strcmp(argv[1], "rdadvise"))
+        return rdadvise(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "classic-readdir"))
         return classic_readdir(argv[2]);
     if (argc == 6 && !strcmp(argv[1], "mount-as"))
