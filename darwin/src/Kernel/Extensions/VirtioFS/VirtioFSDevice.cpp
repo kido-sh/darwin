@@ -639,7 +639,7 @@ VirtioFSDevice::startSession(struct virtiofs_session *session)
         init.major = FUSE_KERNEL_VERSION;
         init.minor = FUSE_KERNEL_MINOR_VERSION;
         init.max_readahead = kMaxIO;
-        init.flags = FUSE_ASYNC_READ | FUSE_PARALLEL_DIROPS;
+        init.flags = FUSE_ASYNC_READ | FUSE_PARALLEL_DIROPS | FUSE_SETXATTR_EXT;
         struct virtiofs_call c = {};
         c.opcode = FUSE_INIT;
         c.arg[0] = &init;
@@ -655,7 +655,7 @@ VirtioFSDevice::startSession(struct virtiofs_session *session)
         } else {
             uint32_t io = reply.max_write < reply.max_readahead ? reply.max_write : reply.max_readahead;
             fSession.max_io = io > kMaxIO ? kMaxIO : (io < kMinIO ? kMinIO : io & ~(kMinIO - 1));
-            fSession.flags = reply.flags;
+            fSession.flags = reply.flags & init.flags;
             fStarted = true;
             IOLog("VirtioFS: FUSE %u.%u, flags 0x%x, %u-byte I/O\n", reply.major, reply.minor, reply.flags,
                   fSession.max_io);
