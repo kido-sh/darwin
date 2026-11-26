@@ -226,8 +226,12 @@ static off_t
 reader_begin(struct virtiofs_node *np)
 {
     IOLockLock(np->vmp->lock);
-    wait_clear(np, VN_SIZING);
-    held_pushes_wait_locked(np);
+    for (;;) {
+        wait_clear(np, VN_SIZING);
+        if (!np->held_pushes)
+            break;
+        held_pushes_wait_locked(np);
+    }
     np->readers++;
     off_t size = (off_t)np->attr.size;
     IOLockUnlock(np->vmp->lock);
