@@ -787,4 +787,31 @@ virtiofs_dev_poll(struct virtiofs_dev *dev, virtiofs_poll_t done, void *arg, uin
     ((VirtioFSDevice *)dev)->poll(done, arg, datalen);
 }
 
+struct virtiofs_pages *
+virtiofs_pages_open(void *upl, uint32_t size)
+{
+    IOMemoryDescriptor *md = IOMemoryDescriptor::withOptions(upl, size, 0, NULL,
+                                                             kIOMemoryTypeUPL | kIOMemoryAsReference | kIODirectionIn);
+    if (md && md->prepare() != kIOReturnSuccess)
+        OSSafeReleaseNULL(md);
+    return (struct virtiofs_pages *)md;
+}
+
+void
+virtiofs_pages_write(struct virtiofs_pages *pages, uint32_t at, const void *buf, uint32_t len)
+{
+    ((IOMemoryDescriptor *)pages)->writeBytes(at, buf, len);
+}
+
+void
+virtiofs_pages_close(struct virtiofs_pages *pages)
+{
+    IOMemoryDescriptor *md = (IOMemoryDescriptor *)pages;
+
+    if (!md)
+        return;
+    md->complete();
+    md->release();
+}
+
 }

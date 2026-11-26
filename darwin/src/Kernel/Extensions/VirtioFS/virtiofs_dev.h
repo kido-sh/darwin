@@ -15,6 +15,7 @@ __BEGIN_DECLS
 #define VIRTIOFS_NO_REAP   0x4
 
 struct virtiofs_dev;
+struct virtiofs_pages;
 
 struct virtiofs_call {
     uint32_t opcode;
@@ -46,5 +47,9 @@ void virtiofs_dev_submit(struct virtiofs_dev *dev, struct virtiofs_call *call, u
                          virtiofs_done_t done, void *arg);
 void virtiofs_dev_forget(struct virtiofs_dev *dev, uint64_t nodeid, uint64_t nlookup);
 void virtiofs_dev_poll(struct virtiofs_dev *dev, virtiofs_poll_t done, void *arg, uint32_t datalen);
+
+struct virtiofs_pages *virtiofs_pages_open(void *upl, uint32_t size);
+void virtiofs_pages_write(struct virtiofs_pages *pages, uint32_t at, const void *buf, uint32_t len);
+void virtiofs_pages_close(struct virtiofs_pages *pages);
 
 __END_DECLS

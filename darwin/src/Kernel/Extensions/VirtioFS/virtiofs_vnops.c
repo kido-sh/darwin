@@ -1801,7 +1801,7 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     vnode_t vp = np->vp;
     upl_t upl = NULL;
     upl_page_info_t *pl = NULL;
-    vm_offset_t addr = 0;
+    struct virtiofs_pages *pages = NULL;
     bool cached = false;
     int error = 0;
 
@@ -1820,19 +1820,18 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
         cached |= upl_valid_page(pl, i);
     if (at > old && upl && upl_valid_page(pl, 0))
         error = page_fill(np, upl, first, old, MIN(first + PAGE_SIZE, at));
-    if (!error && cached && ubc_upl_map(upl, &addr) != KERN_SUCCESS)
+    if (!error && cached && !(pages = virtiofs_pages_open(upl, (uint32_t)(end - first))))
         error = ENOMEM;
     if (!error)
         error = write_batch(np, ctx, fh, at, buf, len, written);
     off_t reach = at + *written, size = *written ? MAX(old, reach) : old;
     int changed = *written ? (int)MIN((off_t)count, ((off_t)round_page_64(reach) - first) / PAGE_SIZE) : 0;
-    for (int i = 0; addr && i < count; i++) {
+    for (int i = 0; pages && i < count; i++) {
         off_t page = first + (off_t)i * PAGE_SIZE, from = MAX(page, at), to = MIN(page + PAGE_SIZE, reach);
         if (upl_valid_page(pl, i) && from < to)
-            memcpy((char *)addr + (from - first), buf + (from - at), (size_t)(to - from));
+            virtiofs_pages_write(pages, (uint32_t)(from - first), buf + (from - at), (uint32_t)(to - from));
     }
-    if (addr)
-        ubc_upl_unmap(upl);
+    virtiofs_pages_close(pages);
     *held = size > old && leftover > past && leftover_fill(np, past, (off_t)round_page_64(size));
     if (*held)
         size = old;
