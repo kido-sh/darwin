@@ -1628,7 +1628,7 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
         return EISDIR;
     if (!vnode_isreg(vp))
         return EPERM;
-    if (uio_offset(uio) < 0 || (raw && ((uio_offset(uio) | uio_resid(uio)) & (vfs_devblocksize(vnode_mount(vp)) - 1))))
+    if (uio_offset(uio) < 0)
         return EINVAL;
     if (uio_resid(uio) == 0)
         return 0;
@@ -1638,6 +1638,9 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
     int error = opened ? handle_check(np, ap->a_context) : file_open(np, ap->a_context, false);
     if (!error)
         error = node_attr(np, ap->a_context, &attr);
+    if (!error && raw && uio_offset(uio) < (off_t)attr.size &&
+        ((uio_offset(uio) | uio_resid(uio)) & (vfs_devblocksize(vnode_mount(vp)) - 1)))
+        error = EINVAL;
     if (!error)
         error = uio_isuserspace(uio) ? read_user(np, uio, (off_t)attr.size, ioflag) : read_pages(np, uio, ioflag, &end);
     if (!opened)
