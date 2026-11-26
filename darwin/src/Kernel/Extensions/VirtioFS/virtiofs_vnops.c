@@ -279,6 +279,20 @@ mapped_writable(struct virtiofs_node *np)
 }
 
 static void
+page_redirty(vnode_t vp, off_t at)
+{
+    upl_t upl;
+    upl_page_info_t *pl;
+
+    if (ubc_create_upl(vp, at, PAGE_SIZE, &upl, &pl, HOLD_PAGES) != KERN_SUCCESS)
+        return;
+    if (upl_valid_page(pl, 0))
+        ubc_upl_commit_range(upl, 0, PAGE_SIZE, UPL_COMMIT_FREE_ON_EMPTY | UPL_COMMIT_SET_DIRTY);
+    else
+        ubc_upl_abort_range(upl, 0, PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
+}
+
+static void
 pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count, int changed)
 {
     for (int i = 0, run = 1; i < count; i += run) {
@@ -295,6 +309,8 @@ pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count
             ubc_upl_commit_range(upl, at, PAGE_SIZE, UPL_COMMIT_FREE_ON_EMPTY | (dirty ? UPL_COMMIT_SET_DIRTY : 0));
         else
             ubc_upl_abort_range(upl, at, (upl_size_t)run * PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
+        if (wired && !dirty && mapped_writable(VTON(vp)))
+            page_redirty(vp, first + at);
     }
 }
 
