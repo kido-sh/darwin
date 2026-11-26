@@ -36,6 +36,7 @@
 #define LEFTOVER_REACH       ((off_t)1 << 40)
 #define NOCACHE_PART         ((uint32_t)1 << 20)
 #define HOLD_PAGES           (UPL_SET_LITE | UPL_WILL_BE_DUMPED)
+#define COPY_PAGES           (UPL_COPYOUT_FROM | UPL_WILL_MODIFY | UPL_SET_LITE | UPL_RET_ONLY_DIRTY | UPL_NOBLOCK)
 #define NODE_IDENTITY        (VNODE_ATTR_va_fsid | VNODE_ATTR_va_fsid64 | VNODE_ATTR_va_fileid)
 #define NODE_UNWAITED        (NODE_IDENTITY | VNODE_ATTR_va_modify_time)
 
@@ -1824,6 +1825,25 @@ write_batch(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, 
 }
 
 static int
+copies_sync(struct virtiofs_node *np, off_t at, uint32_t len)
+{
+    IOLockLock(np->vmp->lock);
+    bool mapped = np->flags & VN_WAS_MAPPED;
+    off_t past = (off_t)round_page_64(np->attr.size);
+    IOLockUnlock(np->vmp->lock);
+    off_t first = at & ~(off_t)PAGE_MASK, end = MIN((off_t)round_page_64(at + len), past);
+    upl_t upl = NULL;
+    upl_page_info_t *pl = NULL;
+
+    if (!mapped || first >= end)
+        return 0;
+    if (ubc_create_upl(np->vp, first, (int)(end - first), &upl, &pl, COPY_PAGES) != KERN_SUCCESS)
+        return ENOMEM;
+    ubc_upl_abort_range(upl, 0, (upl_size_t)(end - first), UPL_ABORT_FREE_ON_EMPTY);
+    return 0;
+}
+
+static int
 write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, const char *buf, uint32_t len,
               uint32_t *written, bool *held)
 {
@@ -1833,9 +1853,11 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     upl_page_info_t *pl = NULL;
     struct virtiofs_pages *pages = NULL;
     bool cached = false;
-    int error = 0;
 
     *written = 0;
+    int error = copies_sync(np, at, len);
+    if (error)
+        return error;
     IOLockLock(vmp->lock);
     sizing_after_waiters(np);
     readers_wait_locked(np);
