@@ -27,6 +27,7 @@ export KIDO_HOME=$work/home KIDO_BACKEND=vz
 trap '"$kido" rm -f $name >/dev/null 2>&1; hdiutil detach -quiet -force "$work/full" 2>/dev/null; chmod -R u+rwX "$work"; rm -rf "$work"' EXIT
 rc=0
 
+exec 3>&1
 timed() {
   "$@" &
   local pid=$! mark
@@ -39,18 +40,22 @@ timed() {
   kill "$watchdog" 2>/dev/null
   wait "$watchdog"
   if [[ -e $mark ]]; then
-    echo "FAIL timeout after ${limit}s: $*" | tee -a "$work/timeouts"
+    echo "FAIL timeout after ${limit}s: $*" | tee -a "$work/timeouts" >&3
     rm -f "$mark"
   fi
   return $status
+}
+timeouts() {
+  if [[ -f $work/timeouts ]]; then wc -l < "$work/timeouts" | tr -d ' '; else echo 0; fi
 }
 guest() {
   timed "$kido" exec $name "$@"
 }
 check() {
-  local what=$1
+  local what=$1 before
   shift
-  if "$@"; then echo "ok   $what"; else echo "FAIL $what"; rc=1; fi
+  before=$(timeouts)
+  if "$@" && [[ $(timeouts) == "$before" ]]; then echo "ok   $what"; else echo "FAIL $what"; rc=1; fi
 }
 fails() {
   ! "$@" >/dev/null 2>&1
@@ -589,6 +594,8 @@ check "random writes, truncations and mapped stores on one file, and changes on 
   guest /tmp/t_virtiofs model /mnt/rw/model /mnt/peer/model 30000 1
 check "six writers on their own parts of one file, sharing pages, find every byte as they left it" \
   guest /tmp/t_virtiofs owned /mnt/rw/owned /mnt/peer/owned 10
+check "the modification time asked for alone of a mapped file follows a write here and one on the Mac" \
+  guest /tmp/t_virtiofs modtime /mnt/rw/modtime /mnt/peer/modtime
 check "unmount the second mount of kido:rw" guest /sbin/umount /mnt/peer
 check "mount kido:full" guest /bin/sh -c 'mkdir -p /mnt/full && /sbin/mount -t virtiofs kido:full /mnt/full'
 check "a write and a push this Mac has no room for fail, and the store they met is pushed once there is room" refused_kept
@@ -666,6 +673,9 @@ guest /tmp/t_virtiofs bench-files /tmp/bf 2000 | sed 's/^/on the container disk:
 "$work/t_virtiofs" bench-write "$work/bw" 256 | sed 's/^write/write on this Mac/'
 "$work/t_virtiofs" bench-files "$work/bf" 2000 | sed 's/^/on this Mac: /'
 
-[[ -s $work/timeouts ]] && rc=1
+if [[ -s $work/timeouts ]]; then
+  echo "$(timeouts) commands timed out"
+  rc=1
+fi
 [[ $rc == 0 ]] && echo "virtiofs: all checks passed" || echo "virtiofs: FAILED"
 exit $rc

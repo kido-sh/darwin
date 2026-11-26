@@ -372,6 +372,16 @@ stress_one(void *arg)
     return NULL;
 }
 
+static void
+spawn(pthread_t *t, void *(*fn)(void *), void *arg)
+{
+    int error = pthread_create(t, NULL, fn, arg);
+    if (error) {
+        printf("pthread_create: %s\n", strerror(error));
+        _exit(2);
+    }
+}
+
 static int
 stress(const char *root, int threads, int rounds)
 {
@@ -391,7 +401,7 @@ stress(const char *root, int threads, int rounds)
     double t0 = now(), c0 = cpu();
     for (int i = 0; i < threads; i++) {
         w[i] = (struct worker){ i, rounds, want };
-        pthread_create(&tid[i], NULL, stress_one, &w[i]);
+        spawn(&tid[i], stress_one, &w[i]);
     }
     for (int i = 0; i < threads; i++)
         pthread_join(tid[i], NULL);
@@ -448,7 +458,7 @@ pread_race(const char *path, int threads, double seconds)
     long reads = 0, bad = 0;
     for (int i = 0; i < threads; i++) {
         r[i] = (struct racer){ fd, i, st.st_size, want, now() + seconds, 0, 0 };
-        pthread_create(&tid[i], NULL, race_one, &r[i]);
+        spawn(&tid[i], race_one, &r[i]);
     }
     for (int i = 0; i < threads; i++) {
         pthread_join(tid[i], NULL);
@@ -736,16 +746,6 @@ map_unpushed(const char *path, int seconds)
     printf("fsync of stores to %d pages said %s before the mapping and the last descriptor went away\n", FULL_PAGES,
            strerror(unpushed));
     return pushed == 0;
-}
-
-static void
-spawn(pthread_t *t, void *(*fn)(void *), void *arg)
-{
-    int error = pthread_create(t, NULL, fn, arg);
-    if (error) {
-        printf("pthread_create: %s\n", strerror(error));
-        _exit(2);
-    }
 }
 
 static void
@@ -1789,7 +1789,7 @@ static int
 raw_read(const char *path, const char *odd, uid_t uid)
 {
     static char plain[4096], raw[4096];
-    struct stat st;
+    struct stat st = { 0 };
     if (uid && (setgid(20) != 0 || setuid(uid) != 0)) {
         printf("setuid %u: %s\n", uid, strerror(errno));
         return 1;
@@ -1815,7 +1815,8 @@ raw_read(const char *path, const char *odd, uid_t uid)
     int tail = open_dprotected_np(odd, O_RDONLY, 0, O_DP_GETRAWENCRYPTED, 0);
     off_t total = 0;
     ssize_t got = -1;
-    while (tail >= 0 && fstat(tail, &st) == 0 && (got = read(tail, raw, sizeof(raw))) > 0)
+    CHECK(tail >= 0 && fstat(tail, &st) == 0, "open %s for its raw bytes: %s", odd, strerror(errno));
+    while (!failures && (got = read(tail, raw, sizeof(raw))) > 0)
         total += got;
     int last = got < 0 ? errno : 0;
     printf("%s, whose size is not a whole number of blocks: blocks read through such a descriptor give %lld of its %lld "
@@ -1823,6 +1824,56 @@ raw_read(const char *path, const char *odd, uid_t uid)
     CHECK(got == 0 && total == st.st_size, "a loop of block reads must end with 0 at the end of the file");
     close(tail);
     close(other);
+    close(fd);
+    return failures ? 1 : 0;
+}
+
+static bool
+mtime_of(int fd, struct timespec *t)
+{
+    struct attrlist al = { .bitmapcount = ATTR_BIT_MAP_COUNT, .commonattr = ATTR_CMN_MODTIME };
+    struct {
+        uint32_t length;
+        struct timespec mtime;
+    } __attribute__((aligned(4), packed)) buf;
+    if (syscall(SYS_fgetattrlist, fd, &al, &buf, sizeof(buf), 0) != 0)
+        return false;
+    *t = buf.mtime;
+    return true;
+}
+
+static int
+modtime(const char *path, const char *peerpath)
+{
+    struct timespec before, after, host;
+    struct stat st;
+    char page[16384];
+    memset(page, 'm', sizeof(page));
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    bool made = fd >= 0 && write(fd, page, sizeof(page)) == (ssize_t)sizeof(page);
+    volatile char *map = made ? mmap(NULL, sizeof(page), PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
+    CHECK(map != MAP_FAILED && map[0] == 'm' && mtime_of(fd, &before), "create and map %s: %s", path, strerror(errno));
+    if (failures)
+        return 1;
+    usleep(20000);
+    CHECK(pwrite(fd, "w", 1, 10) == 1 && mtime_of(fd, &after) && fstat(fd, &st) == 0, "write %s: %s", path,
+          strerror(errno));
+    printf("%s: modification time %ld.%09ld before a write, %ld.%09ld asked for alone after it, %ld.%09ld from fstat\n",
+           path, before.tv_sec, before.tv_nsec, after.tv_sec, after.tv_nsec, st.st_mtimespec.tv_sec,
+           st.st_mtimespec.tv_nsec);
+    CHECK(after.tv_sec == st.st_mtimespec.tv_sec && after.tv_nsec == st.st_mtimespec.tv_nsec,
+          "the modification time asked for alone is not the one the write left");
+    int other = open(peerpath, O_WRONLY);
+    CHECK(other >= 0 && pwrite(other, "p", 1, 20) == 1 && fstat(other, &st) == 0 && close(other) == 0,
+          "write %s: %s", peerpath, strerror(errno));
+    host = st.st_mtimespec;
+    usleep(1500000);
+    CHECK(mtime_of(fd, &after), "getattrlist %s: %s", path, strerror(errno));
+    printf("%s: after a write on the Mac, %ld.%09ld asked for alone, %ld.%09ld on the Mac\n", path, after.tv_sec,
+           after.tv_nsec, host.tv_sec, host.tv_nsec);
+    CHECK(after.tv_sec == host.tv_sec && after.tv_nsec == host.tv_nsec,
+          "the modification time asked for alone misses a write on the Mac after the attribute timeout");
+    munmap((void *)map, sizeof(page));
     close(fd);
     return failures ? 1 : 0;
 }
@@ -1860,12 +1911,15 @@ nocache_read(const char *path)
           fcntl(fd, F_NOCACHE, 1) == 0, "cache one page: %s", strerror(errno));
     size_t middle = cached_pages(fd, st.st_size, 0, buf);
     CHECK(fcntl(fd, F_NOCACHE, 0) == 0 && fcntl(fd, F_RDAHEAD, 1) == 0, "F_NOCACHE off: %s", strerror(errno));
+    CHECK(fcntl(fd, F_GLOBAL_NOCACHE, 1) != -1, "F_GLOBAL_NOCACHE: %s", strerror(errno));
+    size_t global = cached_pages(fd, st.st_size, 1000, buf);
+    CHECK(fcntl(fd, F_GLOBAL_NOCACHE, 0) != -1, "F_GLOBAL_NOCACHE off: %s", strerror(errno));
     size_t plain = cached_pages(fd, st.st_size, 0, buf);
     printf("%s: megabyte reads with F_NOCACHE leave %zu pages in the cache from offset 0 and %zu from offset 1000, and "
-           "%zu when one page in the middle was cached before; the same reads without it leave %zu\n", path, even, odd,
-           middle, plain);
-    CHECK(even == 0 && odd == 0 && middle == 1 && plain > 0,
-          "pages stayed in the cache after reads with F_NOCACHE, or none after plain reads");
+           "%zu when one page in the middle was cached before; with F_GLOBAL_NOCACHE still %zu; the same reads without "
+           "either leave %zu\n", path, even, odd, middle, global, plain);
+    CHECK(even == 0 && odd == 0 && middle == 1 && global == 1 && plain > 0,
+          "pages stayed in the cache after reads that bypass it, or none after plain reads");
     close(fd);
     free(buf);
     return failures ? 1 : 0;
@@ -2448,7 +2502,7 @@ store_race(const char *name, off_t at)
     }
     struct storer r = { .fd = fd, .at = at, .rounds = 1000 };
     pthread_t t;
-    pthread_create(&t, NULL, race_write, &r);
+    spawn(&t, race_write, &r);
     int lost = 0, wrote = 0, stale = 0;
     for (int i = 1; i <= r.rounds; i++) {
         char want = (char)('a' + i % 26), back = 0;
@@ -2846,7 +2900,7 @@ wired_write(const char *name)
     close(fd);
 }
 
-enum { WIRED_GONE = 1, WIRED_HOST_CUT = 2, WIRED_HOST_GROW = 4 };
+enum { WIRED_GONE = 1, WIRED_HOST_CUT = 2, WIRED_HOST_GROW = 4, WIRED_READ = 8 };
 
 static off_t
 first_difference(const char *got, const char *want, size_t size)
@@ -2869,22 +2923,52 @@ host_difference(const char *name, const char *want, size_t size)
 }
 
 static void
+repush(const char *name, bool mapped, bool stat_later)
+{
+    static char data[65536];
+    struct stat st;
+    char c = 0;
+    memset(data, 'A', sizeof(data));
+    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
+    bool made = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data) && fsync(fd) == 0;
+    volatile char *map = made && mapped ? mmap(NULL, 65536, PROT_READ, MAP_SHARED, fd, 0) : NULL;
+    CHECK(made && map != MAP_FAILED && (mapped ? (c = map[0]) == 'A' : pread(fd, &c, 1, 0) == 1) &&
+          pwrite(fd, "X", 1, 100) == 1, "%s: create, cache a page and write into it: %s", name, strerror(errno));
+    int other = peer_open(name, O_WRONLY);
+    CHECK(other >= 0 && pwrite(other, "Y", 1, 200) == 1 && close(other) == 0, "%s: a write on the Mac: %s", name,
+          strerror(errno));
+    if (stat_later) {
+        usleep(1200000);
+        CHECK(stat(name, &st) == 0, "%s: stat: %s", name, strerror(errno));
+    } else {
+        CHECK(fsync(fd) == 0, "%s: fsync: %s", name, strerror(errno));
+    }
+    CHECK(on_host(name, 100, 'X') && on_host(name, 200, 'Y'),
+          "%s: the guest pushed the page it wrote again, over a byte the Mac wrote later", name);
+    if (map && map != MAP_FAILED)
+        munmap((void *)map, 65536);
+    close(fd);
+}
+
+static void
 wired_past(const char *name, off_t cut, off_t from, int how)
 {
     static char data[65536], want[65536], back[65536];
-    bool unmapped = how & WIRED_GONE;
+    bool unmapped = how & WIRED_GONE, refilled = from > 40000 || (how & WIRED_HOST_GROW);
     struct stat st;
-    off_t at;
+    off_t at = -1;
     int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
     memset(data, 'A', sizeof(data));
     bool made = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data);
-    volatile char *map = made ? mmap(NULL, 65536, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    int prot = how & WIRED_READ ? PROT_READ : PROT_READ | PROT_WRITE;
+    volatile char *map = made ? mmap(NULL, 65536, prot, MAP_SHARED, fd, 0) : MAP_FAILED;
     CHECK(map != MAP_FAILED && mlock((void *)map, 65536) == 0, "create, map and wire %s: %s", name, strerror(errno));
     if (map == MAP_FAILED) {
         close(fd);
         return;
     }
-    map[40000] = 'o';
+    if (!(how & WIRED_READ))
+        map[40000] = 'o';
     memset(data, 'B', sizeof(data));
     memset(want, 'A', (size_t)cut);
     memset(want + cut, 0, sizeof(want) - (size_t)cut);
@@ -2912,20 +2996,21 @@ wired_past(const char *name, off_t cut, off_t from, int how)
         at = first_difference((const char *)map, want, sizeof(want));
         CHECK(at < 0, "%s: the mapping reads %d at %lld, not %d", name, map[at < 0 ? 0 : at], (long long)at,
               want[at < 0 ? 0 : at]);
+    }
+    if (unmapped || refilled) {
+        int later = peer_open(name, O_WRONLY);
+        CHECK(later >= 0 && pwrite(later, "C", 1, 40000) == 1 && close(later) == 0, "%s: a write on the Mac: %s", name,
+              strerror(errno));
+        want[40000] = 'C';
+    }
+    if (!unmapped)
         CHECK(munlock((void *)map, 65536) == 0 && msync((void *)map, 65536, MS_SYNC) == 0, "%s: unwire and msync: %s",
               name, strerror(errno));
-    }
+    CHECK(fsync(fd) == 0, "%s: fsync: %s", name, strerror(errno));
     at = host_difference(name, want, sizeof(want));
-    CHECK(at < 0, "%s: the Mac holds something else at %lld", name, (long long)at);
-    if (unmapped) {
-        int later = peer_open(name, O_WRONLY);
-        CHECK(later >= 0 && pwrite(later, "C", 1, 40000) == 1 && close(later) == 0 && fsync(fd) == 0,
-              "%s: a write on the Mac, then fsync in the guest: %s", name, strerror(errno));
-        CHECK(on_host(name, 40000, 'C'), "%s: the guest's fsync pushed its copy over a write the Mac made after the growth",
-              name);
-    } else {
+    CHECK(at < 0, "%s: after the guest's sync the Mac holds something else at %lld", name, (long long)at);
+    if (!unmapped)
         munmap((void *)map, 65536);
-    }
     close(fd);
 }
 
@@ -3112,6 +3197,12 @@ rw_edge(const char *dir, const char *other)
     wired_past("wired-host-grow", 4000, 65536, WIRED_GONE | WIRED_HOST_GROW);
     wired_past("wired-host-cut", 4000, 20000, WIRED_HOST_CUT);
     wired_past("wired-host-cut-gone", 0, 65536, WIRED_GONE | WIRED_HOST_CUT);
+    wired_past("wired-read", 4000, 65536, WIRED_READ);
+    wired_past("wired-read-host", 4000, 20000, WIRED_READ | WIRED_HOST_GROW);
+    repush("repush-read", false, false);
+    repush("repush-read-stat", false, true);
+    repush("repush-mapped", true, false);
+    repush("repush-mapped-stat", true, true);
     turns("turns");
 
     fd = open("largest", O_WRONLY | O_CREAT | O_EXCL, 0644);
@@ -3362,7 +3453,7 @@ rw_stress(const char *dir, int threads, int seconds)
     double until = now() + seconds;
     for (int i = 0; i < threads; i++) {
         w[i] = (struct rw_worker){ .dir = dir, .id = i, .until = until };
-        pthread_create(&t[i], NULL, rw_work, &w[i]);
+        spawn(&t[i], rw_work, &w[i]);
     }
     for (int i = 0; i < threads; i++) {
         pthread_join(t[i], NULL);
@@ -3375,7 +3466,7 @@ rw_stress(const char *dir, int threads, int seconds)
     until = now() + seconds;
     for (int i = 0; i < threads; i++) {
         w[i] = (struct rw_worker){ .dir = dir, .id = i, .shared = 1, .until = until };
-        pthread_create(&t[i], NULL, rw_work, &w[i]);
+        spawn(&t[i], rw_work, &w[i]);
     }
     for (int i = 0; i < threads; i++) {
         pthread_join(t[i], NULL);
@@ -3388,7 +3479,7 @@ rw_stress(const char *dir, int threads, int seconds)
         return 1;
     for (int i = 0; i < threads; i++) {
         a[i] = (struct appender){ .fd = rfd, .id = i, .records = 50 };
-        pthread_create(&t[i], NULL, region_work, &a[i]);
+        spawn(&t[i], region_work, &a[i]);
     }
     for (int i = 0; i < threads; i++) {
         void *r;
@@ -3410,7 +3501,7 @@ rw_stress(const char *dir, int threads, int seconds)
         return 1;
     for (int i = 0; i < threads; i++) {
         a[i] = (struct appender){ .fd = fd, .id = i, .records = 2000, .path = log };
-        pthread_create(&t[i], NULL, append_work, &a[i]);
+        spawn(&t[i], append_work, &a[i]);
     }
     for (int i = 0; i < threads; i++) {
         void *r;
@@ -3537,6 +3628,8 @@ main(int argc, char **argv)
         return stress(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (argc == 3 && !strcmp(argv[1], "bench"))
         return bench(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "modtime"))
+        return modtime(argv[2], argv[3]);
     if (argc == 5 && !strcmp(argv[1], "raw-read"))
         return raw_read(argv[2], argv[3], (uid_t)atoi(argv[4]));
     if (argc == 3 && !strcmp(argv[1], "nocache"))
