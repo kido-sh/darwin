@@ -35,6 +35,7 @@
 #define LEFTOVER_STEP        ((off_t)1 << 30)
 #define HOLD_PAGES           (UPL_SET_LITE | UPL_WILL_MODIFY)
 #define NODE_IDENTITY        (VNODE_ATTR_va_fsid | VNODE_ATTR_va_fsid64 | VNODE_ATTR_va_fileid)
+#define NODE_UNWAITED        (NODE_IDENTITY | VNODE_ATTR_va_modify_time)
 
 enum {
     VN_BUILDING = 0x01,
@@ -420,8 +421,19 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
     if (error)
         return error;
     *reply = out.attr;
-    *applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
+    if (applied)
+        *applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
     return 0;
+}
+
+static int
+node_glance(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
+{
+    IOLockLock(np->vmp->lock);
+    bool fresh = mach_absolute_time() < np->expire;
+    *attr = np->attr;
+    IOLockUnlock(np->vmp->lock);
+    return fresh ? 0 : node_getattr(np, ctx, attr, NULL);
 }
 
 static int
@@ -1453,14 +1465,20 @@ virtiofs_vnop_getattr(struct vnop_getattr_args *ap)
     kauth_cred_t cred = vfs_context_ucred(ap->a_context);
     struct fuse_attr attr;
 
-    if (!(vap->va_active & ~NODE_IDENTITY)) {
-        VATTR_RETURN(vap, va_fileid, node_ino(np));
-        VATTR_RETURN(vap, va_fsid, vfs_statfs(vnode_mount(vp))->f_fsid.val[0]);
-        return 0;
-    }
-    int error = node_attr(np, ap->a_context, &attr);
+    bool unwaited = !(vap->va_active & ~NODE_UNWAITED), timed = VATTR_IS_ACTIVE(vap, va_modify_time);
+    int error = !unwaited ? node_attr(np, ap->a_context, &attr) : timed ? node_glance(np, ap->a_context, &attr) : 0;
     if (error)
         return error;
+    if (unwaited) {
+        VATTR_RETURN(vap, va_fileid, node_ino(np));
+        VATTR_RETURN(vap, va_fsid, vfs_statfs(vnode_mount(vp))->f_fsid.val[0]);
+        if (timed) {
+            vap->va_modify_time.tv_sec = (time_t)attr.mtime;
+            vap->va_modify_time.tv_nsec = attr.mtimensec;
+            VATTR_SET_SUPPORTED(vap, va_modify_time);
+        }
+        return 0;
+    }
     VATTR_RETURN(vap, va_rdev, (dev_t)attr.rdev);
     VATTR_RETURN(vap, va_nlink, attr.nlink);
     VATTR_RETURN(vap, va_data_size, (off_t)attr.size);
