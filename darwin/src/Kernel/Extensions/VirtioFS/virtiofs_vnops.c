@@ -1491,15 +1491,19 @@ batch_room(struct virtiofs_node *np, uio_t uio)
 }
 
 static char *
-batch_get(struct virtiofs_mount *vmp, uint32_t room)
+batch_get(struct virtiofs_mount *vmp, uint32_t *room)
 {
-    if (room <= BATCH_SMALL)
-        return IOMalloc(room);
-    IOLockLock(vmp->lock);
-    char *buf = vmp->spare;
-    vmp->spare = NULL;
-    IOLockUnlock(vmp->lock);
-    return buf ? buf : IOMalloc(virtiofs_batch_size(vmp));
+    if (*room > BATCH_SMALL) {
+        IOLockLock(vmp->lock);
+        char *buf = vmp->spare;
+        vmp->spare = NULL;
+        IOLockUnlock(vmp->lock);
+        buf = buf ? buf : IOMalloc(virtiofs_batch_size(vmp));
+        if (buf)
+            return buf;
+        *room = BATCH_SMALL;
+    }
+    return IOMalloc(*room);
 }
 
 static void
@@ -1532,7 +1536,7 @@ static int
 read_user(struct virtiofs_node *np, uio_t uio, off_t size, int ioflag)
 {
     uint32_t room = (uint32_t)MIN((off_t)batch_room(np, uio), MAX(size - uio_offset(uio), (off_t)PAGE_SIZE));
-    char *buf = batch_get(np->vmp, room);
+    char *buf = batch_get(np->vmp, &room);
     uio_t part = buf ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
     int error = part ? 0 : ENOMEM;
 
@@ -1765,7 +1769,7 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
     if (!error && uio_resid(uio) > VIRTIOFS_SIZE_MAX - start)
         error = EFBIG;
     uint32_t room = batch_room(np, uio);
-    char *buf = error ? NULL : batch_get(np->vmp, room);
+    char *buf = error ? NULL : batch_get(np->vmp, &room);
     if (!error && !buf)
         error = ENOMEM;
     while (!error && uio_resid(uio) > 0) {
