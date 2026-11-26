@@ -55,6 +55,7 @@ enum {
     VN_MAPPED_WRITE = 0x1000,
     VN_TRUNCATING = 0x2000,
     VN_UNPUSHED = 0x4000,
+    VN_WAS_MAPPED = 0x8000,
 };
 
 #define SETTABLE_MODE (ACCESSPERMS | S_ISVTX)
@@ -305,7 +306,7 @@ size_shrink(struct virtiofs_node *np, off_t size)
 
     ubc_setsize(np->vp, size);
     IOLockLock(np->vmp->lock);
-    if (size < old)
+    if (size < old && (np->flags & VN_WAS_MAPPED))
         np->leftover = MAX(np->leftover, (off_t)round_page_64(old));
     IOLockUnlock(np->vmp->lock);
 }
@@ -2175,7 +2176,7 @@ virtiofs_vnop_mmap(struct vnop_mmap_args *ap)
 
     if (vnode_isreg(vp)) {
         IOLockLock(VTON(vp)->vmp->lock);
-        VTON(vp)->flags |= VN_MAPPED | ((ap->a_fflags & PROT_WRITE) ? VN_MAPPED_WRITE : 0);
+        VTON(vp)->flags |= VN_MAPPED | VN_WAS_MAPPED | ((ap->a_fflags & PROT_WRITE) ? VN_MAPPED_WRITE : 0);
         IOLockUnlock(VTON(vp)->vmp->lock);
     }
     return 0;
