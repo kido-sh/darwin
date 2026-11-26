@@ -105,6 +105,7 @@ struct virtiofs_node {
     uint64_t glanced_until;
     uint64_t glanced_version;
     uint64_t glanced_seq;
+    uint64_t glanced_at;
     uint64_t glance_seq;
     IOLock *wlock;
     thread_t creator;
@@ -398,6 +399,13 @@ size_grow(struct virtiofs_node *np, off_t old, off_t size, bool refill)
 }
 
 static bool
+glance_newer_locked(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t version)
+{
+    return version < np->glanced_at && np->attr_version <= np->glanced_version &&
+           change_cmp(&np->glanced, attr) > 0;
+}
+
+static bool
 node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec, uint32_t nsec, uint64_t version,
            bool *held)
 {
@@ -412,6 +420,11 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         IOLockUnlock(vmp->lock);
         return false;
     }
+    if (!attr_changed(&np->attr, attr) && glance_newer_locked(np, attr, version)) {
+        np->held_size = 0;
+        IOLockUnlock(vmp->lock);
+        return true;
+    }
     bool changed = vnode_isreg(vp) && attr_changed(&np->attr, attr);
     off_t size = (off_t)attr->size, old = (off_t)np->attr.size;
     if (changed) {
@@ -424,11 +437,14 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         IOLockUnlock(vmp->lock);
         return false;
     }
+    bool glanced = glance_newer_locked(np, attr, version);
     np->attr = *attr;
     if (changed && size > old)
         np->attr.size = (uint64_t)old;
-    np->expire = deadline(sec, nsec);
+    np->expire = glanced ? 0 : deadline(sec, nsec);
     np->attr_version = ++vmp->version;
+    if (glanced)
+        np->glanced_version = np->attr_version;
     if (!changed)
         np->held_size = 0;
     IOLockUnlock(vmp->lock);
@@ -479,7 +495,7 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
     int order = kept ? change_cmp(&np->glanced, &out.attr) : 0, newer = change_cmp(&np->attr, &out.attr);
     if (kept && !order)
         order = np->glanced_seq > seq ? 1 : -1;
-    if (order > 0) {
+    if (order > 0 || glance_newer_locked(np, &out.attr, version)) {
         reply->mtime = np->glanced.mtime;
         reply->mtimensec = np->glanced.mtimensec;
     } else if (order < 0 || np->attr_version <= version) {
@@ -487,6 +503,9 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
         np->glanced_until = deadline(out.attr_valid, out.attr_valid_nsec);
         np->glanced_version = kept ? MAX(np->glanced_version, version) : version;
         np->glanced_seq = seq;
+        np->glanced_at = ++np->vmp->version;
+        if (newer < 0)
+            np->expire = 0;
     } else if (newer > 0 || (!newer && mach_absolute_time() < np->expire)) {
         reply->mtime = np->attr.mtime;
         reply->mtimensec = np->attr.mtimensec;
