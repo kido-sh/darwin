@@ -224,9 +224,17 @@ VirtioFSDevice::interruptOccurred(IOInterruptEventSource *source, int)
     if (!(fTransport.readIsr() & 1))
         return;
     IOLockLock(fLock);
-    drainLocked(kHiprio);
-    drainLocked(kRequests);
-    unlockAndReap();
+    fInterrupting = true;
+    for (;;) {
+        drainLocked(kHiprio);
+        drainLocked(kRequests);
+        if (!fReaped)
+            break;
+        unlockAndReap();
+        IOLockLock(fLock);
+    }
+    fInterrupting = false;
+    IOLockUnlock(fLock);
 }
 
 void
@@ -315,8 +323,7 @@ VirtioFSDevice::pauseLocked(void *event, bool reap)
     uint16_t seen = fQueues[kRequests].lastUsedIdx;
     drainLocked(kHiprio);
     drainLocked(kRequests);
-    if (reap && seen != fQueues[kRequests].lastUsedIdx && !fLostInterrupt &&
-        !__atomic_load_n(&fReapers, __ATOMIC_RELAXED)) {
+    if (reap && seen != fQueues[kRequests].lastUsedIdx && !fLostInterrupt && !fInterrupting) {
         fLostInterrupt = true;
         IOLog("VirtioFS: completions arrived without an interrupt\n");
     }
@@ -618,10 +625,7 @@ VirtioFSDevice::unlockAndReap()
     VirtioFSSlot *list = fReaped;
     fReaped = NULL;
     IOLockUnlock(fLock);
-    if (!list)
-        return;
 
-    __atomic_add_fetch(&fReapers, 1, __ATOMIC_RELAXED);
     while (list) {
         VirtioFSSlot *slot = list;
         virtiofs_done_t done = slot->done;
@@ -637,7 +641,6 @@ VirtioFSDevice::unlockAndReap()
         IOLockUnlock(fLock);
         done(arg, error);
     }
-    __atomic_sub_fetch(&fReapers, 1, __ATOMIC_RELAXED);
 }
 
 void

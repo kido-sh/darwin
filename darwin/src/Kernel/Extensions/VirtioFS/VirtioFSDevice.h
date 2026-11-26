@@ -64,7 +64,6 @@ private:
     thread_call_t fReapCall;
     unsigned fSlotCount;
     unsigned fSlotWaiters;
-    uint32_t fReapers;
     IOLock *fLock;
     IOLock *fSessionLock;
     IOWorkLoop *fWorkLoop;
@@ -74,6 +73,7 @@ private:
     bool fQuiesced;
     bool fStarted;
     bool fLostInterrupt;
+    bool fInterrupting;
     bool fPolling;
     int fInitError;
     struct virtiofs_session fSession;
