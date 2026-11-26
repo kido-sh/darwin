@@ -1992,18 +1992,20 @@ cow_sync(const char *path, int seconds, int count)
     spawn(&tid[count], cow_write, &cow);
     spawn(&tid[count + 1], cow_fsync, &cow);
     long syncs = 0, writes = 0, fsyncs = 0;
-    int still = 0;
+    int still = 0, unwritten = 0;
     for (int s = 0; s < seconds; s++) {
         sleep(1);
         long ns = atomic_load(&cow.syncs), nw = atomic_load(&cow.writes), nf = atomic_load(&cow.fsyncs);
-        still += ns == syncs || nw == writes || nf == fsyncs;
+        still += ns == syncs || nf == fsyncs;
+        unwritten += nw == writes;
         syncs = ns;
         writes = nw;
         fsyncs = nf;
     }
     printf("%d threads storing and syncing pages of a private mapping's file beside writes over uncached pages and "
-           "fsyncs: %ld syncs, %ld writes and %ld fsyncs in %d s, %d seconds in which one kind stood still, %ld calls "
-           "failed\n", count, syncs, writes, fsyncs, seconds, still, atomic_load(&cow.failures));
+           "fsyncs: %ld syncs, %ld writes and %ld fsyncs in %d s, %d seconds without a sync or an fsync and %d "
+           "without a write, %ld calls failed\n",
+           count, syncs, writes, fsyncs, seconds, still, unwritten, atomic_load(&cow.failures));
     atomic_store(&cow.stop, true);
     stop_within(5);
     for (int i = 0; i <= count + 1; i++)
@@ -2012,7 +2014,7 @@ cow_sync(const char *path, int seconds, int count)
     munmap(copy, COW_SIZE);
     munmap((void *)cow.shared, COW_SHARED);
     close(cow.fd);
-    return still || atomic_load(&cow.failures);
+    return still || !writes || atomic_load(&cow.failures);
 }
 
 static int
