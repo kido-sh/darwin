@@ -794,8 +794,8 @@ virtiofs_dev_poll(struct virtiofs_dev *dev, virtiofs_poll_t done, void *arg, uin
 struct virtiofs_pages *
 virtiofs_pages_open(void *upl, uint32_t size)
 {
-    IOMemoryDescriptor *md = IOMemoryDescriptor::withOptions(upl, size, 0, NULL,
-                                                             kIOMemoryTypeUPL | kIOMemoryAsReference | kIODirectionIn);
+    IOMemoryDescriptor *md = IOMemoryDescriptor::withOptions(
+        upl, size, 0, NULL, kIOMemoryTypeUPL | kIOMemoryAsReference | kIOMemoryMapperNone | kIODirectionIn);
     if (md && md->prepare() != kIOReturnSuccess)
         OSSafeReleaseNULL(md);
     return (struct virtiofs_pages *)md;
