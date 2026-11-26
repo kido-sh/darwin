@@ -419,6 +419,8 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         np->attr.size = (uint64_t)old;
     np->expire = deadline(sec, nsec);
     np->attr_version = ++vmp->version;
+    if (!changed)
+        np->held_size = 0;
     IOLockUnlock(vmp->lock);
     if (!changed)
         return true;
@@ -550,8 +552,8 @@ append_offset(struct virtiofs_node *np, vfs_context_t ctx, off_t *offset)
     IOLockLock(np->vmp->lock);
     wait_clear(np, VN_SIZING);
     int newer = applied ? 1 : change_cmp(&np->attr, &reply);
-    off_t cached = (off_t)np->attr.size, fetched = (off_t)reply.size;
-    *offset = newer > 0 ? MAX(cached, np->held_size) : newer < 0 ? fetched : MAX(cached, fetched);
+    off_t cached = (off_t)np->attr.size, known = MAX(cached, np->held_size), fetched = (off_t)reply.size;
+    *offset = newer > 0 ? known : newer < 0 ? fetched : MAX(known, fetched);
     if (*offset < cached)
         node_resize_locked(np, *offset);
     IOLockUnlock(np->vmp->lock);
@@ -599,6 +601,8 @@ node_sized(struct virtiofs_node *np, off_t size, bool refill)
     else if (size < old)
         size_shrink(np, size);
     IOLockLock(vmp->lock);
+    if (error)
+        np->held_size = size;
     sizing_done(np, VN_TRUNCATING);
     IOLockUnlock(vmp->lock);
     return error;
@@ -1892,6 +1896,8 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
         size = old;
     IOLockLock(vmp->lock);
     np->attr.size = (uint64_t)size;
+    if (*held)
+        np->held_size = MAX(np->held_size, reach);
     np->attr_version = ++vmp->version;
     np->expire = 0;
     IOLockUnlock(vmp->lock);
