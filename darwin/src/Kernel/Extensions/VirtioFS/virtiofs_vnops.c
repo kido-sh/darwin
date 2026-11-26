@@ -454,23 +454,6 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
 }
 
 static int
-node_glance(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
-{
-    uint64_t now = mach_absolute_time();
-
-    IOLockLock(np->vmp->lock);
-    bool applied = now < np->expire;
-    bool glanced = !applied && now < np->glanced_until && np->attr_version <= np->glanced_version;
-    *attr = np->attr;
-    if (glanced) {
-        attr->mtime = np->glanced_mtime;
-        attr->mtimensec = np->glanced_mtimensec;
-    }
-    IOLockUnlock(np->vmp->lock);
-    return applied || glanced ? 0 : node_getattr(np, ctx, attr, NULL);
-}
-
-static int
 node_fetch(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
 {
     bool applied;
@@ -483,6 +466,25 @@ node_fetch(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
     *attr = np->attr;
     IOLockUnlock(np->vmp->lock);
     return 0;
+}
+
+static int
+node_glance(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
+{
+    uint64_t now = mach_absolute_time();
+
+    IOLockLock(np->vmp->lock);
+    bool mapped = np->flags & VN_MAPPED, applied = now < np->expire;
+    bool glanced = !applied && now < np->glanced_until && np->attr_version <= np->glanced_version;
+    *attr = np->attr;
+    if (glanced) {
+        attr->mtime = np->glanced_mtime;
+        attr->mtimensec = np->glanced_mtimensec;
+    }
+    IOLockUnlock(np->vmp->lock);
+    if (!mapped && !applied)
+        return node_fetch(np, ctx, attr);
+    return applied || glanced ? 0 : node_getattr(np, ctx, attr, NULL);
 }
 
 static void
