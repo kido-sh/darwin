@@ -1877,6 +1877,8 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
             uio_setoffset(uio, at + written);
             break;
         }
+        if (node_size(np) < at + (off_t)len)
+            break;
     }
     batch_put(np->vmp, buf, room);
     if (uio_offset(uio) > start)
