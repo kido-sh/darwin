@@ -44,6 +44,8 @@ for entry in json.load(open(os.path.join(build, "compile_commands.json"))):
     analyzed += 1
     sys.stderr.write(result.stderr)
     findings += [line for line in result.stderr.splitlines() if re.match(r"\S+:\d+:\d+: (warning|error): ", line)]
+    if result.returncode:
+        findings.append(f"{entry['file']}: the analyzer exited with {result.returncode}")
 with open(report, "w") as f:
     f.write("".join(line + "\n" for line in findings))
 print(f"analyzed {analyzed} files, {len(findings)} findings")
