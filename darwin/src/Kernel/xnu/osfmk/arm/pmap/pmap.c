@@ -658,6 +658,12 @@ pte_is_xs(const pt_attr_t *pt_attr, pt_entry_t pte)
 #define FLUSH_PTE_STRONG()                                                             \
 	__builtin_arm_dsb(DSB_ISHST);
 
+static inline bool
+pte_is_user_rw(const pt_attr_t *pt_attr, pt_entry_t pte)
+{
+	return (pte & ARM_PTE_APMASK) == pt_attr_leaf_rw(pt_attr);
+}
+
 /**
  * Write enough page table entries to map a single VM page. On systems where the
  * VM page size does not match the hardware page size, multiple page table
@@ -4152,7 +4158,7 @@ pmap_remove_range_options(
 	pt_entry_t *bpte,
 	pt_entry_t *epte,
 	vm_map_address_t *eva,
-	bool *need_strong_sync __unused,
+	bool *need_strong_sync,
 	int options)
 {
 	pt_entry_t     *cpte;
@@ -4354,6 +4360,10 @@ pmap_remove_range_options(
 			}
 		} else {
 			num_external++;
+		}
+		if (pmap != kernel_pmap && !is_internal && pte_is_user_rw(pt_attr, spte)) {
+			FLUSH_PTE_STRONG();
+			PMAP_UPDATE_TLBS(pmap, va, va + pmap_page_size, *need_strong_sync, true);
 		}
 		pvh_unlock(pai);
 		num_removed++;
@@ -5450,6 +5460,24 @@ pmap_protect(
 	pmap_protect_options(pmap, b, e, prot, 0, NULL);
 }
 
+MARK_AS_PMAP_TEXT static bool
+pmap_pte_is_internal(unsigned int pai, pt_entry_t *ptep)
+{
+	pv_entry_t **pv_h = pai_to_pvh(pai);
+	pv_entry_t *pvep = PV_ENTRY_NULL;
+	int idx = 0;
+
+	pvh_assert_locked(pai);
+	if (pvh_test_type(pv_h, PVH_TYPE_PVEP)) {
+		for (pvep = pvh_pve_list(pv_h); pvep != PV_ENTRY_NULL; pvep = pve_next(pvep)) {
+			if ((idx = pve_find_ptep_index(pvep, ptep)) != -1) {
+				break;
+			}
+		}
+	}
+	return ppattr_pve_is_internal(pai, pvep, idx);
+}
+
 __mockable MARK_AS_PMAP_TEXT vm_map_address_t
 pmap_protect_options_internal(
 	pmap_t pmap,
@@ -5466,6 +5494,7 @@ pmap_protect_options_internal(
 	boolean_t        set_XO = FALSE;
 	boolean_t        should_have_removed = FALSE;
 	bool             need_strong_sync = false;
+	bool             check_preemption = false;
 
 	/* Validate the pmap input before accessing its data. */
 	validate_pmap_mutable(pmap);
@@ -5540,10 +5569,11 @@ pmap_protect_options_internal(
 		    pte_p < epte_p;
 		    pte_p += PAGE_RATIO, va += pmap_page_size) {
 			++npages;
-			if (__improbable(!(npages % PMAP_DEFAULT_PREEMPTION_CHECK_PAGE_INTERVAL) &&
+			if (__improbable((check_preemption || !(npages % PMAP_DEFAULT_PREEMPTION_CHECK_PAGE_INTERVAL)) &&
 			    pmap_pending_preemption())) {
 				break;
 			}
+			check_preemption = false;
 			pt_entry_t spte;
 #if DEVELOPMENT || DEBUG
 			boolean_t  force_write = FALSE;
@@ -5686,6 +5716,14 @@ pmap_protect_options_internal(
 			write_pte_fast(pte_p, tmplate);
 
 			if (managed) {
+				if (pmap != kernel_pmap && pte_is_user_rw(pt_attr, spte) && !pte_is_user_rw(pt_attr, tmplate)) {
+					check_preemption = pvh_test_type(pai_to_pvh(pai), PVH_TYPE_PVEP);
+					if (!pmap_pte_is_internal(pai, pte_p)) {
+						FLUSH_PTE_STRONG();
+						PMAP_UPDATE_TLBS(pmap, va, va + pmap_page_size, need_strong_sync, true);
+						check_preemption = true;
+					}
+				}
 				pvh_assert_locked(pai);
 				pvh_unlock(pai);
 			}
