@@ -1243,10 +1243,12 @@ push_dirty(vnode_t vp)
     IOLockLock(np->vmp->lock);
     wait_clear(np, VN_DRAINING);
     np->flags |= VN_DRAINING;
-    uint32_t slot = np->push_epoch++ & 1;
-    while (np->pushes[slot]) {
-        np->flags |= VN_WANT;
-        IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
+    for (int phase = 0; phase < 2; phase++) {
+        uint32_t slot = np->push_epoch++ & 1;
+        while (np->pushes[slot]) {
+            np->flags |= VN_WANT;
+            IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
+        }
     }
     wake(np, VN_DRAINING);
     IOLockUnlock(np->vmp->lock);
