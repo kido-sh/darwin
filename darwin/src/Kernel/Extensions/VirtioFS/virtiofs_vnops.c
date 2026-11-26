@@ -210,11 +210,21 @@ virtiofs_version(struct virtiofs_mount *vmp)
     return version;
 }
 
+static void
+held_pushes_wait_locked(struct virtiofs_node *np)
+{
+    while (np->held_pushes) {
+        np->flags |= VN_WANT;
+        IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
+    }
+}
+
 static off_t
 reader_begin(struct virtiofs_node *np)
 {
     IOLockLock(np->vmp->lock);
     wait_clear(np, VN_SIZING);
+    held_pushes_wait_locked(np);
     np->readers++;
     off_t size = (off_t)np->attr.size;
     IOLockUnlock(np->vmp->lock);
@@ -234,15 +244,6 @@ static void
 readers_wait_locked(struct virtiofs_node *np)
 {
     while (np->readers) {
-        np->flags |= VN_WANT;
-        IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
-    }
-}
-
-static void
-held_pushes_wait_locked(struct virtiofs_node *np)
-{
-    while (np->held_pushes) {
         np->flags |= VN_WANT;
         IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
     }
@@ -1986,37 +1987,45 @@ pageout_pages(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t offset, int page
     return error;
 }
 
-static bool
-page_held_dirty(vnode_t vp, off_t at)
+static int
+page_settled(vnode_t vp, off_t at)
 {
     int state = 0;
-    return ubc_page_op(vp, at, 0, NULL, &state) == KERN_SUCCESS &&
-           (state & (UPL_POP_DIRTY | UPL_POP_BUSY)) == (UPL_POP_DIRTY | UPL_POP_BUSY);
+    if (ubc_page_op(vp, at, UPL_POP_SET | UPL_POP_BUSY, NULL, &state) != KERN_SUCCESS)
+        return 0;
+    ubc_page_op(vp, at, UPL_POP_CLR | UPL_POP_BUSY, NULL, NULL);
+    return state;
 }
 
 static int
 pageout_held(vnode_t vp, off_t first, int count, int flags)
 {
     struct virtiofs_node *np = VTON(vp);
+    bool rdonly = vfs_isrdonly(vnode_mount(vp));
     int error = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; !error && i < count; i++) {
         off_t at = first + (off_t)i * PAGE_SIZE;
-        if (!page_held_dirty(vp, at))
+        int state = 0;
+        if (ubc_page_op(vp, at, 0, NULL, &state) != KERN_SUCCESS || !(state & UPL_POP_DIRTY))
             continue;
         IOLockLock(np->vmp->lock);
         np->held_pushes++;
         IOLockUnlock(np->vmp->lock);
-        while (page_held_dirty(vp, at) &&
-               ubc_page_op(vp, at, UPL_POP_SET | UPL_POP_BUSY, NULL, NULL) == KERN_SUCCESS) {
+        for (int tries = 0; (page_settled(vp, at) & UPL_POP_DIRTY) && tries < 2; tries++) {
             upl_t upl = NULL;
             upl_page_info_t *pl = NULL;
 
-            ubc_page_op(vp, at, UPL_POP_CLR | UPL_POP_BUSY, NULL, NULL);
-            if (ubc_create_upl(vp, at, PAGE_SIZE, &upl, &pl, UPL_UBC_MSYNC | UPL_RET_ONLY_DIRTY) != KERN_SUCCESS)
+            if (ubc_create_upl(vp, at, PAGE_SIZE, &upl, &pl, UPL_UBC_MSYNC | UPL_RET_ONLY_DIRTY) != KERN_SUCCESS) {
+                if (!rdonly)
+                    push_failed(np);
+                error = EINVAL;
                 break;
-            int failed = pageout_pages(vp, upl, pl, at, 1, flags);
-            error = error ? error : failed;
+            }
+            bool collected = upl_page_present(pl, 0);
+            error = pageout_pages(vp, upl, pl, at, 1, flags);
+            if (collected)
+                break;
         }
         IOLockLock(np->vmp->lock);
         if (--np->held_pushes == 0)
@@ -2055,10 +2064,8 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
         error = pageout_pages(vp, upl, pl, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
     else if (!rdonly)
         push_failed(np);
-    if (made && sync && (flags & UPL_IOSYNC)) {
-        int failed = pageout_held(vp, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
-        error = error ? error : failed;
-    }
+    if (made && !error && sync && (flags & UPL_IOSYNC))
+        error = pageout_held(vp, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
     push_end(np, slot);
     IOLockLock(np->vmp->lock);
     bool last = --np->pageouts == 0;
