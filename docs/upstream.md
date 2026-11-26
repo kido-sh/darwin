@@ -45,7 +45,7 @@ under nix/. corecrypto comes from the pinned fork commit.
 
 ## kido's changes
 
-All between 2026-11-18 and 2026-11-24, by the kido authors.
+All between 2026-11-18 and 2026-11-26, by the kido authors.
 
 On PureDarwin's tree, before the import (cocoa-xu/PureDarwin, branch darwin-container):
 
@@ -118,6 +118,17 @@ In this repository:
   the panic log goes to a buffer in the kernel, so a panic prints its backtrace, the kexts in it
   and the loaded kexts. Then a virtual machine powers off instead of resetting
   (PDArmPlatformExpert), which stops it under VZ as well as QEMU; tested in test/kernel.
+- The modified bit on arm64 (osfmk/arm/pmap/pmap.c, the pmap VIRT builds): after
+  arm_force_fast_fault, a page's referenced and modified bits are cleared while the page's PV lock
+  is still held, and pmap_enter sets a new mapping's bits under that lock and marks a writable
+  mapping of a page already marked modified, as in the SPTM pmap. Clearing the bits after the lock
+  was dropped let a write fault on another CPU leave a mapping writable with the bit clear, so
+  later stores to the page were not recorded and a flush could free them. The
+  PMAP_OPTIONS_CLEAR_WRITE path still clears after its write-protect has unlocked, which its one
+  caller makes safe by holding the VM object lock. The test is race-read in test/virtiofs. It
+  catches the old code in every run only while the Mac is busy, for instance exporting images, and
+  in some runs otherwise, so check a change to this pmap by running race-read on images built with
+  and without it, alternated, while the Mac is busy.
 - macOS's LibreSSL: libcrypto.46, libssl.48 and libtls.20 in /usr/lib with macOS's install names,
   versions and exports, and the openssl and ocspcheck tools in /usr/bin. They are built from
   LibreSSL 3.3.6, the release macOS ships, with backports of LibreSSL's later security fixes,
