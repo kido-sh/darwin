@@ -6,7 +6,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <mach/mach_vm.h>
+#include <mach/thread_policy.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -2778,6 +2780,7 @@ struct seer {
     atomic_int done;
     atomic_int stop;
     atomic_int failed;
+    atomic_int realtime;
 };
 
 static void *
@@ -3023,6 +3026,32 @@ sync_race(const char *name)
 enum { RANGE_READ = 10 * 16384 };
 
 static void *
+waker(void *arg)
+{
+    struct seer *s = arg;
+    mach_timebase_info_data_t tb;
+    mach_timebase_info(&tb);
+    uint64_t wait = 30000ULL * tb.denom / tb.numer, work = 8000ULL * tb.denom / tb.numer;
+    thread_time_constraint_policy_data_t policy = {
+        .period = (uint32_t)(100000ULL * tb.denom / tb.numer),
+        .computation = (uint32_t)(50000ULL * tb.denom / tb.numer),
+        .constraint = (uint32_t)(100000ULL * tb.denom / tb.numer),
+        .preemptible = 1,
+    };
+    thread_t self = mach_thread_self();
+    if (thread_policy_set(self, THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&policy,
+                          THREAD_TIME_CONSTRAINT_POLICY_COUNT) == KERN_SUCCESS)
+        atomic_fetch_add(&s->realtime, 1);
+    mach_port_deallocate(mach_task_self(), self);
+    while (!atomic_load(&s->stop)) {
+        mach_wait_until(mach_absolute_time() + wait);
+        for (uint64_t end = mach_absolute_time() + work; mach_absolute_time() < end;)
+            ;
+    }
+    return NULL;
+}
+
+static void *
 range_reader(void *arg)
 {
     struct seer *s = arg;
@@ -3171,8 +3200,12 @@ read_race(const char *name)
     bool ready = map != MAP_FAILED && pthread_create(&t, NULL, range_reader, &s) == 0;
     CHECK(ready, "create and map %s: %s", name, strerror(errno));
     bool storing = ready && pthread_create(&u, NULL, seen_store, &s) == 0;
-    int rounds = 20000, late = 0, failed = !storing;
-    for (int i = 1; storing && i <= rounds; i++) {
+    pthread_t w[2];
+    int wakers = 0;
+    while (storing && wakers < 2 && pthread_create(&w[wakers], NULL, waker, &s) == 0)
+        wakers++;
+    int rounds = 20000, late = 0, failed = !storing || wakers < 2;
+    for (int i = 1; storing && wakers == 2 && i <= rounds; i++) {
         char want = (char)('A' + i % 26);
         map[16484] = '-';
         failed += msync((void *)(map + 16384), 16384, MS_SYNC) != 0;
@@ -3182,6 +3215,8 @@ read_race(const char *name)
         late += !on_host(name, 16484, want);
     }
     atomic_store(&s.stop, 1);
+    while (wakers)
+        pthread_join(w[--wakers], NULL);
     if (ready)
         pthread_join(t, NULL);
     if (storing)
@@ -3191,10 +3226,11 @@ read_race(const char *name)
         munmap((void *)map, 49152);
     if (fd >= 0)
         close(fd);
-    CHECK(late == 0 && failed == 0 && atomic_load(&s.done) > 0 && stored && !atomic_load(&s.failed),
-          "%s: beside %d reads that hold the page while they fetch the one before and a tight storer that %s, msync "
-          "returned %d times of %d before its store was on the Mac, and %d calls failed",
-          name, atomic_load(&s.done), stored ? "stored" : "never stored", late, rounds,
+    CHECK(late == 0 && failed == 0 && atomic_load(&s.done) > 0 && stored && atomic_load(&s.realtime) == 2 &&
+              !atomic_load(&s.failed),
+          "%s: beside %d reads that hold the page while they fetch the one before, a tight storer that %s and %d of 2 "
+          "threads made real-time, msync returned %d times of %d before its store was on the Mac, and %d calls failed",
+          name, atomic_load(&s.done), stored ? "stored" : "never stored", atomic_load(&s.realtime), late, rounds,
           failed + atomic_load(&s.failed));
 }
 
