@@ -388,16 +388,19 @@ refused_kept() {
   echo "on a volume of this Mac that ran full: $(cat "$work/map-fail.out"), and this Mac reads $byte for those three"
   [[ $status == 0 && $byte == $(sed -n 's/.*the last read \(...\),.*/\1/p' "$work/map-fail.out") ]]
 }
+appears() {
+  local tries=300
+  while [[ ! -e $1 ]] && ((tries-- > 0)); do sleep 0.1; done
+  [[ -e $1 ]]
+}
 refused_clean() {
-  local holder status byte at=$((3 * 16384 + 100))
+  local holder status byte at=$((3 * 16384 + 100)) signals=$rw/refused-clean
+  mkdir -p "$signals"
   head -c 65536 /dev/zero | tr '\0' A > "$full/clean"
-  guest /tmp/t_virtiofs refused-clean /mnt/full/clean 4 > "$work/refused-clean.out" 2>&1 &
+  guest /tmp/t_virtiofs refused-clean /mnt/full/clean /mnt/rw/refused-clean > "$work/refused-clean.out" 2>&1 &
   holder=$!
-  sleep 1
-  fill
-  sleep 3
-  room
-  printf M | dd of="$full/clean" bs=1 seek=$at conv=notrunc 2>/dev/null
+  appears "$signals/cached" && fill && touch "$signals/full" && appears "$signals/wrote" && room &&
+    printf M | dd of="$full/clean" bs=1 seek=$at conv=notrunc 2>/dev/null && touch "$signals/room"
   wait $holder
   status=$?
   byte=$(dd if="$full/clean" bs=1 skip=$at count=1 2>/dev/null)
@@ -568,8 +571,8 @@ check "a directory renamed on this Mac" guest /bin/test -f /mnt/data/deep/1/2/3/
 printf 'X' | dd of="$share/small/4096" bs=1 seek=100 conv=notrunc 2>/dev/null
 sleep 1.1
 "$work/t_virtiofs" tree "$share/small" > "$work/small.host"
-guest /tmp/t_virtiofs tree /mnt/data/small > "$work/small.guest"
-check "a file rewritten in place on this Mac" diff -u "$work/small.host" "$work/small.guest"
+check "a file rewritten in place on this Mac" \
+  guest_same "$work/small.host" "$work/small.guest" /tmp/t_virtiofs tree /mnt/data/small
 guest /bin/cat /mnt/data/revoke >/dev/null
 check "a file the host makes unreadable cannot be opened through a kept handle" revoked 0 revoke 000 /bin/cat /mnt/data/revoke
 check "a program the host makes unreadable cannot be run through a kept handle" revoked 0 exec 111 /mnt/data/exec tree /mnt/data/deep
@@ -593,14 +596,14 @@ sleep 1.1
 "$work/t_virtiofs" tree "$work/expect" 2>/dev/null | nostamp > "$work/expect.tree"
 "$work/t_virtiofs" tree "$rw/w" > "$work/rw.host" 2>/dev/null
 check "what the guest wrote is on this Mac as this Mac writes it" diff -u "$work/expect.tree" <(nostamp < "$work/rw.host")
-guest /tmp/t_virtiofs tree /mnt/rw/w > "$work/rw.guest" 2>/dev/null
-check "the guest reads back what this Mac holds" diff -u "$work/rw.host" "$work/rw.guest"
+check "the guest reads back what this Mac holds" \
+  guest_same "$work/rw.host" "$work/rw.guest" /tmp/t_virtiofs tree /mnt/rw/w 2>/dev/null
 "$work/t_virtiofs" rw-errors "$work/errors" > "$work/errors.host"
-guest /tmp/t_virtiofs rw-errors /mnt/rw/e > "$work/errors.guest"
-check "errors of a writable mount match this Mac's" diff -u "$work/errors.host" "$work/errors.guest"
+check "errors of a writable mount match this Mac's" \
+  guest_same "$work/errors.host" "$work/errors.guest" /tmp/t_virtiofs rw-errors /mnt/rw/e
 "$work/t_virtiofs" xattrs "$work/xattrs" > "$work/xattrs.host"
-guest /tmp/t_virtiofs xattrs /mnt/rw/x > "$work/xattrs.guest"
-check "extended attributes match this Mac's" diff -u "$work/xattrs.host" "$work/xattrs.guest"
+check "extended attributes match this Mac's" \
+  guest_same "$work/xattrs.host" "$work/xattrs.guest" /tmp/t_virtiofs xattrs /mnt/rw/x
 check "this Mac holds the attributes the guest set" diff -u "$work/xattrs.guest" <("$work/t_virtiofs" xattr-list "$rw/x")
 check "writes, stores through a mapping and truncation agree" guest /tmp/t_virtiofs coherence /mnt/rw/coherent
 check "a descriptor keeps working after its file is removed or renamed" guest /tmp/t_virtiofs open-unlink /mnt/rw/ou
@@ -620,7 +623,7 @@ check "six writers on their own parts of one file, sharing pages, find every byt
   guest /tmp/t_virtiofs owned /mnt/rw/owned /mnt/peer/owned 10
 check "the modification time asked for alone follows writes here and on the Mac, and drops stale pages if not mapped" \
   guest /bin/sh -c 'mkdir -p /mnt/noatime && /sbin/mount -t virtiofs -o noatime kido:rw /mnt/noatime &&
-  /tmp/t_virtiofs modtime /mnt/noatime/modtime /mnt/peer/modtime; r=$?; /sbin/umount /mnt/noatime; exit $r'
+  /tmp/t_virtiofs modtime /mnt/noatime/modtime /mnt/peer/modtime; r=$?; /sbin/umount /mnt/noatime || r=1; exit $r'
 check "unmount the second mount of kido:rw" guest /sbin/umount /mnt/peer
 check "mount kido:full" guest /bin/sh -c 'mkdir -p /mnt/full && /sbin/mount -t virtiofs kido:full /mnt/full'
 check "a write and a push this Mac has no room for fail, and the store they met is pushed once there is room" refused_kept
@@ -632,7 +635,7 @@ check "unmount kido:full" guest /sbin/umount /mnt/full
 check "a create whose open fails before it opens leaves nothing open for writing" raw_create_released
 check "a case-only rename works after the first case probe asked about a removed file" guest /bin/sh -c \
   'mkdir -p /mnt/cs && /sbin/mount -t virtiofs kido:rw /mnt/cs && /tmp/t_virtiofs case-probe /mnt/cs/cs; r=$?;
-  /sbin/umount /mnt/cs; exit $r'
+  /sbin/umount /mnt/cs || r=1; exit $r'
 check "utimes(NULL) in the guest sets the current time on this Mac" times_now
 check "a page stored to through a mapping does not overwrite what this Mac appended" appended_kept
 check "sync(2) pushes stores of a live mapping to this Mac" synced_map
@@ -652,6 +655,8 @@ check "eight threads that store and sync, and a read into fresh pages of a mappi
   guest /tmp/t_virtiofs syncers /mnt/rw/syncers 6 8
 check "a write beside a thread that makes and removes the file's only mapping keeps going" \
   guest /tmp/t_virtiofs unmapping /mnt/rw/unmapping 6
+check "sixteen threads that store and sync, writes over uncached pages and fsyncs of a privately mapped file go on" \
+  guest /tmp/t_virtiofs cow-sync /mnt/rw/cow 8 16
 check "files written and closed beside stats of them are closed on this Mac" closed_released
 check "flock and fcntl locks hold between descriptors and processes of the guest" guest /tmp/t_virtiofs locks /mnt/rw/locked
 check "a file removed in the guest is released on this Mac" removed_released

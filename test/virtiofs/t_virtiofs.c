@@ -688,30 +688,60 @@ store_loop(const char *path, const char *other, int seconds)
 
 enum { FULL_PAGES = 128, CLEAN_AT = 3 * 16384 + 100 };
 
+static bool
+appears(const char *dir, const char *name)
+{
+    char path[1024];
+    struct stat st;
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    for (int tries = 0; tries < 600; tries++) {
+        if (stat(path, &st) == 0)
+            return true;
+        usleep(50000);
+    }
+    printf("%s did not appear in 30 s\n", path);
+    return false;
+}
+
+static bool
+signal_mac(const char *dir, const char *name)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    return fd >= 0 && close(fd) == 0;
+}
+
 static int
-refused_clean(const char *path, int seconds)
+refused_clean(const char *path, const char *signals)
 {
     static char data[81920];
     struct stat st;
     char seen = 0;
     int fd = open(path, O_RDWR);
-    if (fd < 0 || pread(fd, data, 65536, 0) != 65536 || data[CLEAN_AT] != 'A') {
-        printf("open and read %s: %s\n", path, strerror(errno));
+    if (fd < 0 || pread(fd, data, 65536, 0) != 65536 || data[CLEAN_AT] != 'A' || !signal_mac(signals, "cached")) {
+        printf("open, read %s and signal this Mac: %s\n", path, strerror(errno));
         if (fd >= 0)
             close(fd);
         return 1;
     }
     memset(data, 'x', sizeof(data));
-    sleep((unsigned)seconds);
+    if (!appears(signals, "full")) {
+        close(fd);
+        return 1;
+    }
     ssize_t wrote = pwrite(fd, data, sizeof(data), 0);
     int refused = wrote < 0 ? errno : 0;
-    sleep((unsigned)seconds);
+    if (!signal_mac(signals, "wrote") || !appears(signals, "room")) {
+        close(fd);
+        return 1;
+    }
     bool looked = fstat(fd, &st) == 0 && fsync(fd) == 0 && pread(fd, &seen, 1, CLEAN_AT) == 1;
     printf("a write of 80 KiB over 64 cached KiB returned %zd (%s), and after a change on this Mac a stat, fsync and "
            "read here %s and read '%c' where it changed\n", wrote, strerror(refused),
            looked ? "worked" : strerror(errno), seen);
     close(fd);
-    return !(wrote <= CLEAN_AT && looked && seen == 'M');
+    return !((wrote < 0 ? refused == ENOSPC : wrote <= 3 * 16384) && looked && seen == 'M');
 }
 
 static int
@@ -1872,6 +1902,105 @@ mtime_of(int fd, struct timespec *t)
     return true;
 }
 
+enum { COW_SIZE = 64 << 20, COW_SHARED = 1 << 20 };
+
+struct cow {
+    int fd;
+    volatile char *shared;
+    atomic_long syncs, writes, fsyncs, failures;
+    atomic_bool stop;
+};
+
+struct cow_syncer {
+    struct cow *cow;
+    long page;
+};
+
+static void *
+cow_sync_one(void *arg)
+{
+    struct cow_syncer *s = arg;
+    volatile char *page = s->cow->shared + s->page * 16384;
+    while (!atomic_load(&s->cow->stop)) {
+        page[7]++;
+        if (msync((void *)page, 16384, MS_SYNC) != 0)
+            atomic_fetch_add(&s->cow->failures, 1);
+        atomic_fetch_add(&s->cow->syncs, 1);
+    }
+    return NULL;
+}
+
+static void *
+cow_write(void *arg)
+{
+    static char buf[16384];
+    struct cow *cow = arg;
+    unsigned seed = 1;
+    memset(buf, 'w', sizeof(buf));
+    while (!atomic_load(&cow->stop)) {
+        off_t at = COW_SHARED + (off_t)(rand_r(&seed) % ((COW_SIZE - COW_SHARED) / 16384)) * 16384;
+        if (pwrite(cow->fd, buf, sizeof(buf), at) != (ssize_t)sizeof(buf))
+            atomic_fetch_add(&cow->failures, 1);
+        atomic_fetch_add(&cow->writes, 1);
+    }
+    return NULL;
+}
+
+static void *
+cow_fsync(void *arg)
+{
+    struct cow *cow = arg;
+    while (!atomic_load(&cow->stop)) {
+        if (fsync(cow->fd) != 0)
+            atomic_fetch_add(&cow->failures, 1);
+        atomic_fetch_add(&cow->fsyncs, 1);
+    }
+    return NULL;
+}
+
+static int
+cow_sync(const char *path, int seconds, int count)
+{
+    static struct cow cow;
+    static struct cow_syncer syncers[64];
+    pthread_t tid[66];
+    cow.fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    cow.shared = cow.fd < 0 || ftruncate(cow.fd, COW_SIZE) != 0
+                     ? MAP_FAILED
+                     : mmap(NULL, COW_SHARED, PROT_READ | PROT_WRITE, MAP_SHARED, cow.fd, 0);
+    void *copy = cow.shared == MAP_FAILED ? MAP_FAILED : mmap(NULL, COW_SIZE, PROT_READ, MAP_PRIVATE, cow.fd, 0);
+    if (copy == MAP_FAILED || count < 1 || count > 64) {
+        printf("create and map %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    for (int i = 0; i < count; i++) {
+        syncers[i] = (struct cow_syncer){ &cow, i % (COW_SHARED / 16384) };
+        spawn(&tid[i], cow_sync_one, &syncers[i]);
+    }
+    spawn(&tid[count], cow_write, &cow);
+    spawn(&tid[count + 1], cow_fsync, &cow);
+    long syncs = 0, writes = 0, fsyncs = 0;
+    int still = 0;
+    for (int s = 0; s < seconds; s++) {
+        sleep(1);
+        long ns = atomic_load(&cow.syncs), nw = atomic_load(&cow.writes), nf = atomic_load(&cow.fsyncs);
+        still += ns == syncs || nw == writes || nf == fsyncs;
+        syncs = ns;
+        writes = nw;
+        fsyncs = nf;
+    }
+    printf("%d threads storing and syncing pages of a private mapping's file beside writes over uncached pages and "
+           "fsyncs: %ld syncs, %ld writes and %ld fsyncs in %d s, %d seconds in which one kind stood still, %ld calls "
+           "failed\n", count, syncs, writes, fsyncs, seconds, still, atomic_load(&cow.failures));
+    atomic_store(&cow.stop, true);
+    for (int i = 0; i <= count + 1; i++)
+        pthread_join(tid[i], NULL);
+    munmap(copy, COW_SIZE);
+    munmap((void *)cow.shared, COW_SHARED);
+    close(cow.fd);
+    return still || atomic_load(&cow.failures);
+}
+
 static int
 modtime(const char *path, const char *peerpath)
 {
@@ -2979,8 +3108,10 @@ host_difference(const char *name, const char *want, size_t size)
     static char back[65536];
     int held = peer_open(name, O_RDONLY), fd = peer_open(name, O_RDONLY);
     bool read = fd >= 0 && size <= sizeof(back) && pread(fd, back, size, 0) == (ssize_t)size;
-    close(fd);
-    close(held);
+    if (fd >= 0)
+        close(fd);
+    if (held >= 0)
+        close(held);
     return read ? first_difference(back, want, size) : 0;
 }
 
@@ -2995,7 +3126,7 @@ touch_pages(void *arg)
     struct toucher *t = arg;
     unsigned long sum = 0;
     for (unsigned i = 0; !atomic_load(&t->stop); i++)
-        sum += (unsigned char)t->map[(i * 4096) % 65536];
+        sum += (unsigned char)t->map[(i * 64) % 16384];
     return (void *)sum;
 }
 
@@ -3011,7 +3142,7 @@ repush(const char *name, bool mapped, bool stat_later, bool wired)
     int mapfd = made && wired ? open(name, O_RDONLY) : fd;
     volatile char *map = !mapped ? NULL : made && mapfd >= 0 ? mmap(NULL, 65536, PROT_READ, MAP_SHARED, mapfd, 0)
                                                               : MAP_FAILED;
-    if (mapfd != fd)
+    if (mapfd >= 0 && mapfd != fd)
         close(mapfd);
     if (wired && map && map != MAP_FAILED && mlock((void *)map, 65536) != 0) {
         munmap((void *)map, 65536);
@@ -3024,7 +3155,9 @@ repush(const char *name, bool mapped, bool stat_later, bool wired)
         spawn(&toucher, touch_pages, &touching);
         usleep(10000);
     }
-    bool wrote = cached && pwrite(fd, "X", 1, 100) == 1;
+    bool wrote = cached;
+    for (int k = 0; wrote && k < (wired ? 8 : 1); k++)
+        wrote = pwrite(fd, "X", 1, 100) == 1;
     int error = errno;
     if (cached && wired) {
         atomic_store(&touching.stop, true);
@@ -3032,7 +3165,8 @@ repush(const char *name, bool mapped, bool stat_later, bool wired)
     }
     CHECK(wrote, "%s: create, cache a page and write into it: %s", name, strerror(error));
     if (!made || map == MAP_FAILED) {
-        close(fd);
+        if (fd >= 0)
+            close(fd);
         return;
     }
     int other = peer_open(name, O_WRONLY);
@@ -3074,7 +3208,8 @@ wired_past(const char *name, off_t cut, off_t from, int how)
     if (!wired) {
         if (map != MAP_FAILED)
             munmap((void *)map, 65536);
-        close(fd);
+        if (fd >= 0)
+            close(fd);
         return;
     }
     if (!(how & (WIRED_READ | WIRED_RDONLY)))
@@ -3741,6 +3876,8 @@ main(int argc, char **argv)
         return stress(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (argc == 3 && !strcmp(argv[1], "bench"))
         return bench(argv[2]);
+    if (argc == 5 && !strcmp(argv[1], "cow-sync"))
+        return cow_sync(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (argc == 4 && !strcmp(argv[1], "modtime"))
         return modtime(argv[2], argv[3]);
     if (argc == 5 && !strcmp(argv[1], "raw-read"))
@@ -3803,7 +3940,7 @@ main(int argc, char **argv)
     if (argc == 4 && !strcmp(argv[1], "map-fail"))
         return map_fail(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "refused-clean"))
-        return refused_clean(argv[2], atoi(argv[3]));
+        return refused_clean(argv[2], argv[3]);
     if (argc == 4 && !strcmp(argv[1], "short-write"))
         return short_write(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "map-unpushed"))
