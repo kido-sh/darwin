@@ -3095,13 +3095,13 @@ sync_pages_race(const char *name)
         munmap((void *)map, 6 * 16384);
     if (fd >= 0)
         close(fd);
-    int reads = atomic_load(&r[0].done) + atomic_load(&r[1].done);
-    CHECK(late == 0 && failed == 0 && s.rounds > 0 && atomic_load(&r[0].done) > 0 && atomic_load(&r[1].done) > 0 &&
-              !atomic_load(&s.failed) && !atomic_load(&r[0].failed) && !atomic_load(&r[1].failed),
-          "%s: beside %d writes into the second of four pages and %d reads that hold them while they fetch a page "
-          "before, msync of all four returned %d times of %d before the store into the second was on the Mac, and "
-          "%d calls failed",
-          name, s.rounds, reads, late, rounds,
+    int first = atomic_load(&r[0].done), second = atomic_load(&r[1].done);
+    CHECK(late == 0 && failed == 0 && s.rounds > 0 && first > 0 && second > 0 && !atomic_load(&s.failed) &&
+              !atomic_load(&r[0].failed) && !atomic_load(&r[1].failed),
+          "%s: beside %d writes into the second of four pages and %d and %d reads that hold them while they fetch a "
+          "page before, msync of all four returned %d times of %d before the store into the second was on the Mac, "
+          "and %d calls failed",
+          name, s.rounds, first, second, late, rounds,
           failed + atomic_load(&s.failed) + atomic_load(&r[0].failed) + atomic_load(&r[1].failed));
 }
 
@@ -3186,14 +3186,16 @@ read_race(const char *name)
         pthread_join(t, NULL);
     if (storing)
         pthread_join(u, NULL);
+    bool stored = map != MAP_FAILED && s.counter[25] != 0x78787878U;
     if (map != MAP_FAILED)
         munmap((void *)map, 49152);
     if (fd >= 0)
         close(fd);
-    CHECK(late == 0 && failed == 0 && atomic_load(&s.done) > 0 && !atomic_load(&s.failed),
-          "%s: beside %d reads that hold the page while they fetch the one before and a tight storer, msync returned "
-          "%d times of %d before its store was on the Mac, and %d calls failed",
-          name, atomic_load(&s.done), late, rounds, failed + atomic_load(&s.failed));
+    CHECK(late == 0 && failed == 0 && atomic_load(&s.done) > 0 && stored && !atomic_load(&s.failed),
+          "%s: beside %d reads that hold the page while they fetch the one before and a tight storer that %s, msync "
+          "returned %d times of %d before its store was on the Mac, and %d calls failed",
+          name, atomic_load(&s.done), stored ? "stored" : "never stored", late, rounds,
+          failed + atomic_load(&s.failed));
 }
 
 static void *
