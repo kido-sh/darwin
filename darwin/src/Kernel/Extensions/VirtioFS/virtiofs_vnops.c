@@ -321,7 +321,7 @@ leftover_fill(struct virtiofs_node *np, off_t from, off_t to)
         off_t step = MIN(limit - from, LEFTOVER_STEP);
         upl_t upl = NULL;
         upl_page_info_t *pl = NULL;
-        int absent = 0, state = 0;
+        int absent = 0;
 
         if (ubc_range_op(vp, from, from + step, UPL_ROP_ABSENT, &absent) != KERN_SUCCESS) {
             error = EIO;
@@ -335,10 +335,8 @@ leftover_fill(struct virtiofs_node *np, off_t from, off_t to)
         bool valid = upl_valid_page(pl, 0);
         if (valid)
             error = page_fill(np, upl, from, from, from + PAGE_SIZE);
-        bool wired = ubc_page_op(vp, from, 0, NULL, &state) == KERN_SUCCESS && !(state & UPL_POP_BUSY);
         if (valid && !error)
-            ubc_upl_commit_range(upl, 0, PAGE_SIZE,
-                                 UPL_COMMIT_FREE_ON_EMPTY | (wired ? UPL_COMMIT_SET_DIRTY : UPL_COMMIT_CLEAR_DIRTY));
+            ubc_upl_commit_range(upl, 0, PAGE_SIZE, UPL_COMMIT_FREE_ON_EMPTY);
         else
             ubc_upl_abort_range(upl, 0, PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
         from += PAGE_SIZE;
