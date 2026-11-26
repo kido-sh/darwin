@@ -307,7 +307,8 @@ VirtioFSDevice::pauseLocked(void *event, bool reap)
     if (fReaped)
         deferReapLocked();
     AbsoluteTime deadline;
-    clock_interval_to_deadline(reap ? kWaitSliceMs : kQuietSliceMs, kMillisecondScale, &deadline);
+    bool own = !reap && !fDead && event != &fQuietSlots;
+    clock_interval_to_deadline(own ? kQuietSliceMs : kWaitSliceMs, kMillisecondScale, &deadline);
     if (IOLockSleepDeadline(fLock, event, deadline, THREAD_UNINT) != THREAD_TIMED_OUT)
         return;
 
