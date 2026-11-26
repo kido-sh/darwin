@@ -1618,7 +1618,7 @@ read_user(struct virtiofs_node *np, uio_t uio, off_t size, int ioflag)
             len = nocache_part(np, uio_offset(uio), len);
         uio_reset(part, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
         uio_addiov(part, CAST_USER_ADDR_T(buf), len);
-        error = read_pages(np, part, ioflag, &end);
+        error = read_pages(np, part, ioflag & ~(IO_NOCACHE_SYSSPACE | IO_RETURN_ON_THROTTLE), &end);
         uint32_t got = len - (uint32_t)uio_resid(part);
         if (!error)
             error = uiomove(buf, (int)got, uio);
