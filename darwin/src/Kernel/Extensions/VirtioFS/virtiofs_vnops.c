@@ -2447,7 +2447,7 @@ virtiofs_vnop_pathconf(struct vnop_pathconf_args *ap)
 }
 
 static int
-truncate_begin(struct virtiofs_node *np, vfs_context_t ctx, off_t size, uint64_t *fh, off_t *was, off_t *leftover)
+truncate_begin(struct virtiofs_node *np, vfs_context_t ctx, off_t size, uint64_t *fh, off_t *was)
 {
     IOLockLock(np->vmp->lock);
     bool opened = np->wopens != 0;
@@ -2461,7 +2461,6 @@ truncate_begin(struct virtiofs_node *np, vfs_context_t ctx, off_t size, uint64_t
     wait_clear(np, VN_SIZING);
     np->flags |= VN_TRUNCATING;
     *was = (off_t)np->attr.size;
-    *leftover = np->leftover;
     IOLockUnlock(np->vmp->lock);
     if (size < *was)
         error = push_dirty(np->vp);
@@ -2537,10 +2536,10 @@ virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
     if (!in.valid)
         return 0;
 
-    off_t was = 0, leftover = 0;
+    off_t was = 0;
     if (truncate) {
         IOLockLock(np->wlock);
-        int error = truncate_begin(np, ap->a_context, vap->va_data_size, &fh, &was, &leftover);
+        int error = truncate_begin(np, ap->a_context, vap->va_data_size, &fh, &was);
         if (error) {
             IOLockUnlock(np->wlock);
             return error;
@@ -2558,9 +2557,6 @@ virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
         if (!node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version))
             node_stale(np);
     } else if (truncate) {
-        IOLockLock(np->vmp->lock);
-        np->leftover = leftover;
-        IOLockUnlock(np->vmp->lock);
         node_sized(np, was, false);
     } else {
         node_stale(np);
