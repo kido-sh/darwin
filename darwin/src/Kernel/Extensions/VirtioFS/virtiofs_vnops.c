@@ -97,6 +97,7 @@ struct virtiofs_node {
     uint32_t waiters;
     uint32_t flags;
     off_t leftover;
+    off_t held_size;
     off_t read_end;
     struct fuse_attr glanced;
     uint64_t glanced_until;
@@ -391,6 +392,8 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     struct virtiofs_mount *vmp = np->vmp;
     vnode_t vp = np->vp;
 
+    if (held)
+        *held = false;
     IOLockLock(vmp->lock);
     wait_clear(np, VN_SIZING);
     if (np->attr_version > version || (np->flags & VN_TRUNCATING)) {
@@ -426,6 +429,7 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
     IOLockLock(vmp->lock);
     if (!sized)
         np->expire = 0;
+    np->held_size = sized ? 0 : size;
     sizing_done(np, 0);
     IOLockUnlock(vmp->lock);
     if (held)
@@ -512,6 +516,7 @@ node_resize_locked(struct virtiofs_node *np, off_t size)
     sizing_set(np);
     readers_wait_locked(np);
     np->attr.size = (uint64_t)size;
+    np->held_size = 0;
     np->attr_version = ++np->vmp->version;
     np->expire = 0;
     IOLockUnlock(np->vmp->lock);
@@ -544,7 +549,7 @@ append_offset(struct virtiofs_node *np, vfs_context_t ctx, off_t *offset)
     wait_clear(np, VN_SIZING);
     int newer = applied ? 1 : change_cmp(&np->attr, &reply);
     off_t cached = (off_t)np->attr.size, fetched = (off_t)reply.size;
-    *offset = newer > 0 ? cached : newer < 0 ? fetched : MAX(cached, fetched);
+    *offset = newer > 0 ? MAX(cached, np->held_size) : newer < 0 ? fetched : MAX(cached, fetched);
     if (*offset < cached)
         node_resize_locked(np, *offset);
     IOLockUnlock(np->vmp->lock);
@@ -583,6 +588,7 @@ node_sized(struct virtiofs_node *np, off_t size, bool refill)
         readers_wait_locked(np);
     if (size < old)
         np->attr.size = (uint64_t)size;
+    np->held_size = 0;
     np->attr_version = ++vmp->version;
     np->expire = 0;
     IOLockUnlock(vmp->lock);
