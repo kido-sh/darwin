@@ -6167,7 +6167,7 @@ pmap_construct_pte(
 				}
 			} else {
 				pte |= pt_attr_leaf_rw(pt_attr);
-				*pp_attr_bits |= PP_ATTR_REFERENCED;
+				*pp_attr_bits |= PP_ATTR_REFERENCED | PP_ATTR_MODIFIED;
 			}
 		} else {
 			if (__improbable(set_XO)) {
@@ -6534,11 +6534,11 @@ pmap_enter_options_internal(
 				}
 			}
 
-			pvh_unlock(pai);
-
 			if (pp_attr_bits != 0) {
 				ppattr_pa_set_bits(pa, pp_attr_bits);
 			}
+
+			pvh_unlock(pai);
 
 			if (!had_valid_mapping && (pmap != kernel_pmap)) {
 				uint64_t amount = pt_attr_page_size(pt_attr) * PAGE_RATIO;
