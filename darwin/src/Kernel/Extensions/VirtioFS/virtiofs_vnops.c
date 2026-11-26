@@ -2046,8 +2046,9 @@ pageout_held(vnode_t vp, off_t first, int count, int flags)
             continue;
         IOLockLock(np->vmp->lock);
         np->held_pushes++;
+        readers_wait_locked(np);
         IOLockUnlock(np->vmp->lock);
-        for (int tries = 0; (page_settled(vp, at) & UPL_POP_DIRTY) && tries < 2; tries++) {
+        for (int tries = 0; (page_settled(vp, at) & UPL_POP_DIRTY) && tries < 3; tries++) {
             upl_t upl = NULL;
             upl_page_info_t *pl = NULL;
 
