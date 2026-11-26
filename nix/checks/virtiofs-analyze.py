@@ -24,8 +24,7 @@ extra = (
     "security.FloatLoopCounter",
 )
 findings = []
-analyzed = 0
-seen = {s: 0 for s in sources}
+analyzed = set()
 for entry in json.load(open(os.path.join(build, "compile_commands.json"))):
     if not any(s in entry["file"] for s in sources):
         continue
@@ -42,13 +41,18 @@ for entry in json.load(open(os.path.join(build, "compile_commands.json"))):
         elif arg not in ("-c", "-MD") and not arg.startswith("-fuse-ld="):
             command.append(arg)
     result = subprocess.run(command + ["-o", "/dev/null"], cwd=entry["directory"], capture_output=True, text=True)
-    analyzed += 1
-    seen[next(s for s in sources if s in entry["file"])] += 1
+    analyzed.add(os.path.realpath(os.path.join(entry["directory"], entry["file"])))
     sys.stderr.write(result.stderr)
     findings += [line for line in result.stderr.splitlines() if re.match(r"\S+:\d+:\d+: (warning|error): ", line)]
     if result.returncode:
         findings.append(f"{entry['file']}: the analyzer exited with {result.returncode}")
+findings += [f"nothing under {s} was analyzed" for s in sources if not any(s in path for path in analyzed)]
+for directory in sorted({os.path.dirname(path) for path in analyzed}):
+    for name in sorted(os.listdir(directory)):
+        path = os.path.join(directory, name)
+        if name.endswith((".c", ".cpp")) and path not in analyzed:
+            findings.append(f"{path}: not analyzed, the build's compile commands do not list it")
 with open(report, "w") as f:
     f.write("".join(line + "\n" for line in findings))
-print(f"analyzed {analyzed} files, {len(findings)} findings")
-sys.exit(1 if findings or not all(seen.values()) else 0)
+print(f"analyzed {len(analyzed)} files, {len(findings)} findings")
+sys.exit(1 if findings else 0)
