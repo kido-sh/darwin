@@ -456,13 +456,17 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
     }
     IOLockLock(np->vmp->lock);
     bool kept = mach_absolute_time() < np->glanced_until && np->attr_version <= np->glanced_version;
-    if (kept && change_cmp(&np->glanced, &out.attr) > 0) {
+    int order = kept ? change_cmp(&np->glanced, &out.attr) : 0;
+    if (order > 0 || (kept && !order && version <= np->glanced_version)) {
         reply->mtime = np->glanced.mtime;
         reply->mtimensec = np->glanced.mtimensec;
-    } else if (np->attr_version <= version) {
+    } else if (order < 0 || np->attr_version <= version) {
         np->glanced = out.attr;
         np->glanced_until = deadline(out.attr_valid, out.attr_valid_nsec);
-        np->glanced_version = version;
+        np->glanced_version = MAX(np->glanced_version, version);
+    } else if (change_cmp(&np->attr, &out.attr) > 0) {
+        reply->mtime = np->attr.mtime;
+        reply->mtimensec = np->attr.mtimensec;
     }
     IOLockUnlock(np->vmp->lock);
     return 0;
