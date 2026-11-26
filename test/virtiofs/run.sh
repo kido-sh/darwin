@@ -29,15 +29,19 @@ rc=0
 
 timed() {
   "$@" &
-  local pid=$!
-  (trap 'kill $s 2>/dev/null; exit 0' TERM; sleep "$limit" & s=$!; wait $s; kill "$pid"; sleep 5 & s=$!; wait $s
-   kill -9 "$pid") >/dev/null 2>&1 &
+  local pid=$! mark
+  mark=$(mktemp -u "$work/timeout.XXXXXX")
+  (s=; trap 'kill $s 2>/dev/null; exit 0' TERM; sleep "$limit" & s=$!; wait $s; : > "$mark"; kill "$pid"
+   sleep 5 & s=$!; wait $s; kill -9 "$pid") >/dev/null 2>&1 &
   local watchdog=$!
   wait "$pid"
   local status=$?
   kill "$watchdog" 2>/dev/null
   wait "$watchdog"
-  [[ $status == 143 || $status == 137 ]] && echo "FAIL timeout after ${limit}s: $*"
+  if [[ -e $mark ]]; then
+    echo "FAIL timeout after ${limit}s: $*" | tee -a "$work/timeouts"
+    rm -f "$mark"
+  fi
   return $status
 }
 guest() {
@@ -498,7 +502,7 @@ check "a close is not held up by reads that start after it" guest /tmp/t_virtiof
 check "fcntl F_RDADVISE brings a file into memory without a read" guest /tmp/t_virtiofs rdadvise /mnt/data/small/1048583
 check "megabyte reads with F_NOCACHE leave nothing in the cache" guest /tmp/t_virtiofs nocache /mnt/data/big/8m
 check "a user's read through a descriptor opened for raw encrypted bytes fails or reads as on this Mac" \
-  guest /tmp/t_virtiofs raw-read /mnt/data/big/8m 501
+  guest /tmp/t_virtiofs raw-read /mnt/data/big/8m /mnt/data/small/1048583 501
 guest /tmp/t_virtiofs tree /mnt/data > "$work/tree.guest"
 check "the guest sees the same tree as this Mac" diff -u "$work/tree.host" "$work/tree.guest"
 check "the empty share is empty" prints "" guest /bin/ls -A /mnt/empty
@@ -613,7 +617,7 @@ check "writes, stores, reads into the file's own mapping, truncations and syncs 
 check "eight threads that store and sync, and a read into fresh pages of a mapping of the same file, keep going" \
   guest /tmp/t_virtiofs syncers /mnt/rw/syncers 6 8
 check "a write beside a thread that makes and removes the file's only mapping keeps going" \
-  guest /tmp/t_virtiofs unmapping /mnt/rw/unmapping 4
+  guest /tmp/t_virtiofs unmapping /mnt/rw/unmapping 6
 check "files written and closed beside stats of them are closed on this Mac" closed_released
 check "flock and fcntl locks hold between descriptors and processes of the guest" guest /tmp/t_virtiofs locks /mnt/rw/locked
 check "a file removed in the guest is released on this Mac" removed_released
@@ -662,5 +666,6 @@ guest /tmp/t_virtiofs bench-files /tmp/bf 2000 | sed 's/^/on the container disk:
 "$work/t_virtiofs" bench-write "$work/bw" 256 | sed 's/^write/write on this Mac/'
 "$work/t_virtiofs" bench-files "$work/bf" 2000 | sed 's/^/on this Mac: /'
 
+[[ -s $work/timeouts ]] && rc=1
 [[ $rc == 0 ]] && echo "virtiofs: all checks passed" || echo "virtiofs: FAILED"
 exit $rc
