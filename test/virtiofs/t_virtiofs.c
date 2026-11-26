@@ -3077,7 +3077,7 @@ sync_pages_race(const char *name)
     while (ready && readers < 2 && pthread_create(&u[readers], NULL, range_reader, &r[readers]) == 0)
         readers++;
     int rounds = 4000, late = 0, failed = readers < 2;
-    for (int i = 1; ready && i <= rounds; i++) {
+    for (int i = 1; ready && readers == 2 && i <= rounds; i++) {
         char want = (char)('A' + i % 26);
         for (int page = 2; page <= 5; page++)
             map[page * 16384 + 100] = want;
@@ -3096,8 +3096,8 @@ sync_pages_race(const char *name)
     if (fd >= 0)
         close(fd);
     int reads = atomic_load(&r[0].done) + atomic_load(&r[1].done);
-    CHECK(late == 0 && failed == 0 && s.rounds > 0 && reads > 0 && !atomic_load(&s.failed) &&
-              !atomic_load(&r[0].failed) && !atomic_load(&r[1].failed),
+    CHECK(late == 0 && failed == 0 && s.rounds > 0 && atomic_load(&r[0].done) > 0 && atomic_load(&r[1].done) > 0 &&
+              !atomic_load(&s.failed) && !atomic_load(&r[0].failed) && !atomic_load(&r[1].failed),
           "%s: beside %d writes into the second of four pages and %d reads that hold them while they fetch a page "
           "before, msync of all four returned %d times of %d before the store into the second was on the Mac, and "
           "%d calls failed",
@@ -3172,7 +3172,7 @@ read_race(const char *name)
     CHECK(ready, "create and map %s: %s", name, strerror(errno));
     bool storing = ready && pthread_create(&u, NULL, seen_store, &s) == 0;
     int rounds = 20000, late = 0, failed = !storing;
-    for (int i = 1; ready && i <= rounds; i++) {
+    for (int i = 1; storing && i <= rounds; i++) {
         char want = (char)('A' + i % 26);
         map[16484] = '-';
         failed += msync((void *)(map + 16384), 16384, MS_SYNC) != 0;
