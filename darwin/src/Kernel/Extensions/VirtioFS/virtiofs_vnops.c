@@ -402,7 +402,8 @@ size_grow(struct virtiofs_node *np, off_t old, off_t size, bool refill)
 }
 
 static bool
-node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec, uint32_t nsec, uint64_t version)
+node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec, uint32_t nsec, uint64_t version,
+           bool *held)
 {
     struct virtiofs_mount *vmp = np->vmp;
     vnode_t vp = np->vp;
@@ -444,11 +445,13 @@ node_apply(struct virtiofs_node *np, const struct fuse_attr *attr, uint64_t sec,
         np->expire = 0;
     sizing_done(np, 0);
     IOLockUnlock(vmp->lock);
+    if (held)
+        *held = !sized;
     return sized;
 }
 
 static int
-node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *reply, bool *applied)
+node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *reply, bool *applied, bool *held)
 {
     struct fuse_getattr_in in = {};
     struct fuse_attr_out out = {};
@@ -465,7 +468,7 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
         return error;
     *reply = out.attr;
     if (applied) {
-        *applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
+        *applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version, held);
         return 0;
     }
     IOLockLock(np->vmp->lock);
@@ -486,7 +489,7 @@ static int
 node_fetch(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
 {
     bool applied;
-    int error = node_getattr(np, ctx, attr, &applied);
+    int error = node_getattr(np, ctx, attr, &applied, NULL);
 
     if (error)
         return error;
@@ -513,7 +516,7 @@ node_glance(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
     IOLockUnlock(np->vmp->lock);
     if (!mapped && !applied)
         return node_fetch(np, ctx, attr);
-    return applied || glanced ? 0 : node_getattr(np, ctx, attr, NULL);
+    return applied || glanced ? 0 : node_getattr(np, ctx, attr, NULL, NULL);
 }
 
 static void
@@ -539,27 +542,15 @@ node_resize(struct virtiofs_node *np, off_t size)
     IOLockUnlock(np->vmp->lock);
 }
 
-static bool
-growth_held(struct virtiofs_node *np, const struct fuse_attr *reply)
-{
-    IOLockLock(np->vmp->lock);
-    bool held = !change_cmp(&np->attr, reply) && np->attr.size < reply->size;
-    IOLockUnlock(np->vmp->lock);
-    return held;
-}
-
 static int
 append_offset(struct virtiofs_node *np, vfs_context_t ctx, off_t *offset)
 {
     struct fuse_attr reply;
-    bool applied = false;
+    bool applied = false, held = false;
     int error = 0;
 
-    for (int tries = 0; !error && !applied && tries < 3; tries++) {
-        error = node_getattr(np, ctx, &reply, &applied);
-        if (!error && !applied && growth_held(np, &reply))
-            break;
-    }
+    for (int tries = 0; !error && !applied && !held && tries < 3; tries++)
+        error = node_getattr(np, ctx, &reply, &applied, &held);
     if (error)
         return error;
     IOLockLock(np->vmp->lock);
@@ -739,7 +730,7 @@ node_found(struct virtiofs_node *np, vnode_t vp, const struct fuse_entry_out *en
     IOLockLock(np->vmp->lock);
     np->nlookup += nlookup;
     IOLockUnlock(np->vmp->lock);
-    node_apply(np, &entry->attr, entry->attr_valid, entry->attr_valid_nsec, version);
+    node_apply(np, &entry->attr, entry->attr_valid, entry->attr_valid_nsec, version, NULL);
     return 0;
 }
 
@@ -943,7 +934,7 @@ handle_validate(struct virtiofs_node *np, vfs_context_t ctx, bool *open, bool co
         return 0;
 
     bool applied = !ask && node_cached(np, &attr);
-    int error = applied ? 0 : node_getattr(np, ctx, &attr, &applied);
+    int error = applied ? 0 : node_getattr(np, ctx, &attr, &applied, NULL);
     if (error)
         return error;
     IOLockLock(vmp->lock);
@@ -2603,7 +2594,7 @@ virtiofs_vnop_setattr(struct vnop_setattr_args *ap)
     if (!error && truncate) {
         error = node_sized(np, (off_t)vap->va_data_size, true);
     } else if (!error) {
-        if (!node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version))
+        if (!node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version, NULL))
             node_stale(np);
     } else if (truncate) {
         node_sized(np, was, false);
