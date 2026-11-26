@@ -96,6 +96,8 @@ parse_options(const char *options)
             flags |= MNT_NODEV;
         else if (strcmp(opt, "noexec") == 0)
             flags |= MNT_NOEXEC;
+        else if (strcmp(opt, "noatime") == 0)
+            flags |= MNT_NOATIME;
         else if (strcmp(opt, "sync") == 0 || strcmp(opt, "synchronous") == 0)
             flags |= MNT_SYNCHRONOUS;
         else if (strcmp(opt, "async") == 0)
