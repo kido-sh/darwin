@@ -33,6 +33,7 @@
 #define WRITE_DEPTH          8
 #define BATCH_SMALL          32768
 #define LEFTOVER_STEP        ((off_t)1 << 30)
+#define LEFTOVER_REACH       ((off_t)1 << 40)
 #define HOLD_PAGES           (UPL_SET_LITE | UPL_WILL_MODIFY)
 #define NODE_IDENTITY        (VNODE_ATTR_va_fsid | VNODE_ATTR_va_fsid64 | VNODE_ATTR_va_fileid)
 #define NODE_UNWAITED        (NODE_IDENTITY | VNODE_ATTR_va_modify_time)
@@ -291,9 +292,12 @@ size_shrink(struct virtiofs_node *np, off_t size)
 {
     off_t old = (off_t)ubc_getsize(np->vp);
 
+    IOLockLock(np->vmp->lock);
+    bool mapped = np->flags & VN_MAPPED;
+    IOLockUnlock(np->vmp->lock);
     ubc_setsize(np->vp, size);
     IOLockLock(np->vmp->lock);
-    if (size < old)
+    if (size < old && (mapped || (np->flags & VN_MAPPED)))
         np->leftover = MAX(np->leftover, (off_t)round_page_64(old));
     IOLockUnlock(np->vmp->lock);
 }
@@ -305,7 +309,7 @@ leftover_fill(struct virtiofs_node *np, off_t from, off_t to)
     int error = 0;
 
     IOLockLock(np->vmp->lock);
-    off_t limit = MIN(to, np->leftover);
+    off_t limit = MIN(MIN(to, np->leftover), from + LEFTOVER_REACH);
     IOLockUnlock(np->vmp->lock);
     while (!error && from < limit) {
         off_t step = MIN(limit - from, LEFTOVER_STEP);
@@ -313,8 +317,10 @@ leftover_fill(struct virtiofs_node *np, off_t from, off_t to)
         upl_page_info_t *pl = NULL;
         int absent = 0, state = 0;
 
-        if (ubc_range_op(vp, from, from + step, UPL_ROP_ABSENT, &absent) != KERN_SUCCESS)
+        if (ubc_range_op(vp, from, from + step, UPL_ROP_ABSENT, &absent) != KERN_SUCCESS) {
+            error = EIO;
             break;
+        }
         from += absent;
         if (absent >= step)
             continue;
