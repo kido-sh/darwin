@@ -327,8 +327,6 @@ VirtioFSDevice::pauseLocked(void *event, bool reap)
         fLostInterrupt = true;
         IOLog("VirtioFS: completions arrived without an interrupt\n");
     }
-    if (fReaped && !reap)
-        deferReapLocked();
 }
 
 static bool
