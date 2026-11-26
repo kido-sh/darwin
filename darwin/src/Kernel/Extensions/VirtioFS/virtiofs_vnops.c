@@ -2039,7 +2039,7 @@ pageout_held(vnode_t vp, off_t first, int count, int flags)
     bool rdonly = vfs_isrdonly(vnode_mount(vp));
     int error = 0;
 
-    for (int i = 0; !error && i < count; i++) {
+    for (int i = 0; i < count; i++) {
         off_t at = first + (off_t)i * PAGE_SIZE;
         int state = 0;
         if (ubc_page_op(vp, at, 0, NULL, &state) != KERN_SUCCESS || !(state & UPL_POP_DIRTY))
@@ -2055,11 +2055,12 @@ pageout_held(vnode_t vp, off_t first, int count, int flags)
             if (ubc_create_upl(vp, at, PAGE_SIZE, &upl, &pl, UPL_UBC_MSYNC | UPL_RET_ONLY_DIRTY) != KERN_SUCCESS) {
                 if (!rdonly)
                     push_failed(np);
-                error = EINVAL;
+                error = error ? error : EINVAL;
                 break;
             }
             bool collected = upl_page_present(pl, 0);
-            error = pageout_pages(vp, upl, pl, at, 1, flags);
+            int failed = pageout_pages(vp, upl, pl, at, 1, flags);
+            error = error ? error : failed;
             if (collected)
                 break;
         }
@@ -2100,8 +2101,10 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
         error = pageout_pages(vp, upl, pl, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
     else if (!rdonly)
         push_failed(np);
-    if (made && !error && sync && (flags & UPL_IOSYNC))
-        error = pageout_held(vp, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
+    if (made && sync && (flags & UPL_IOSYNC)) {
+        int failed = pageout_held(vp, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
+        error = error ? error : failed;
+    }
     push_end(np, slot);
     IOLockLock(np->vmp->lock);
     bool last = --np->pageouts == 0;
