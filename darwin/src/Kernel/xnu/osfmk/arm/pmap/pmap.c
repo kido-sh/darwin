@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2011-2021, 2023-2024 Apple Inc. All rights reserved.
- * Modified by the PureDarwin project in 2026; see docs/upstream.md.
+ * Modified by the PureDarwin project in 2026 and the kido authors in 2026; see docs/upstream.md.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -7374,9 +7374,16 @@ phys_attribute_clear_with_flush_range(
 		return;
 	}
 
-	if (arm_force_fast_fault_with_flush_range(pn, allow_mode, options, flush_range)) {
+	if (!pa_valid(pa)) {
+		return;
+	}
+
+	const unsigned int pai = pa_index(pa);
+	pvh_lock(pai);
+	if (arm_force_fast_fault_with_flush_range(pn, allow_mode, options | PMAP_OPTIONS_FF_LOCKED, flush_range)) {
 		ppattr_pa_clear_bits(pa, (pp_attr_t)bits);
 	}
+	pvh_unlock(pai);
 }
 
 MARK_AS_PMAP_TEXT void
