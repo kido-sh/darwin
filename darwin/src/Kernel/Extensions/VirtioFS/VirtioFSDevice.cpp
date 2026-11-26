@@ -21,9 +21,11 @@ enum {
     kInBytes = 2048,
     kOutBytes = kSlotBytes - kTableBytes - kInBytes,
     kMaxSlots = 128,
+    kQuietSlots = 4,
     kMaxIO = 1 << 17,
     kMinIO = 1 << 12,
     kWaitSliceMs = 100,
+    kQuietSliceMs = 1,
 };
 
 extern "C" int virtiofs_spin_us;
@@ -186,7 +188,7 @@ VirtioFSDevice::setupSlots()
         slot->tablePhys = phys;
         slot->inPhys = phys + kTableBytes;
         slot->outPhys = slot->inPhys + kInBytes;
-        slot->quiet = i == 0;
+        slot->quiet = i < kQuietSlots;
         VirtioFSSlot **pool = slot->quiet ? &fQuietSlots : &fFreeSlots;
         slot->next = *pool;
         *pool = slot;
@@ -305,7 +307,7 @@ VirtioFSDevice::pauseLocked(void *event, bool reap)
     if (fReaped)
         deferReapLocked();
     AbsoluteTime deadline;
-    clock_interval_to_deadline(kWaitSliceMs, kMillisecondScale, &deadline);
+    clock_interval_to_deadline(reap ? kWaitSliceMs : kQuietSliceMs, kMillisecondScale, &deadline);
     if (IOLockSleepDeadline(fLock, event, deadline, THREAD_UNINT) != THREAD_TIMED_OUT)
         return;
 
@@ -528,7 +530,7 @@ VirtioFSDevice::startLocked(struct virtiofs_call *c, VirtioFSRequest *r, uint32_
 {
     uint32_t inLen = (uint32_t)sizeof(struct fuse_in_header) + c->arglen[0] + c->arglen[1] + c->arglen[2];
     uint32_t dataOut = (c->flags & VIRTIOFS_DATA_OUT) ? c->datalen : 0;
-    bool reap = !(c->flags & VIRTIOFS_NO_REAP);
+    bool reap = async || !(c->flags & VIRTIOFS_NO_REAP);
     VirtioFSSlot *slot = fillHeaderLocked(c->opcode, c->nodeid, inLen + dataOut, reap);
     if (!slot)
         return NULL;
