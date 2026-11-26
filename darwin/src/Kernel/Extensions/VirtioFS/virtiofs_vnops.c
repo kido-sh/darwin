@@ -489,6 +489,8 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
     } else if (newer > 0 || (!newer && mach_absolute_time() < np->expire)) {
         reply->mtime = np->attr.mtime;
         reply->mtimensec = np->attr.mtimensec;
+    } else if (newer < 0) {
+        np->expire = 0;
     }
     IOLockUnlock(np->vmp->lock);
     return 0;
