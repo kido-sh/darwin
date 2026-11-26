@@ -56,6 +56,7 @@ enum {
     VN_TRUNCATING = 0x2000,
     VN_UNPUSHED = 0x4000,
     VN_WAS_MAPPED = 0x8000,
+    VN_WAS_MAPPED_WRITE = 0x10000,
 };
 
 #define SETTABLE_MODE (ACCESSPERMS | S_ISVTX)
@@ -268,22 +269,28 @@ page_fill(struct virtiofs_node *np, upl_t upl, off_t page, off_t from, off_t to)
     return error;
 }
 
+static bool
+mapped_writable(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    bool writable = np->flags & VN_WAS_MAPPED_WRITE;
+    IOLockUnlock(np->vmp->lock);
+    return writable;
+}
+
 static void
 pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count, int changed)
 {
-    struct virtiofs_node *np = VTON(vp);
-
-    IOLockLock(np->vmp->lock);
-    bool writable = np->flags & VN_MAPPED_WRITE;
-    IOLockUnlock(np->vmp->lock);
     for (int i = 0, run = 1; i < count; i += run) {
         upl_offset_t at = (upl_offset_t)i * PAGE_SIZE;
         bool keep = i < changed && upl_valid_page(pl, i), dirty = keep && upl_dirty_page(pl, i);
         int state = 0;
         for (run = 1; !keep && i + run < count && !(i + run < changed && upl_valid_page(pl, i + run)); run++)
             ;
-        if (keep && !dirty && writable)
-            dirty = ubc_page_op(vp, first + at, 0, NULL, &state) == KERN_SUCCESS && !(state & UPL_POP_BUSY);
+        bool wired = keep && !dirty && ubc_page_op(vp, first + at, 0, NULL, &state) == KERN_SUCCESS &&
+                     !(state & UPL_POP_BUSY);
+        if (wired)
+            dirty = mapped_writable(VTON(vp));
         if (keep)
             ubc_upl_commit_range(upl, at, PAGE_SIZE, UPL_COMMIT_FREE_ON_EMPTY | (dirty ? UPL_COMMIT_SET_DIRTY : 0));
         else
@@ -2175,7 +2182,8 @@ virtiofs_vnop_mmap(struct vnop_mmap_args *ap)
 
     if (vnode_isreg(vp)) {
         IOLockLock(VTON(vp)->vmp->lock);
-        VTON(vp)->flags |= VN_MAPPED | VN_WAS_MAPPED | ((ap->a_fflags & PROT_WRITE) ? VN_MAPPED_WRITE : 0);
+        VTON(vp)->flags |= VN_MAPPED | VN_WAS_MAPPED |
+                           ((ap->a_fflags & PROT_WRITE) ? VN_MAPPED_WRITE | VN_WAS_MAPPED_WRITE : 0);
         IOLockUnlock(VTON(vp)->vmp->lock);
     }
     return 0;
