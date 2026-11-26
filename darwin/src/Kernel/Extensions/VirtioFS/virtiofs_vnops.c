@@ -515,6 +515,15 @@ node_resize(struct virtiofs_node *np, off_t size)
     IOLockUnlock(np->vmp->lock);
 }
 
+static bool
+growth_held(struct virtiofs_node *np, const struct fuse_attr *reply)
+{
+    IOLockLock(np->vmp->lock);
+    bool held = !change_cmp(&np->attr, reply) && np->attr.size < reply->size;
+    IOLockUnlock(np->vmp->lock);
+    return held;
+}
+
 static int
 append_offset(struct virtiofs_node *np, vfs_context_t ctx, off_t *offset)
 {
@@ -522,8 +531,11 @@ append_offset(struct virtiofs_node *np, vfs_context_t ctx, off_t *offset)
     bool applied = false;
     int error = 0;
 
-    for (int tries = 0; !error && !applied && tries < 3; tries++)
+    for (int tries = 0; !error && !applied && tries < 3; tries++) {
         error = node_getattr(np, ctx, &reply, &applied);
+        if (!error && !applied && growth_held(np, &reply))
+            break;
+    }
     if (error)
         return error;
     IOLockLock(np->vmp->lock);
