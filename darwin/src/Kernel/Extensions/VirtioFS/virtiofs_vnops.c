@@ -298,12 +298,9 @@ size_shrink(struct virtiofs_node *np, off_t size)
 {
     off_t old = (off_t)ubc_getsize(np->vp);
 
-    IOLockLock(np->vmp->lock);
-    bool mapped = np->flags & VN_MAPPED;
-    IOLockUnlock(np->vmp->lock);
     ubc_setsize(np->vp, size);
     IOLockLock(np->vmp->lock);
-    if (size < old && (mapped || (np->flags & VN_MAPPED)))
+    if (size < old)
         np->leftover = MAX(np->leftover, (off_t)round_page_64(old));
     IOLockUnlock(np->vmp->lock);
 }
@@ -315,8 +312,10 @@ leftover_fill(struct virtiofs_node *np, off_t from, off_t to)
     int error = 0;
 
     IOLockLock(np->vmp->lock);
-    off_t limit = MIN(MIN(to, np->leftover), from + LEFTOVER_REACH);
+    off_t limit = MIN(to, np->leftover);
     IOLockUnlock(np->vmp->lock);
+    if (limit - from > LEFTOVER_REACH)
+        limit = from + LEFTOVER_REACH;
     while (!error && from < limit) {
         off_t step = MIN(limit - from, LEFTOVER_STEP);
         upl_t upl = NULL;
