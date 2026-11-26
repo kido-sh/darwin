@@ -64,6 +64,7 @@ private:
     thread_call_t fReapCall;
     unsigned fSlotCount;
     unsigned fSlotWaiters;
+    uint32_t fReapers;
     IOLock *fLock;
     IOLock *fSessionLock;
     IOWorkLoop *fWorkLoop;
