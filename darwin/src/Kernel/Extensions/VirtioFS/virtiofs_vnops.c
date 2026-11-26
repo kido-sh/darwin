@@ -90,6 +90,7 @@ struct virtiofs_node {
     uint32_t releasing;
     uint32_t fetching;
     uint32_t pageouts;
+    uint32_t held_pushes;
     uint32_t waiters;
     uint32_t flags;
     off_t leftover;
@@ -99,7 +100,6 @@ struct virtiofs_node {
     uint64_t glanced_version;
     IOLock *wlock;
     thread_t creator;
-    thread_t sizer;
 };
 
 #define VTON(vp) ((struct virtiofs_node *)vnode_fsnode(vp))
@@ -154,13 +154,11 @@ static void
 sizing_set(struct virtiofs_node *np)
 {
     np->flags |= VN_SIZING;
-    np->sizer = current_thread();
 }
 
 static void
 sizing_done(struct virtiofs_node *np, uint32_t also)
 {
-    np->sizer = NULL;
     wake(np, VN_SIZING | also);
 }
 
@@ -232,6 +230,15 @@ static void
 readers_wait_locked(struct virtiofs_node *np)
 {
     while (np->readers) {
+        np->flags |= VN_WANT;
+        IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
+    }
+}
+
+static void
+held_pushes_wait_locked(struct virtiofs_node *np)
+{
+    while (np->held_pushes) {
         np->flags |= VN_WANT;
         IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
     }
@@ -354,6 +361,9 @@ size_grow(struct virtiofs_node *np, off_t old, off_t size, bool refill)
     upl_page_info_t *pl = NULL;
     int error = 0;
 
+    IOLockLock(np->vmp->lock);
+    held_pushes_wait_locked(np);
+    IOLockUnlock(np->vmp->lock);
     if ((old & PAGE_MASK) && ubc_create_upl(vp, page, PAGE_SIZE, &upl, &pl, HOLD_PAGES) != KERN_SUCCESS)
         return ENOMEM;
     if (upl && upl_valid_page(pl, 0))
@@ -1793,6 +1803,7 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     IOLockLock(vmp->lock);
     sizing_after_waiters(np);
     readers_wait_locked(np);
+    held_pushes_wait_locked(np);
     off_t old = (off_t)np->attr.size, leftover = np->leftover;
     IOLockUnlock(vmp->lock);
     off_t first = MIN(at, old) & ~(off_t)PAGE_MASK;
@@ -1910,20 +1921,6 @@ virtiofs_vnop_pagein(struct vnop_pagein_args *ap)
     return error;
 }
 
-static bool
-sizing_enter(struct virtiofs_node *np)
-{
-    IOLockLock(np->vmp->lock);
-    bool entered = np->sizer != current_thread();
-    if (entered) {
-        wait_clear(np, VN_SIZING);
-        sizing_set(np);
-        readers_wait_locked(np);
-    }
-    IOLockUnlock(np->vmp->lock);
-    return entered;
-}
-
 static int
 pageout_pages(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t offset, int pages, int flags)
 {
@@ -1954,6 +1951,46 @@ pageout_pages(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t offset, int page
     return error;
 }
 
+static bool
+page_held_dirty(vnode_t vp, off_t at)
+{
+    int state = 0;
+    return ubc_page_op(vp, at, 0, NULL, &state) == KERN_SUCCESS &&
+           (state & (UPL_POP_DIRTY | UPL_POP_BUSY)) == (UPL_POP_DIRTY | UPL_POP_BUSY);
+}
+
+static int
+pageout_held(vnode_t vp, off_t first, int count, int flags)
+{
+    struct virtiofs_node *np = VTON(vp);
+    int error = 0;
+
+    for (int i = 0; i < count; i++) {
+        off_t at = first + (off_t)i * PAGE_SIZE;
+        if (!page_held_dirty(vp, at))
+            continue;
+        IOLockLock(np->vmp->lock);
+        np->held_pushes++;
+        IOLockUnlock(np->vmp->lock);
+        while (page_held_dirty(vp, at) &&
+               ubc_page_op(vp, at, UPL_POP_SET | UPL_POP_BUSY, NULL, NULL) == KERN_SUCCESS) {
+            upl_t upl = NULL;
+            upl_page_info_t *pl = NULL;
+
+            ubc_page_op(vp, at, UPL_POP_CLR | UPL_POP_BUSY, NULL, NULL);
+            if (ubc_create_upl(vp, at, PAGE_SIZE, &upl, &pl, UPL_UBC_MSYNC | UPL_RET_ONLY_DIRTY) != KERN_SUCCESS)
+                break;
+            int failed = pageout_pages(vp, upl, pl, at, 1, flags);
+            error = error ? error : failed;
+        }
+        IOLockLock(np->vmp->lock);
+        if (--np->held_pushes == 0)
+            wake(np, 0);
+        IOLockUnlock(np->vmp->lock);
+    }
+    return error;
+}
+
 static int
 virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
 {
@@ -1973,21 +2010,19 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
                                  UPL_COMMIT_CLEAR_DIRTY | UPL_COMMIT_FREE_ON_EMPTY);
         return 0;
     }
-    bool entered = sync && sizing_enter(np);
     IOLockLock(np->vmp->lock);
     np->pageouts++;
     IOLockUnlock(np->vmp->lock);
     bool made = ubc_create_upl(vp, ap->a_f_offset, (int)ap->a_size, &upl, &pl, kind) == KERN_SUCCESS;
-    if (entered) {
-        IOLockLock(np->vmp->lock);
-        sizing_done(np, 0);
-        IOLockUnlock(np->vmp->lock);
-    }
-    int error = EINVAL;
+    int error = EINVAL, flags = ap->a_flags & ~UPL_NOCOMMIT;
     if (made)
-        error = pageout_pages(vp, upl, pl, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), ap->a_flags & ~UPL_NOCOMMIT);
+        error = pageout_pages(vp, upl, pl, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
     else if (!rdonly)
         push_failed(np);
+    if (made && sync && (flags & UPL_IOSYNC)) {
+        int failed = pageout_held(vp, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
+        error = error ? error : failed;
+    }
     IOLockLock(np->vmp->lock);
     bool last = --np->pageouts == 0;
     if (last)
