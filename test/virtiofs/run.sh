@@ -26,6 +26,7 @@ name=virtiofs-test
 export KIDO_HOME=$work/home KIDO_BACKEND=vz
 trap '"$kido" rm -f $name >/dev/null 2>&1; hdiutil detach -quiet -force "$work/full" 2>/dev/null; chmod -R u+rwX "$work"; rm -rf "$work"' EXIT
 rc=0
+flush_failures=0
 
 exec 3>&1
 timed() {
@@ -53,10 +54,15 @@ guest() {
   timed "$kido" exec $name "$@"
 }
 check() {
-  local what=$1 before
+  local what=$1 before failures=$flush_failures
   shift
   before=$(timeouts)
-  if "$@" && [[ $(timeouts) == "$before" ]]; then echo "ok   $what"; else echo "FAIL $what"; rc=1; fi
+  if "$@" && [[ $(timeouts) == "$before" && $flush_failures == "$failures" ]]; then
+    echo "ok   $what"
+  else
+    echo "FAIL $what"
+    rc=1
+  fi
 }
 guest_same() {
   local want=$1 got=$2
@@ -359,19 +365,22 @@ mapped_writer_kept() {
     "$(cat "$work/map-store.out"), first byte $(head -c 1 "$rw/ms2")"
   [[ $status == 0 && $(head -c 1 "$rw/ms2") == M ]]
 }
+flush() {
+  "$work/flush_volume" "$full" || { flush_failures=$((flush_failures + 1)); return 1; }
+}
 fill() {
   local pass
-  sync
+  flush || return 1
   for pass in 1 2 3; do
     dd if=/dev/zero of="$full/ballast$pass" bs=65536 2>/dev/null
     dd if=/dev/zero of="$full/ballast$pass-last" bs=512 2>/dev/null
-    sync
+    flush || return 1
     sleep 0.2
   done
 }
 room() {
   rm -f "$full"/ballast*
-  sync
+  flush
 }
 refused_kept() {
   local holder status byte
@@ -435,7 +444,7 @@ short_kept() {
   head -c $((640 << 10)) /dev/urandom > "$full/slack"
   fill
   rm -f "$full/slack"
-  sync
+  flush
   sleep 0.5
   guest /tmp/t_virtiofs short-write /mnt/full/short 2 > "$work/short.out" 2>&1 &
   holder=$!
@@ -464,6 +473,7 @@ idle_kept() {
 }
 
 xcrun clang -arch arm64 -mmacosx-version-min=15.0 -O2 -o "$work/t_virtiofs" "$here/t_virtiofs.c" || exit 1
+xcrun clang -arch arm64 -O2 -o "$work/flush_volume" "$here/flush_volume.c" || exit 1
 
 share=$work/share
 wide=$(printf '\xe4\xb8\xad%.0s' $(seq 1 85))
@@ -708,6 +718,10 @@ guest /tmp/t_virtiofs bench-files /tmp/bf 2000 | sed 's/^/on the container disk:
 
 if [[ -s $work/timeouts ]]; then
   echo "$(timeouts) commands timed out"
+  rc=1
+fi
+if ((flush_failures)); then
+  echo "$flush_failures flushes of the full volume failed"
   rc=1
 fi
 [[ $rc == 0 ]] && echo "virtiofs: all checks passed" || echo "virtiofs: FAILED"
