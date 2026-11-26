@@ -1539,6 +1539,8 @@ read_user(struct virtiofs_node *np, uio_t uio, off_t size, int ioflag)
     while (!error && uio_resid(uio) > 0) {
         uint32_t len = (uint32_t)MIN((user_ssize_t)room, uio_resid(uio));
         off_t end = 0;
+        if (ioflag & IO_NOCACHE)
+            len = MIN(len, virtiofs_batch_size(np->vmp) - (uint32_t)(uio_offset(uio) & PAGE_MASK));
         uio_reset(part, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
         uio_addiov(part, CAST_USER_ADDR_T(buf), len);
         error = read_pages(np, part, ioflag, &end);
