@@ -1674,10 +1674,10 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
     int error = opened ? handle_check(np, ap->a_context) : file_open(np, ap->a_context, false);
     if (!error)
         error = node_attr(np, ap->a_context, &attr);
-    if (!error && raw && uio_offset(uio) < (off_t)attr.size &&
-        ((uio_offset(uio) | uio_resid(uio)) & (vfs_devblocksize(vnode_mount(vp)) - 1)))
+    bool past = !error && uio_offset(uio) >= (off_t)attr.size;
+    if (!error && !past && raw && ((uio_offset(uio) | uio_resid(uio)) & (vfs_devblocksize(vnode_mount(vp)) - 1)))
         error = EINVAL;
-    if (!error)
+    if (!error && !past)
         error = uio_isuserspace(uio) ? read_user(np, uio, (off_t)attr.size, ioflag) : read_pages(np, uio, ioflag, &end);
     if (!opened)
         file_idle(np);
