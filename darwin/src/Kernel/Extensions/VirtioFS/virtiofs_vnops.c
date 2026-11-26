@@ -35,6 +35,7 @@
 #define LEFTOVER_STEP        ((off_t)1 << 30)
 #define LEFTOVER_REACH       ((off_t)1 << 40)
 #define NOCACHE_PART         ((uint32_t)1 << 20)
+#define TAKEN_PAGES          256
 #define HOLD_PAGES           (UPL_SET_LITE | UPL_WILL_BE_DUMPED)
 #define COPY_PAGES           (UPL_COPYOUT_FROM | UPL_WILL_MODIFY | UPL_SET_LITE | UPL_RET_ONLY_DIRTY | UPL_NOBLOCK)
 #define NODE_IDENTITY        (VNODE_ATTR_va_fsid | VNODE_ATTR_va_fsid64 | VNODE_ATTR_va_fileid)
@@ -2049,7 +2050,7 @@ page_settled(vnode_t vp, off_t at)
 }
 
 static int
-pageout_held(vnode_t vp, off_t first, int count, uint64_t taken, int flags)
+pageout_held(vnode_t vp, off_t first, int count, const uint64_t *taken, int flags)
 {
     struct virtiofs_node *np = VTON(vp);
     bool rdonly = vfs_isrdonly(vnode_mount(vp));
@@ -2058,8 +2059,8 @@ pageout_held(vnode_t vp, off_t first, int count, uint64_t taken, int flags)
     for (int i = 0; i < count; i++) {
         off_t at = first + (off_t)i * PAGE_SIZE;
         int state = 0;
-        if ((i < 64 && (taken & (1ULL << i))) || ubc_page_op(vp, at, 0, NULL, &state) != KERN_SUCCESS ||
-            !(state & UPL_POP_DIRTY))
+        if ((i < TAKEN_PAGES && (taken[i / 64] & (1ULL << (i % 64)))) ||
+            ubc_page_op(vp, at, 0, NULL, &state) != KERN_SUCCESS || !(state & UPL_POP_DIRTY))
             continue;
         IOLockLock(np->vmp->lock);
         np->held_pushes++;
@@ -2114,9 +2115,9 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
     uint32_t slot = push_begin(np);
     bool made = ubc_create_upl(vp, ap->a_f_offset, (int)ap->a_size, &upl, &pl, kind) == KERN_SUCCESS;
     int error = EINVAL, flags = ap->a_flags & ~UPL_NOCOMMIT, count = (int)(ap->a_size / PAGE_SIZE);
-    uint64_t taken = 0;
-    for (int i = 0; made && i < MIN(count, 64); i++)
-        taken |= upl_page_present(pl, i) ? 1ULL << i : 0;
+    uint64_t taken[TAKEN_PAGES / 64] = {};
+    for (int i = 0; made && i < MIN(count, TAKEN_PAGES); i++)
+        taken[i / 64] |= upl_page_present(pl, i) ? 1ULL << (i % 64) : 0;
     if (made)
         error = pageout_pages(vp, upl, pl, ap->a_f_offset, count, flags);
     else if (!rdonly)
