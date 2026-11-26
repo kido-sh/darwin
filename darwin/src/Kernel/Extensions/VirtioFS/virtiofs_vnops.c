@@ -315,6 +315,9 @@ size_shrink(struct virtiofs_node *np, off_t size)
 {
     off_t old = (off_t)ubc_getsize(np->vp);
 
+    IOLockLock(np->vmp->lock);
+    held_pushes_wait_locked(np);
+    IOLockUnlock(np->vmp->lock);
     ubc_setsize(np->vp, size);
     IOLockLock(np->vmp->lock);
     if (size < old && (np->flags & VN_WAS_MAPPED))
