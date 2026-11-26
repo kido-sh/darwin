@@ -56,6 +56,7 @@ enum {
     VN_TRUNCATING = 0x2000,
     VN_UNPUSHED = 0x4000,
     VN_WAS_MAPPED = 0x8000,
+    VN_DRAINING = 0x10000,
 };
 
 #define SETTABLE_MODE (ACCESSPERMS | S_ISVTX)
@@ -91,6 +92,8 @@ struct virtiofs_node {
     uint32_t fetching;
     uint32_t pageouts;
     uint32_t held_pushes;
+    uint32_t push_epoch;
+    uint32_t pushes[2];
     uint32_t waiters;
     uint32_t flags;
     off_t leftover;
@@ -1188,6 +1191,25 @@ push_range(vnode_t vp, off_t start, off_t end)
     return ubc_pages_resident(vp) ? ubc_msync(vp, start, end, NULL, UBC_PUSHDIRTY | UBC_SYNC) : 0;
 }
 
+static uint32_t
+push_begin(struct virtiofs_node *np)
+{
+    IOLockLock(np->vmp->lock);
+    uint32_t slot = np->push_epoch & 1;
+    np->pushes[slot]++;
+    IOLockUnlock(np->vmp->lock);
+    return slot;
+}
+
+static void
+push_end(struct virtiofs_node *np, uint32_t slot)
+{
+    IOLockLock(np->vmp->lock);
+    if (--np->pushes[slot] == 0)
+        wake(np, 0);
+    IOLockUnlock(np->vmp->lock);
+}
+
 static void
 push_failed(struct virtiofs_node *np)
 {
@@ -1207,12 +1229,15 @@ push_dirty(vnode_t vp)
     IOLockUnlock(np->vmp->lock);
     int error = push_range(vp, 0, ubc_getsize(vp));
     IOLockLock(np->vmp->lock);
-    while (np->pageouts) {
+    wait_clear(np, VN_DRAINING);
+    np->flags |= VN_DRAINING;
+    uint32_t slot = np->push_epoch++ & 1;
+    while (np->pushes[slot]) {
         np->flags |= VN_WANT;
         IOLockSleep(np->vmp->lock, np, THREAD_UNINT);
     }
+    wake(np, VN_DRAINING);
     IOLockUnlock(np->vmp->lock);
-    vnode_waitforwrites(vp, 0, 0, 0, "virtiofs_push");
     if (error)
         push_failed(np);
     IOLockLock(np->vmp->lock);
@@ -2013,6 +2038,7 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
     IOLockLock(np->vmp->lock);
     np->pageouts++;
     IOLockUnlock(np->vmp->lock);
+    uint32_t slot = push_begin(np);
     bool made = ubc_create_upl(vp, ap->a_f_offset, (int)ap->a_size, &upl, &pl, kind) == KERN_SUCCESS;
     int error = EINVAL, flags = ap->a_flags & ~UPL_NOCOMMIT;
     if (made)
@@ -2023,6 +2049,7 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
         int failed = pageout_held(vp, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
         error = error ? error : failed;
     }
+    push_end(np, slot);
     IOLockLock(np->vmp->lock);
     bool last = --np->pageouts == 0;
     if (last)
@@ -2075,6 +2102,7 @@ struct virtiofs_io {
     struct virtiofs_node *np;
     uint32_t pending;
     uint32_t chunks;
+    uint32_t slot;
     int error;
     bool write;
     struct virtiofs_part part[];
@@ -2107,6 +2135,7 @@ io_done(void *arg, int error)
             push_failed(np);
         node_stale(np);
         whandle_put(np);
+        push_end(np, io->slot);
     } else {
         __atomic_sub_fetch(&np->fetching, 1, __ATOMIC_RELEASE);
         handle_put(np);
@@ -2156,7 +2185,9 @@ virtiofs_vnop_strategy(struct vnop_strategy_args *ap)
     io->pending = chunks;
     io->chunks = chunks;
     io->write = write;
-    if (!write)
+    if (write)
+        io->slot = push_begin(np);
+    else
         __atomic_add_fetch(&np->fetching, 1, __ATOMIC_RELAXED);
     for (uint32_t i = 0; i < chunks; i++) {
         uint32_t at = i * max, len = MIN(count - at, max);
