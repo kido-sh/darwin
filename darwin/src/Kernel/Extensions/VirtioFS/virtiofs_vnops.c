@@ -421,19 +421,19 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
     if (error)
         return error;
     *reply = out.attr;
-    if (applied)
-        *applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
+    *applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
     return 0;
 }
 
-static int
-node_glance(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
+static bool
+node_peek(struct virtiofs_node *np, struct fuse_attr *attr)
 {
     IOLockLock(np->vmp->lock);
-    bool fresh = mach_absolute_time() < np->expire;
-    *attr = np->attr;
+    bool mapped = np->flags & VN_MAPPED;
+    if (mapped)
+        *attr = np->attr;
     IOLockUnlock(np->vmp->lock);
-    return fresh ? 0 : node_getattr(np, ctx, attr, NULL);
+    return mapped;
 }
 
 static int
@@ -1466,10 +1466,7 @@ virtiofs_vnop_getattr(struct vnop_getattr_args *ap)
     struct fuse_attr attr;
 
     bool unwaited = !(vap->va_active & ~NODE_UNWAITED), timed = VATTR_IS_ACTIVE(vap, va_modify_time);
-    int error = !unwaited ? node_attr(np, ap->a_context, &attr) : timed ? node_glance(np, ap->a_context, &attr) : 0;
-    if (error)
-        return error;
-    if (unwaited) {
+    if (unwaited && (!timed || node_peek(np, &attr))) {
         VATTR_RETURN(vap, va_fileid, node_ino(np));
         VATTR_RETURN(vap, va_fsid, vfs_statfs(vnode_mount(vp))->f_fsid.val[0]);
         if (timed) {
@@ -1479,6 +1476,9 @@ virtiofs_vnop_getattr(struct vnop_getattr_args *ap)
         }
         return 0;
     }
+    int error = node_attr(np, ap->a_context, &attr);
+    if (error)
+        return error;
     VATTR_RETURN(vap, va_rdev, (dev_t)attr.rdev);
     VATTR_RETURN(vap, va_nlink, attr.nlink);
     VATTR_RETURN(vap, va_data_size, (off_t)attr.size);
