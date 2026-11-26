@@ -125,10 +125,12 @@ In this repository:
   was dropped let a write fault on another CPU leave a mapping writable with the bit clear, so
   later stores to the page were not recorded and a flush could free them. The
   PMAP_OPTIONS_CLEAR_WRITE path still clears after its write-protect has unlocked, which its one
-  caller makes safe by holding the VM object lock. The test is race-read in test/virtiofs. It
-  catches the old code in every run only while the Mac is busy, for instance exporting images, and
-  in some runs otherwise, so check a change to this pmap by running race-read on images built with
-  and without it, alternated, while the Mac is busy.
+  caller makes safe by holding the VM object lock. pmap_remove and pmap_protect, as upstream, flush
+  the TLB only after they drop the page's PV lock, so a clear in that gap can leave another CPU a
+  writable translation whose stores nothing records. The test is race-read in test/virtiofs: with
+  its two real-time threads it fails the old code in every run on an idle Mac, and it fails at
+  once if the kernel does not run them in real time. Running it on images built with and without a
+  change to this pmap, alternated, while the Mac is busy is a second check.
 - macOS's LibreSSL: libcrypto.46, libssl.48 and libtls.20 in /usr/lib with macOS's install names,
   versions and exports, and the openssl and ocspcheck tools in /usr/bin. They are built from
   LibreSSL 3.3.6, the release macOS ships, with backports of LibreSSL's later security fixes,
