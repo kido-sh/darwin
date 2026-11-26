@@ -5,6 +5,8 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -2727,6 +2729,7 @@ struct seer {
     int rounds;
     size_t size;
     off_t at;
+    volatile char *map;
     volatile uint32_t *counter;
     atomic_int go;
     atomic_int done;
@@ -2980,11 +2983,118 @@ range_reader(void *arg)
     static char buf[32768];
     struct seer *s = arg;
     while (!atomic_load(&s->stop)) {
-        if (pread(s->fd, buf, sizeof(buf), 0) != (ssize_t)sizeof(buf))
+        if (msync((void *)s->map, 16384, MS_INVALIDATE) != 0 || pread(s->fd, buf, sizeof(buf), 0) != (ssize_t)sizeof(buf))
             atomic_store(&s->failed, 1);
         s->rounds++;
     }
     return NULL;
+}
+
+static void
+pause_up_to(uint32_t ns)
+{
+    uint64_t until = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + arc4random_uniform(ns);
+    while (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < until)
+        ;
+}
+
+static void *
+paced_write(void *arg)
+{
+    struct seer *s = arg;
+    while (!atomic_load(&s->stop)) {
+        if (pwrite(s->fd, "w", 1, s->at) != 1)
+            atomic_store(&s->failed, 1);
+        s->rounds++;
+        pause_up_to(100000);
+    }
+    return NULL;
+}
+
+static void
+sync_pages_race(const char *name)
+{
+    static char data[65536];
+    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
+    memset(data, 'x', sizeof(data));
+    bool made = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data);
+    volatile char *map = made ? mmap(NULL, sizeof(data), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    struct seer s = { .fd = fd, .at = 16384 + 8000 };
+    pthread_t t;
+    bool ready = map != MAP_FAILED && pthread_create(&t, NULL, paced_write, &s) == 0;
+    CHECK(ready, "create and map %s: %s", name, strerror(errno));
+    int rounds = 4000, late = 0, failed = 0;
+    for (int i = 1; ready && i <= rounds; i++) {
+        char want = (char)('A' + i % 26);
+        for (int page = 0; page < 4; page++)
+            map[page * 16384 + 100] = want;
+        failed += msync((void *)map, sizeof(data), MS_SYNC) != 0;
+        late += !on_host(name, 16384 + 100, want);
+    }
+    atomic_store(&s.stop, 1);
+    if (ready)
+        pthread_join(t, NULL);
+    if (map != MAP_FAILED)
+        munmap((void *)map, sizeof(data));
+    if (fd >= 0)
+        close(fd);
+    CHECK(late == 0 && failed == 0 && s.rounds > 0 && !atomic_load(&s.failed),
+          "%s: beside %d writes into the second of four pages, msync of all four returned %d times of %d before the "
+          "store into the second was on the Mac, and %d calls failed", name, s.rounds, late, rounds,
+          failed + atomic_load(&s.failed));
+}
+
+static void
+private_kept(const char *name)
+{
+    static char data[32768];
+    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
+    memset(data, 'a', sizeof(data));
+    bool made = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data);
+    volatile char *copy = made ? mmap(NULL, sizeof(data), PROT_READ, MAP_PRIVATE, fd, 0) : MAP_FAILED;
+    CHECK(copy != MAP_FAILED, "create and map %s privately: %s", name, strerror(errno));
+    if (copy != MAP_FAILED) {
+        char touched = copy[100];
+        memset(data, 'b', sizeof(data));
+        CHECK(pwrite(fd, data, sizeof(data), 0) == (ssize_t)sizeof(data), "write %s: %s", name, strerror(errno));
+        char first = copy[100], second = copy[16384 + 100];
+        CHECK(touched == 'a' && first == 'a' && second == 'a',
+              "%s: a private mapping made before a write shows %c in the page it read and %c in the page it did "
+              "not, where it had a",
+              name, first, second);
+        munmap((void *)copy, sizeof(data));
+    }
+    if (fd >= 0)
+        close(fd);
+}
+
+static void
+copy_kept(const char *name)
+{
+    enum { SIZE = 1 << 20 };
+    static char data[SIZE];
+    int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
+    memset(data, 'a', sizeof(data));
+    bool made = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data);
+    char *map = made ? mmap(NULL, SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    vm_offset_t copy = 0;
+    mach_msg_type_number_t got = 0;
+    kern_return_t kr = map == MAP_FAILED ? KERN_FAILURE
+                                         : mach_vm_read(mach_task_self(), (mach_vm_address_t)map, SIZE, &copy, &got);
+    CHECK(kr == KERN_SUCCESS && got == SIZE, "map and copy %s: %s, %d", name, strerror(errno), kr);
+    if (kr == KERN_SUCCESS) {
+        memset(data, 'b', sizeof(data));
+        CHECK(pwrite(fd, data, sizeof(data), 0) == (ssize_t)sizeof(data), "write %s: %s", name, strerror(errno));
+        const volatile char *kept = (const volatile char *)copy;
+        CHECK(kept[100] == 'a' && kept[SIZE - 100] == 'a',
+              "%s: a virtual copy of a mapping made before a write shows %c and %c, where it had a", name, kept[100],
+              kept[SIZE - 100]);
+        vm_deallocate(mach_task_self(), copy, got);
+    }
+    if (map != MAP_FAILED)
+        munmap(map, SIZE);
+    if (fd >= 0)
+        close(fd);
 }
 
 static void
@@ -2995,7 +3105,7 @@ read_race(const char *name)
     memset(page, 'x', sizeof(page));
     bool made = fd >= 0 && write(fd, page, sizeof(page)) == (ssize_t)sizeof(page);
     volatile char *map = made ? mmap(NULL, 49152, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
-    struct seer s = { .fd = fd, .counter = (volatile uint32_t *)(map + 20480) };
+    struct seer s = { .fd = fd, .map = map, .counter = (volatile uint32_t *)(map + 20480) };
     pthread_t t, u;
     bool ready = map != MAP_FAILED && pthread_create(&t, NULL, range_reader, &s) == 0;
     CHECK(ready, "create and map %s: %s", name, strerror(errno));
@@ -3005,9 +3115,7 @@ read_race(const char *name)
         char want = (char)('A' + i % 26);
         map[16484] = '-';
         failed += msync((void *)(map + 16384), 16384, MS_SYNC) != 0;
-        uint64_t again = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + arc4random_uniform(150000);
-        while (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < again)
-            ;
+        pause_up_to(150000);
         map[16484] = want;
         failed += msync((void *)(map + 16384), 16384, MS_SYNC) != 0;
         late += !on_host(name, 16484, want);
@@ -3426,7 +3534,10 @@ rw_edge(const char *dir, const char *other)
     seen_race("race-tail", true);
     mapped_race("race-mapped");
     sync_race("race-sync");
+    sync_pages_race("race-sync-pages");
     read_race("race-read");
+    private_kept("private-kept");
+    copy_kept("copy-kept");
     self_read("race-self");
     gap_write("gap-write");
     host_append("host-append");
