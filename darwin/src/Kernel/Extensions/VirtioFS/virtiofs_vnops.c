@@ -103,6 +103,8 @@ struct virtiofs_node {
     struct fuse_attr glanced;
     uint64_t glanced_until;
     uint64_t glanced_version;
+    uint64_t glanced_seq;
+    uint64_t glance_seq;
     IOLock *wlock;
     thread_t creator;
 };
@@ -450,7 +452,9 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
         .opcode = FUSE_GETATTR, .flags = applied ? 0 : VIRTIOFS_NO_REAP, .nodeid = np->nodeid,
         .arg = { &in }, .arglen = { sizeof(in) }, .reply = &out, .replylen = sizeof(out),
     };
-    uint64_t version = virtiofs_version(np->vmp);
+    IOLockLock(np->vmp->lock);
+    uint64_t version = np->vmp->version, seq = applied ? 0 : ++np->glance_seq;
+    IOLockUnlock(np->vmp->lock);
     int error = virtiofs_call(np->vmp, ctx, &c);
     if (!error && (c.replylen != sizeof(out) || !virtiofs_attr_ok(&out.attr) ||
                    IFTOVT(out.attr.mode) != vnode_vtype(np->vp)))
@@ -465,14 +469,17 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
     IOLockLock(np->vmp->lock);
     bool kept = mach_absolute_time() < np->glanced_until && np->attr_version <= np->glanced_version;
     int order = kept ? change_cmp(&np->glanced, &out.attr) : 0;
-    if (order > 0 || (kept && !order && version <= np->glanced_version)) {
+    if (kept && !order)
+        order = np->glanced_seq > seq ? 1 : -1;
+    if (order > 0) {
         reply->mtime = np->glanced.mtime;
         reply->mtimensec = np->glanced.mtimensec;
     } else if (order < 0 || np->attr_version <= version) {
         np->glanced = out.attr;
         np->glanced_until = deadline(out.attr_valid, out.attr_valid_nsec);
-        np->glanced_version = MAX(np->glanced_version, version);
-    } else if (change_cmp(&np->attr, &out.attr) > 0) {
+        np->glanced_version = kept ? MAX(np->glanced_version, version) : version;
+        np->glanced_seq = seq;
+    } else if (mach_absolute_time() < np->expire || change_cmp(&np->attr, &out.attr) > 0) {
         reply->mtime = np->attr.mtime;
         reply->mtimensec = np->attr.mtimensec;
     }
