@@ -3188,7 +3188,8 @@ read_race(const char *name)
         pthread_join(u, NULL);
     if (map != MAP_FAILED)
         munmap((void *)map, 49152);
-    close(fd);
+    if (fd >= 0)
+        close(fd);
     CHECK(late == 0 && failed == 0 && atomic_load(&s.done) > 0 && !atomic_load(&s.failed),
           "%s: beside %d reads that hold the page while they fetch the one before and a tight storer, msync returned "
           "%d times of %d before its store was on the Mac, and %d calls failed",
