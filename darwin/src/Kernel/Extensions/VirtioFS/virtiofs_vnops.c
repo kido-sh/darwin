@@ -93,6 +93,10 @@ struct virtiofs_node {
     uint32_t flags;
     off_t leftover;
     off_t read_end;
+    uint64_t glanced_mtime;
+    uint32_t glanced_mtimensec;
+    uint64_t glanced_until;
+    uint64_t glanced_version;
     IOLock *wlock;
     thread_t creator;
     thread_t sizer;
@@ -424,7 +428,7 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
     struct fuse_getattr_in in = {};
     struct fuse_attr_out out = {};
     struct virtiofs_call c = {
-        .opcode = FUSE_GETATTR, .nodeid = np->nodeid,
+        .opcode = FUSE_GETATTR, .flags = applied ? 0 : VIRTIOFS_NO_REAP, .nodeid = np->nodeid,
         .arg = { &in }, .arglen = { sizeof(in) }, .reply = &out, .replylen = sizeof(out),
     };
     uint64_t version = virtiofs_version(np->vmp);
@@ -435,19 +439,36 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
     if (error)
         return error;
     *reply = out.attr;
-    *applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
+    if (applied) {
+        *applied = node_apply(np, &out.attr, out.attr_valid, out.attr_valid_nsec, version);
+        return 0;
+    }
+    IOLockLock(np->vmp->lock);
+    if (np->attr_version <= version) {
+        np->glanced_mtime = out.attr.mtime;
+        np->glanced_mtimensec = out.attr.mtimensec;
+        np->glanced_until = deadline(out.attr_valid, out.attr_valid_nsec);
+        np->glanced_version = version;
+    }
+    IOLockUnlock(np->vmp->lock);
     return 0;
 }
 
-static bool
-node_peek(struct virtiofs_node *np, struct fuse_attr *attr)
+static int
+node_glance(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
 {
+    uint64_t now = mach_absolute_time();
+
     IOLockLock(np->vmp->lock);
-    bool mapped = np->flags & VN_MAPPED;
-    if (mapped)
-        *attr = np->attr;
+    bool applied = now < np->expire;
+    bool glanced = !applied && now < np->glanced_until && np->attr_version <= np->glanced_version;
+    *attr = np->attr;
+    if (glanced) {
+        attr->mtime = np->glanced_mtime;
+        attr->mtimensec = np->glanced_mtimensec;
+    }
     IOLockUnlock(np->vmp->lock);
-    return mapped;
+    return applied || glanced ? 0 : node_getattr(np, ctx, attr, NULL);
 }
 
 static int
@@ -1480,7 +1501,10 @@ virtiofs_vnop_getattr(struct vnop_getattr_args *ap)
     struct fuse_attr attr;
 
     bool unwaited = !(vap->va_active & ~NODE_UNWAITED), timed = VATTR_IS_ACTIVE(vap, va_modify_time);
-    if (unwaited && (!timed || node_peek(np, &attr))) {
+    int error = !unwaited ? node_attr(np, ap->a_context, &attr) : timed ? node_glance(np, ap->a_context, &attr) : 0;
+    if (error)
+        return error;
+    if (unwaited) {
         VATTR_RETURN(vap, va_fileid, node_ino(np));
         VATTR_RETURN(vap, va_fsid, vfs_statfs(vnode_mount(vp))->f_fsid.val[0]);
         if (timed) {
@@ -1490,9 +1514,6 @@ virtiofs_vnop_getattr(struct vnop_getattr_args *ap)
         }
         return 0;
     }
-    int error = node_attr(np, ap->a_context, &attr);
-    if (error)
-        return error;
     VATTR_RETURN(vap, va_rdev, (dev_t)attr.rdev);
     VATTR_RETURN(vap, va_nlink, attr.nlink);
     VATTR_RETURN(vap, va_data_size, (off_t)attr.size);
