@@ -25,6 +25,7 @@ extra = (
 )
 findings = []
 analyzed = 0
+seen = {s: 0 for s in sources}
 for entry in json.load(open(os.path.join(build, "compile_commands.json"))):
     if not any(s in entry["file"] for s in sources):
         continue
@@ -42,6 +43,7 @@ for entry in json.load(open(os.path.join(build, "compile_commands.json"))):
             command.append(arg)
     result = subprocess.run(command + ["-o", "/dev/null"], cwd=entry["directory"], capture_output=True, text=True)
     analyzed += 1
+    seen[next(s for s in sources if s in entry["file"])] += 1
     sys.stderr.write(result.stderr)
     findings += [line for line in result.stderr.splitlines() if re.match(r"\S+:\d+:\d+: (warning|error): ", line)]
     if result.returncode:
@@ -49,4 +51,4 @@ for entry in json.load(open(os.path.join(build, "compile_commands.json"))):
 with open(report, "w") as f:
     f.write("".join(line + "\n" for line in findings))
 print(f"analyzed {analyzed} files, {len(findings)} findings")
-sys.exit(1 if findings or analyzed == 0 else 0)
+sys.exit(1 if findings or not all(seen.values()) else 0)
