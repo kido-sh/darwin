@@ -2016,7 +2016,7 @@ pageout_pages(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t offset, int page
                 error = error ? error : failed;
             }
         } else if (present) {
-            ubc_upl_commit_range(upl, at, PAGE_SIZE, UPL_COMMIT_CLEAR_DIRTY | UPL_COMMIT_FREE_ON_EMPTY);
+            ubc_upl_commit_range(upl, at, PAGE_SIZE, (rdonly ? UPL_COMMIT_CLEAR_DIRTY : 0) | UPL_COMMIT_FREE_ON_EMPTY);
         }
     }
     return error;
