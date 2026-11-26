@@ -1594,7 +1594,8 @@ read_pages(struct virtiofs_node *np, uio_t uio, int ioflag, off_t *end)
     off_t len = at < size ? MIN((off_t)uio_resid(uio), size - at) : 0;
     off_t from = at & ~(off_t)PAGE_MASK, to = (off_t)round_page_64(at + len);
     bool small = len && to - from <= np->vmp->session.max_io && !(ioflag & IO_NOCACHE) && !vnode_isnocache(vp);
-    bool onward = at && at == __atomic_load_n(&np->read_end, __ATOMIC_RELAXED);
+    bool onward = at && at == __atomic_load_n(&np->read_end, __ATOMIC_RELAXED) && !(ioflag & IO_RAOFF) &&
+                  !vnode_isnoreadahead(vp);
 
     if (small && !onward && !pages_present(vp, from, to)) {
         advisory_read(vp, size, at, (int)len);
@@ -1603,7 +1604,8 @@ read_pages(struct virtiofs_node *np, uio_t uio, int ioflag, off_t *end)
     }
     int error = cluster_read(vp, uio, size, ioflag);
 
-    __atomic_store_n(&np->read_end, uio_offset(uio), __ATOMIC_RELAXED);
+    if (!error && uio_offset(uio) > at)
+        __atomic_store_n(&np->read_end, uio_offset(uio), __ATOMIC_RELAXED);
     reader_end(np);
     return error;
 }
