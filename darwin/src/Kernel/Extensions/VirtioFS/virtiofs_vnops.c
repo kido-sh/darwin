@@ -35,7 +35,7 @@
 #define LEFTOVER_STEP        ((off_t)1 << 30)
 #define LEFTOVER_REACH       ((off_t)1 << 40)
 #define NOCACHE_PART         ((uint32_t)1 << 20)
-#define HOLD_PAGES           (UPL_SET_LITE | UPL_WILL_MODIFY)
+#define HOLD_PAGES           (UPL_SET_LITE | UPL_WILL_BE_DUMPED)
 #define NODE_IDENTITY        (VNODE_ATTR_va_fsid | VNODE_ATTR_va_fsid64 | VNODE_ATTR_va_fileid)
 #define NODE_UNWAITED        (NODE_IDENTITY | VNODE_ATTR_va_modify_time)
 
@@ -56,7 +56,6 @@ enum {
     VN_TRUNCATING = 0x2000,
     VN_UNPUSHED = 0x4000,
     VN_WAS_MAPPED = 0x8000,
-    VN_WAS_MAPPED_WRITE = 0x10000,
 };
 
 #define SETTABLE_MODE (ACCESSPERMS | S_ISVTX)
@@ -268,48 +267,19 @@ page_fill(struct virtiofs_node *np, upl_t upl, off_t page, off_t from, off_t to)
     return error;
 }
 
-static bool
-mapped_writable(struct virtiofs_node *np)
-{
-    IOLockLock(np->vmp->lock);
-    bool writable = np->flags & VN_WAS_MAPPED_WRITE;
-    IOLockUnlock(np->vmp->lock);
-    return writable;
-}
-
 static void
-page_redirty(vnode_t vp, off_t at)
-{
-    upl_t upl;
-    upl_page_info_t *pl;
-
-    if (ubc_create_upl(vp, at, PAGE_SIZE, &upl, &pl, HOLD_PAGES) != KERN_SUCCESS)
-        return;
-    if (upl_valid_page(pl, 0))
-        ubc_upl_commit_range(upl, 0, PAGE_SIZE, UPL_COMMIT_FREE_ON_EMPTY | UPL_COMMIT_SET_DIRTY);
-    else
-        ubc_upl_abort_range(upl, 0, PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
-}
-
-static void
-pages_release(vnode_t vp, upl_t upl, upl_page_info_t *pl, off_t first, int count, int changed)
+pages_release(upl_t upl, upl_page_info_t *pl, int count, int changed)
 {
     for (int i = 0, run = 1; i < count; i += run) {
         upl_offset_t at = (upl_offset_t)i * PAGE_SIZE;
-        bool keep = i < changed && upl_valid_page(pl, i), dirty = keep && upl_dirty_page(pl, i);
-        int state = 0;
+        bool keep = i < changed && upl_valid_page(pl, i);
         for (run = 1; !keep && i + run < count && !(i + run < changed && upl_valid_page(pl, i + run)); run++)
             ;
-        bool wired = keep && !dirty && ubc_page_op(vp, first + at, 0, NULL, &state) == KERN_SUCCESS &&
-                     !(state & UPL_POP_BUSY);
-        if (wired)
-            dirty = mapped_writable(VTON(vp));
         if (keep)
-            ubc_upl_commit_range(upl, at, PAGE_SIZE, UPL_COMMIT_FREE_ON_EMPTY | (dirty ? UPL_COMMIT_SET_DIRTY : 0));
+            ubc_upl_commit_range(upl, at, PAGE_SIZE,
+                                 UPL_COMMIT_FREE_ON_EMPTY | (upl_dirty_page(pl, i) ? UPL_COMMIT_SET_DIRTY : 0));
         else
             ubc_upl_abort_range(upl, at, (upl_size_t)run * PAGE_SIZE, UPL_ABORT_FREE_ON_EMPTY);
-        if (wired && !dirty && mapped_writable(VTON(vp)))
-            page_redirty(vp, first + at);
     }
 }
 
@@ -397,7 +367,7 @@ size_grow(struct virtiofs_node *np, off_t old, off_t size, bool refill)
         ubc_setsize(vp, size);
     }
     if (upl)
-        pages_release(vp, upl, pl, page, 1, !error);
+        pages_release(upl, pl, 1, !error);
     return error;
 }
 
@@ -1857,7 +1827,7 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     if (size > old)
         ubc_setsize(vp, size);
     if (upl)
-        pages_release(vp, upl, pl, first, count, changed);
+        pages_release(upl, pl, count, changed);
     IOLockLock(vmp->lock);
     sizing_done(np, 0);
     IOLockUnlock(vmp->lock);
@@ -2189,8 +2159,7 @@ virtiofs_vnop_mmap(struct vnop_mmap_args *ap)
 
     if (vnode_isreg(vp)) {
         IOLockLock(VTON(vp)->vmp->lock);
-        VTON(vp)->flags |= VN_MAPPED | VN_WAS_MAPPED |
-                           ((ap->a_fflags & PROT_WRITE) ? VN_MAPPED_WRITE | VN_WAS_MAPPED_WRITE : 0);
+        VTON(vp)->flags |= VN_MAPPED | VN_WAS_MAPPED | ((ap->a_fflags & PROT_WRITE) ? VN_MAPPED_WRITE : 0);
         IOLockUnlock(VTON(vp)->vmp->lock);
     }
     return 0;
