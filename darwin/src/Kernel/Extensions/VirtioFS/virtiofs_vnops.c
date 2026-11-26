@@ -1842,19 +1842,12 @@ write_batch(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, 
 }
 
 static int
-copies_sync(struct virtiofs_node *np, off_t at, uint32_t len)
+copies_sync(vnode_t vp, off_t first, off_t end)
 {
-    IOLockLock(np->vmp->lock);
-    bool mapped = np->flags & VN_WAS_MAPPED;
-    off_t past = (off_t)round_page_64(np->attr.size);
-    IOLockUnlock(np->vmp->lock);
-    off_t first = at & ~(off_t)PAGE_MASK, end = MIN((off_t)round_page_64(at + len), past);
     upl_t upl = NULL;
     upl_page_info_t *pl = NULL;
 
-    if (!mapped || first >= end)
-        return 0;
-    if (ubc_create_upl(np->vp, first, (int)(end - first), &upl, &pl, COPY_PAGES) != KERN_SUCCESS)
+    if (ubc_create_upl(vp, first, (int)(end - first), &upl, &pl, COPY_PAGES) != KERN_SUCCESS)
         return ENOMEM;
     ubc_upl_abort_range(upl, 0, (upl_size_t)(end - first), UPL_ABORT_FREE_ON_EMPTY);
     return 0;
@@ -1870,21 +1863,22 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     upl_page_info_t *pl = NULL;
     struct virtiofs_pages *pages = NULL;
     bool cached = false;
+    int error = 0;
 
     *written = 0;
-    int error = copies_sync(np, at, len);
-    if (error)
-        return error;
     IOLockLock(vmp->lock);
     sizing_after_waiters(np);
     readers_wait_locked(np);
     held_pushes_wait_locked(np);
     off_t old = (off_t)np->attr.size, leftover = np->leftover;
+    bool mapped = np->flags & VN_WAS_MAPPED;
     IOLockUnlock(vmp->lock);
     off_t first = MIN(at, old) & ~(off_t)PAGE_MASK;
     off_t past = (off_t)round_page_64(old), end = MIN((off_t)round_page_64(at + len), past);
     int count = first < end ? (int)((end - first) / PAGE_SIZE) : 0;
-    if (count && ubc_create_upl(vp, first, (int)(end - first), &upl, &pl, HOLD_PAGES) != KERN_SUCCESS)
+    if (count && mapped)
+        error = copies_sync(vp, first, end);
+    if (!error && count && ubc_create_upl(vp, first, (int)(end - first), &upl, &pl, HOLD_PAGES) != KERN_SUCCESS)
         error = ENOMEM;
     for (int i = 0; upl && i < count; i++)
         cached |= upl_valid_page(pl, i);
