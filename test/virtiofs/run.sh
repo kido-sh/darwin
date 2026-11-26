@@ -33,7 +33,7 @@ timed() {
   local pid=$! mark
   mark=$(mktemp -u "$work/timeout.XXXXXX")
   (s=; trap 'kill $s 2>/dev/null; exit 0' TERM; sleep "$limit" & s=$!; wait $s; : > "$mark"; kill "$pid"
-   sleep 5 & s=$!; wait $s; kill -9 "$pid") >/dev/null 2>&1 &
+   sleep 5 & s=$!; wait $s; kill -9 "$pid") >/dev/null 2>&1 3>&- &
   local watchdog=$!
   wait "$pid"
   local status=$?
@@ -42,6 +42,7 @@ timed() {
   if [[ -e $mark ]]; then
     echo "FAIL timeout after ${limit}s: $*" | tee -a "$work/timeouts" >&3
     rm -f "$mark"
+    status=124
   fi
   return $status
 }
@@ -485,7 +486,7 @@ touch -t 200102030405.06 "$share/small/1"
 
 "$kido" image import "$img" $name >/dev/null || exit 1
 KIDO_DEV_VIRTIOFS="data=$share:ro,empty=$work/empty:ro,locked=$work/locked:ro,rw=$rw,full=$full,$wide=$work/wide:ro" \
-  "$kido" run -d --name $name $name /bin/sleep 100000 >/dev/null || exit 1
+  "$kido" run -d --name $name $name /bin/sleep 100000 >/dev/null 3>&- || exit 1
 vm=$(pgrep -n -f com.apple.Virtualization.VirtualMachine)
 "$kido" cp "$work/t_virtiofs" $name:/tmp/t_virtiofs || exit 1
 before=$(host_fds)
@@ -519,8 +520,9 @@ check "mount kido:locked" guest /sbin/mount -t virtiofs -o ro kido:locked /mnt/l
 check "a file the host cannot read cannot be opened" fails guest /bin/cat /mnt/locked/noaccess
 check "unmount kido:locked" guest /sbin/umount /mnt/locked
 check "errors of a read-only mount" guest /tmp/t_virtiofs errors /mnt/data kido:data
+guest /tmp/t_virtiofs xattr-list /mnt/data/small/4097 all > "$work/xattr.guest"
 check "the guest lists the extended attributes this Mac has" diff -u <("$work/t_virtiofs" xattr-list "$share/small/4097" all) \
-  <(guest /tmp/t_virtiofs xattr-list /mnt/data/small/4097 all)
+  "$work/xattr.guest"
 check "a 512-byte readdir buffer lists every entry" guest /tmp/t_virtiofs small-readdir /mnt/data/names 512
 check "a 256-byte readdir buffer stops only at an entry too large for it" \
   guest /tmp/t_virtiofs small-readdir /mnt/data/names 256

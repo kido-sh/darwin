@@ -1815,8 +1815,9 @@ raw_read(const char *path, const char *odd, uid_t uid)
     int tail = open_dprotected_np(odd, O_RDONLY, 0, O_DP_GETRAWENCRYPTED, 0);
     off_t total = 0;
     ssize_t got = -1;
-    CHECK(tail >= 0 && fstat(tail, &st) == 0, "open %s for its raw bytes: %s", odd, strerror(errno));
-    while (!failures && (got = read(tail, raw, sizeof(raw))) > 0)
+    bool opened = tail >= 0 && fstat(tail, &st) == 0;
+    CHECK(opened, "open %s for its raw bytes: %s", odd, strerror(errno));
+    while (opened && (got = read(tail, raw, sizeof(raw))) > 0)
         total += got;
     int last = got < 0 ? errno : 0;
     printf("%s, whose size is not a whole number of blocks: blocks read through such a descriptor give %lld of its %lld "
@@ -1861,8 +1862,11 @@ modtime(const char *path, const char *peerpath)
     printf("%s: modification time %ld.%09ld before a write, %ld.%09ld asked for alone after it, %ld.%09ld from fstat\n",
            path, before.tv_sec, before.tv_nsec, after.tv_sec, after.tv_nsec, st.st_mtimespec.tv_sec,
            st.st_mtimespec.tv_nsec);
-    CHECK(after.tv_sec == st.st_mtimespec.tv_sec && after.tv_nsec == st.st_mtimespec.tv_nsec,
+    CHECK(after.tv_sec == st.st_mtimespec.tv_sec && after.tv_nsec == st.st_mtimespec.tv_nsec &&
+          (after.tv_sec != before.tv_sec || after.tv_nsec != before.tv_nsec),
           "the modification time asked for alone is not the one the write left");
+    usleep(1500000);
+    CHECK(mtime_of(fd, &before), "getattrlist %s: %s", path, strerror(errno));
     int other = open(peerpath, O_WRONLY);
     CHECK(other >= 0 && pwrite(other, "p", 1, 20) == 1 && fstat(other, &st) == 0 && close(other) == 0,
           "write %s: %s", peerpath, strerror(errno));
@@ -1874,6 +1878,16 @@ modtime(const char *path, const char *peerpath)
     CHECK(after.tv_sec == host.tv_sec && after.tv_nsec == host.tv_nsec,
           "the modification time asked for alone misses a write on the Mac after the attribute timeout");
     munmap((void *)map, sizeof(page));
+    CHECK(mtime_of(fd, &before), "getattrlist %s: %s", path, strerror(errno));
+    other = open(peerpath, O_WRONLY);
+    CHECK(other >= 0 && pwrite(other, "q", 1, 30) == 1 && fstat(other, &st) == 0 && close(other) == 0,
+          "write %s: %s", peerpath, strerror(errno));
+    usleep(1500000);
+    CHECK(mtime_of(fd, &after), "getattrlist %s: %s", path, strerror(errno));
+    printf("%s, no longer mapped: after a write on the Mac, %ld.%09ld asked for alone, %ld.%09ld on the Mac\n", path,
+           after.tv_sec, after.tv_nsec, st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec);
+    CHECK(after.tv_sec == st.st_mtimespec.tv_sec && after.tv_nsec == st.st_mtimespec.tv_nsec,
+          "the modification time asked for alone of a file that is not mapped misses a write on the Mac");
     close(fd);
     return failures ? 1 : 0;
 }
@@ -2900,7 +2914,7 @@ wired_write(const char *name)
     close(fd);
 }
 
-enum { WIRED_GONE = 1, WIRED_HOST_CUT = 2, WIRED_HOST_GROW = 4, WIRED_READ = 8 };
+enum { WIRED_GONE = 1, WIRED_HOST_CUT = 2, WIRED_HOST_GROW = 4, WIRED_READ = 8, WIRED_RDONLY = 16 };
 
 static off_t
 first_difference(const char *got, const char *want, size_t size)
@@ -2923,7 +2937,7 @@ host_difference(const char *name, const char *want, size_t size)
 }
 
 static void
-repush(const char *name, bool mapped, bool stat_later)
+repush(const char *name, bool mapped, bool stat_later, bool wired)
 {
     static char data[65536];
     struct stat st;
@@ -2931,9 +2945,18 @@ repush(const char *name, bool mapped, bool stat_later)
     memset(data, 'A', sizeof(data));
     int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
     bool made = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data) && fsync(fd) == 0;
-    volatile char *map = made && mapped ? mmap(NULL, 65536, PROT_READ, MAP_SHARED, fd, 0) : NULL;
+    int mapfd = made && wired ? open(name, O_RDONLY) : fd;
+    volatile char *map = made && mapped && mapfd >= 0 ? mmap(NULL, 65536, PROT_READ, MAP_SHARED, mapfd, 0) : NULL;
+    if (mapfd != fd)
+        close(mapfd);
+    if (wired && map && map != MAP_FAILED && mlock((void *)map, 65536) != 0)
+        map = MAP_FAILED;
     CHECK(made && map != MAP_FAILED && (mapped ? (c = map[0]) == 'A' : pread(fd, &c, 1, 0) == 1) &&
           pwrite(fd, "X", 1, 100) == 1, "%s: create, cache a page and write into it: %s", name, strerror(errno));
+    if (!made || map == MAP_FAILED) {
+        close(fd);
+        return;
+    }
     int other = peer_open(name, O_WRONLY);
     CHECK(other >= 0 && pwrite(other, "Y", 1, 200) == 1 && close(other) == 0, "%s: a write on the Mac: %s", name,
           strerror(errno));
@@ -2943,6 +2966,9 @@ repush(const char *name, bool mapped, bool stat_later)
     } else {
         CHECK(fsync(fd) == 0, "%s: fsync: %s", name, strerror(errno));
     }
+    if (wired)
+        CHECK(munlock((void *)map, 65536) == 0 && msync((void *)map, 65536, MS_SYNC) == 0 && fsync(fd) == 0,
+              "%s: unwire and sync: %s", name, strerror(errno));
     CHECK(on_host(name, 100, 'X') && on_host(name, 200, 'Y'),
           "%s: the guest pushed the page it wrote again, over a byte the Mac wrote later", name);
     if (map && map != MAP_FAILED)
@@ -2954,20 +2980,23 @@ static void
 wired_past(const char *name, off_t cut, off_t from, int how)
 {
     static char data[65536], want[65536], back[65536];
-    bool unmapped = how & WIRED_GONE, refilled = from > 40000 || (how & WIRED_HOST_GROW);
+    bool unmapped = how & WIRED_GONE;
     struct stat st;
     off_t at = -1;
     int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
     memset(data, 'A', sizeof(data));
     bool made = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data);
-    int prot = how & WIRED_READ ? PROT_READ : PROT_READ | PROT_WRITE;
-    volatile char *map = made ? mmap(NULL, 65536, prot, MAP_SHARED, fd, 0) : MAP_FAILED;
+    int prot = how & (WIRED_READ | WIRED_RDONLY) ? PROT_READ : PROT_READ | PROT_WRITE;
+    int mapfd = how & WIRED_RDONLY ? open(name, O_RDONLY) : fd;
+    volatile char *map = made && mapfd >= 0 ? mmap(NULL, 65536, prot, MAP_SHARED, mapfd, 0) : MAP_FAILED;
     CHECK(map != MAP_FAILED && mlock((void *)map, 65536) == 0, "create, map and wire %s: %s", name, strerror(errno));
     if (map == MAP_FAILED) {
         close(fd);
         return;
     }
-    if (!(how & WIRED_READ))
+    if (mapfd != fd)
+        close(mapfd);
+    if (!(how & (WIRED_READ | WIRED_RDONLY)))
         map[40000] = 'o';
     memset(data, 'B', sizeof(data));
     memset(want, 'A', (size_t)cut);
@@ -2997,12 +3026,12 @@ wired_past(const char *name, off_t cut, off_t from, int how)
         CHECK(at < 0, "%s: the mapping reads %d at %lld, not %d", name, map[at < 0 ? 0 : at], (long long)at,
               want[at < 0 ? 0 : at]);
     }
-    if (unmapped || refilled) {
-        int later = peer_open(name, O_WRONLY);
-        CHECK(later >= 0 && pwrite(later, "C", 1, 40000) == 1 && close(later) == 0, "%s: a write on the Mac: %s", name,
-              strerror(errno));
-        want[40000] = 'C';
-    }
+    off_t last = how & WIRED_RDONLY ? cut + 1000 : 40000;
+    int later = peer_open(name, O_WRONLY);
+    CHECK(later >= 0 && pwrite(later, "C", 1, 40000) == 1 && pwrite(later, "C", 1, last) == 1 && close(later) == 0,
+          "%s: a write on the Mac: %s", name, strerror(errno));
+    want[40000] = 'C';
+    want[last] = 'C';
     if (!unmapped)
         CHECK(munlock((void *)map, 65536) == 0 && msync((void *)map, 65536, MS_SYNC) == 0, "%s: unwire and msync: %s",
               name, strerror(errno));
@@ -3199,10 +3228,13 @@ rw_edge(const char *dir, const char *other)
     wired_past("wired-host-cut-gone", 0, 65536, WIRED_GONE | WIRED_HOST_CUT);
     wired_past("wired-read", 4000, 65536, WIRED_READ);
     wired_past("wired-read-host", 4000, 20000, WIRED_READ | WIRED_HOST_GROW);
-    repush("repush-read", false, false);
-    repush("repush-read-stat", false, true);
-    repush("repush-mapped", true, false);
-    repush("repush-mapped-stat", true, true);
+    wired_past("wired-rdonly", 4000, 65536, WIRED_RDONLY);
+    wired_past("wired-rdonly-host", 4000, 20000, WIRED_RDONLY | WIRED_HOST_GROW);
+    repush("repush-read", false, false, false);
+    repush("repush-read-stat", false, true, false);
+    repush("repush-mapped", true, false, false);
+    repush("repush-mapped-stat", true, true, false);
+    repush("repush-rdonly-wired", true, false, true);
     turns("turns");
 
     fd = open("largest", O_WRONLY | O_CREAT | O_EXCL, 0644);
