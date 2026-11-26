@@ -3195,7 +3195,7 @@ read_race(const char *name)
     memset(page, 'x', sizeof(page));
     bool made = fd >= 0 && write(fd, page, sizeof(page)) == (ssize_t)sizeof(page);
     volatile char *map = made ? mmap(NULL, 49152, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
-    struct seer s = { .fd = fd, .map = map, .counter = (volatile uint32_t *)(map + 20480) };
+    struct seer s = { .fd = fd, .map = map, .counter = (volatile uint32_t *)(map + 18432) };
     pthread_t t, u;
     bool ready = map != MAP_FAILED && pthread_create(&t, NULL, range_reader, &s) == 0;
     CHECK(ready, "create and map %s: %s", name, strerror(errno));
