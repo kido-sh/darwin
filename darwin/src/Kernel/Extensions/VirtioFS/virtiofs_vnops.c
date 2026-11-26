@@ -1590,13 +1590,15 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
     uio_t uio = ap->a_uio;
     struct virtiofs_node *np = VTON(vp);
     struct fuse_attr attr;
+    int ioflag = ap->a_ioflag & ~(IO_ENCRYPTED | IO_SKIP_ENCRYPTION);
+    bool raw = ioflag != ap->a_ioflag;
     off_t end;
 
     if (vnode_isdir(vp))
         return EISDIR;
     if (!vnode_isreg(vp))
         return EPERM;
-    if (uio_offset(uio) < 0)
+    if (uio_offset(uio) < 0 || (raw && ((uio_offset(uio) | uio_resid(uio)) & (vfs_devblocksize(vnode_mount(vp)) - 1))))
         return EINVAL;
     if (uio_resid(uio) == 0)
         return 0;
@@ -1607,8 +1609,7 @@ virtiofs_vnop_read(struct vnop_read_args *ap)
     if (!error)
         error = node_attr(np, ap->a_context, &attr);
     if (!error)
-        error = uio_isuserspace(uio) ? read_user(np, uio, (off_t)attr.size, ap->a_ioflag)
-                                     : read_pages(np, uio, ap->a_ioflag, &end);
+        error = uio_isuserspace(uio) ? read_user(np, uio, (off_t)attr.size, ioflag) : read_pages(np, uio, ioflag, &end);
     if (!opened)
         file_idle(np);
     return error;
