@@ -22,6 +22,7 @@ enum {
     kOutBytes = kSlotBytes - kTableBytes - kInBytes,
     kMaxSlots = 128,
     kQuietSlots = 4,
+    kDrainPasses = 4,
     kMaxIO = 1 << 17,
     kMinIO = 1 << 12,
     kWaitSliceMs = 100,
@@ -225,14 +226,17 @@ VirtioFSDevice::interruptOccurred(IOInterruptEventSource *source, int)
         return;
     IOLockLock(fLock);
     fInterrupting = true;
-    for (;;) {
+    for (unsigned pass = 1;; pass++) {
         drainLocked(kHiprio);
         drainLocked(kRequests);
-        if (!fReaped)
+        if (!fReaped || pass == kDrainPasses)
             break;
         unlockAndReap();
+        fTransport.readIsr();
         IOLockLock(fLock);
     }
+    if (fReaped)
+        deferReapLocked();
     fInterrupting = false;
     IOLockUnlock(fLock);
 }
