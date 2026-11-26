@@ -1782,7 +1782,7 @@ write_batch(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, 
 
 static int
 write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at, const char *buf, uint32_t len,
-              uint32_t *written)
+              uint32_t *written, bool *held)
 {
     struct virtiofs_mount *vmp = np->vmp;
     vnode_t vp = np->vp;
@@ -1820,7 +1820,8 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
     }
     if (addr)
         ubc_upl_unmap(upl);
-    if (size > old && leftover > past && leftover_fill(np, past, (off_t)round_page_64(size)))
+    *held = size > old && leftover > past && leftover_fill(np, past, (off_t)round_page_64(size));
+    if (*held)
         size = old;
     IOLockLock(vmp->lock);
     np->attr.size = (uint64_t)size;
@@ -1880,15 +1881,16 @@ virtiofs_vnop_write(struct vnop_write_args *ap)
         uint32_t len = (uint32_t)MIN((user_ssize_t)room, uio_resid(uio)), written = 0;
         user_ssize_t resid = uio_resid(uio);
         off_t at = uio_offset(uio);
+        bool held = false;
         error = uiomove(buf, (int)len, uio);
         if (!error)
-            error = write_through(np, ctx, fh, at, buf, len, &written);
+            error = write_through(np, ctx, fh, at, buf, len, &written, &held);
         if (error || written < len) {
             uio_setresid(uio, resid - written);
             uio_setoffset(uio, at + written);
             break;
         }
-        if (node_size(np) < at + (off_t)len)
+        if (held)
             break;
     }
     batch_put(np->vmp, buf, room);
