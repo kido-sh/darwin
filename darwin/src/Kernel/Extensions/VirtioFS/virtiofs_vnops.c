@@ -34,6 +34,7 @@
 #define BATCH_SMALL          32768
 #define LEFTOVER_STEP        ((off_t)1 << 30)
 #define LEFTOVER_REACH       ((off_t)1 << 40)
+#define NOCACHE_PART         ((uint32_t)1 << 20)
 #define HOLD_PAGES           (UPL_SET_LITE | UPL_WILL_MODIFY)
 #define NODE_IDENTITY        (VNODE_ATTR_va_fsid | VNODE_ATTR_va_fsid64 | VNODE_ATTR_va_fileid)
 #define NODE_UNWAITED        (NODE_IDENTITY | VNODE_ATTR_va_modify_time)
@@ -1585,6 +1586,19 @@ read_pages(struct virtiofs_node *np, uio_t uio, int ioflag, off_t *end)
     return error;
 }
 
+static uint32_t
+nocache_part(struct virtiofs_node *np, off_t at, uint32_t len)
+{
+    off_t from = at & ~(off_t)PAGE_MASK, to;
+    int run = 0;
+
+    len = MIN(len, MIN(virtiofs_batch_size(np->vmp), NOCACHE_PART) - (uint32_t)(at - from));
+    to = (off_t)round_page_64(at + len);
+    if (ubc_range_op(np->vp, from, to, UPL_ROP_ABSENT, &run) == KERN_SUCCESS && !run)
+        ubc_range_op(np->vp, from, to, UPL_ROP_PRESENT, &run);
+    return run > at - from ? MIN(len, (uint32_t)(run - (at - from))) : len;
+}
+
 static int
 read_user(struct virtiofs_node *np, uio_t uio, off_t size, int ioflag)
 {
@@ -1596,8 +1610,8 @@ read_user(struct virtiofs_node *np, uio_t uio, off_t size, int ioflag)
     while (!error && uio_resid(uio) > 0) {
         uint32_t len = (uint32_t)MIN((user_ssize_t)room, uio_resid(uio));
         off_t end = 0;
-        if (ioflag & IO_NOCACHE)
-            len = MIN(len, virtiofs_batch_size(np->vmp) - (uint32_t)(uio_offset(uio) & PAGE_MASK));
+        if ((ioflag & IO_NOCACHE) || vnode_isnocache(np->vp))
+            len = nocache_part(np, uio_offset(uio), len);
         uio_reset(part, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
         uio_addiov(part, CAST_USER_ADDR_T(buf), len);
         error = read_pages(np, part, ioflag, &end);
