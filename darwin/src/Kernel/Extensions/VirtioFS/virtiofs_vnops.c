@@ -1870,11 +1870,22 @@ write_through(struct virtiofs_node *np, vfs_context_t ctx, uint64_t fh, off_t at
 
     *written = 0;
     IOLockLock(vmp->lock);
+    held_pushes_wait_locked(np);
+    off_t known = (off_t)np->attr.size;
+    bool mapped = np->flags & VN_WAS_MAPPED;
+    IOLockUnlock(vmp->lock);
+    off_t from = MIN(at, known) & ~(off_t)PAGE_MASK;
+    off_t to = MIN((off_t)round_page_64(at + len), (off_t)round_page_64(known));
+    if (mapped && from < to)
+        error = copies_sync(vp, from, to);
+    if (error)
+        return error;
+    IOLockLock(vmp->lock);
     sizing_after_waiters(np);
     readers_wait_locked(np);
     held_pushes_wait_locked(np);
     off_t old = (off_t)np->attr.size, leftover = np->leftover;
-    bool mapped = np->flags & VN_WAS_MAPPED;
+    mapped = np->flags & VN_WAS_MAPPED;
     IOLockUnlock(vmp->lock);
     off_t first = MIN(at, old) & ~(off_t)PAGE_MASK;
     off_t past = (off_t)round_page_64(old), end = MIN((off_t)round_page_64(at + len), past);
