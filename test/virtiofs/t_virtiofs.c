@@ -3166,7 +3166,7 @@ private_kept(const char *name)
 }
 
 static void
-copy_kept(const char *name)
+copy_kept(const char *name, bool unmapped)
 {
     enum { SIZE = 1 << 20 };
     static char data[SIZE];
@@ -3176,18 +3176,27 @@ copy_kept(const char *name)
     char *map = made ? mmap(NULL, SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
     vm_offset_t copy = 0;
     mach_msg_type_number_t got = 0;
-    kern_return_t kr = map == MAP_FAILED ? KERN_FAILURE
-                                         : mach_vm_read(mach_task_self(), (mach_vm_address_t)map, SIZE, &copy, &got);
-    CHECK(kr == KERN_SUCCESS && got == SIZE, "map and copy %s: %s, %d", name, strerror(errno), kr);
-    if (kr == KERN_SUCCESS) {
+    char first = map == MAP_FAILED ? 'a' : map[100];
+    CHECK(first == 'a', "%s: the mapping shows %c where the file has a", name, first);
+    kern_return_t kr = map == MAP_FAILED || first != 'a'
+                           ? KERN_FAILURE
+                           : mach_vm_read(mach_task_self(), (mach_vm_address_t)map, SIZE, &copy, &got);
+    CHECK(first != 'a' || (kr == KERN_SUCCESS && got == SIZE), "map and copy %s: %s, %d", name, strerror(errno),
+          kr);
+    if (unmapped && map != MAP_FAILED) {
+        CHECK(munmap(map, SIZE) == 0, "unmap %s: %s", name, strerror(errno));
+        map = MAP_FAILED;
+    }
+    if (kr == KERN_SUCCESS && got == SIZE) {
         memset(data, 'b', sizeof(data));
         CHECK(pwrite(fd, data, sizeof(data), 0) == (ssize_t)sizeof(data), "write %s: %s", name, strerror(errno));
         const volatile char *kept = (const volatile char *)copy;
         CHECK(kept[100] == 'a' && kept[SIZE - 100] == 'a',
-              "%s: a virtual copy of a mapping made before a write shows %c and %c, where it had a", name, kept[100],
-              kept[SIZE - 100]);
-        vm_deallocate(mach_task_self(), copy, got);
+              "%s: a virtual copy made before a write of a mapping %s shows %c and %c, where it had a", name,
+              unmapped ? "removed since" : "still there", kept[100], kept[SIZE - 100]);
     }
+    if (kr == KERN_SUCCESS)
+        vm_deallocate(mach_task_self(), copy, got);
     if (map != MAP_FAILED)
         munmap(map, SIZE);
     if (fd >= 0)
@@ -3651,7 +3660,8 @@ rw_edge(const char *dir, const char *other)
     sync_pages_race("race-sync-pages");
     read_race("race-read");
     private_kept("private-kept");
-    copy_kept("copy-kept");
+    copy_kept("copy-kept", false);
+    copy_kept("copy-unmapped", true);
     self_read("race-self");
     gap_write("gap-write");
     host_append("host-append");
