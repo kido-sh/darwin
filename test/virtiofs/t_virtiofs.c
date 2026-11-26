@@ -686,7 +686,33 @@ store_loop(const char *path, const char *other, int seconds)
     return rc || a.failed || a.appends == 0 || kept != done || onfile != done || appended == 0 || wrong != 0;
 }
 
-enum { FULL_PAGES = 128 };
+enum { FULL_PAGES = 128, CLEAN_AT = 3 * 16384 + 100 };
+
+static int
+refused_clean(const char *path, int seconds)
+{
+    static char data[81920];
+    struct stat st;
+    char seen = 0;
+    int fd = open(path, O_RDWR);
+    if (fd < 0 || pread(fd, data, 65536, 0) != 65536 || data[CLEAN_AT] != 'A') {
+        printf("open and read %s: %s\n", path, strerror(errno));
+        if (fd >= 0)
+            close(fd);
+        return 1;
+    }
+    memset(data, 'x', sizeof(data));
+    sleep((unsigned)seconds);
+    ssize_t wrote = pwrite(fd, data, sizeof(data), 0);
+    int refused = wrote < 0 ? errno : 0;
+    sleep((unsigned)seconds);
+    bool looked = fstat(fd, &st) == 0 && fsync(fd) == 0 && pread(fd, &seen, 1, CLEAN_AT) == 1;
+    printf("a write of 80 KiB over 64 cached KiB returned %zd (%s), and after a change on this Mac a stat, fsync and "
+           "read here %s and read '%c' where it changed\n", wrote, strerror(refused),
+           looked ? "worked" : strerror(errno), seen);
+    close(fd);
+    return !(wrote <= CLEAN_AT && looked && seen == 'M');
+}
 
 static int
 map_fail(const char *path, int seconds)
@@ -1820,10 +1846,13 @@ raw_read(const char *path, const char *odd, uid_t uid)
     while (opened && (got = read(tail, raw, sizeof(raw))) > 0)
         total += got;
     int last = got < 0 ? errno : 0;
-    printf("%s, whose size is not a whole number of blocks: blocks read through such a descriptor give %lld of its %lld "
-           "bytes and then %zd (%s)\n", odd, (long long)total, (long long)st.st_size, got, strerror(last));
-    CHECK(got == 0 && total == st.st_size, "a loop of block reads must end with 0 at the end of the file");
-    close(tail);
+    if (opened) {
+        printf("%s, whose size is not a whole number of blocks: blocks read through such a descriptor give %lld of "
+               "its %lld bytes and then %zd (%s)\n", odd, (long long)total, (long long)st.st_size, got, strerror(last));
+        CHECK(got == 0 && total == st.st_size, "a loop of block reads must end with 0 at the end of the file");
+    }
+    if (tail >= 0)
+        close(tail);
     close(other);
     close(fd);
     return failures ? 1 : 0;
@@ -1847,11 +1876,20 @@ static int
 modtime(const char *path, const char *peerpath)
 {
     struct timespec before, after, host;
+    struct statfs fs;
     struct stat st;
     char page[16384];
     memset(page, 'm', sizeof(page));
     int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    bool made = fd >= 0 && write(fd, page, sizeof(page)) == (ssize_t)sizeof(page);
+    CHECK(fd >= 0 && fstatfs(fd, &fs) == 0 && (fs.f_flags & MNT_NOATIME),
+          "%s must be on a mount with noatime, since elsewhere mmap(2) sets the access time and so applies fresh "
+          "attributes itself", path);
+    if (failures) {
+        if (fd >= 0)
+            close(fd);
+        return 1;
+    }
+    bool made = write(fd, page, sizeof(page)) == (ssize_t)sizeof(page);
     volatile char *map = made ? mmap(NULL, sizeof(page), PROT_READ, MAP_SHARED, fd, 0) : MAP_FAILED;
     CHECK(map != MAP_FAILED && map[0] == 'm' && mtime_of(fd, &before), "create and map %s: %s", path, strerror(errno));
     if (failures)
@@ -1878,16 +1916,26 @@ modtime(const char *path, const char *peerpath)
     CHECK(after.tv_sec == host.tv_sec && after.tv_nsec == host.tv_nsec,
           "the modification time asked for alone misses a write on the Mac after the attribute timeout");
     munmap((void *)map, sizeof(page));
-    CHECK(mtime_of(fd, &before), "getattrlist %s: %s", path, strerror(errno));
+    char byte = 0;
+    int rdonly = open(path, O_RDONLY);
+    CHECK(rdonly >= 0 && pread(fd, &byte, 1, 30) == 1 && byte == 'm', "open and read %s: %s", path, strerror(errno));
     other = open(peerpath, O_WRONLY);
     CHECK(other >= 0 && pwrite(other, "q", 1, 30) == 1 && fstat(other, &st) == 0 && close(other) == 0,
           "write %s: %s", peerpath, strerror(errno));
     usleep(1500000);
     CHECK(mtime_of(fd, &after), "getattrlist %s: %s", path, strerror(errno));
-    printf("%s, no longer mapped: after a write on the Mac, %ld.%09ld asked for alone, %ld.%09ld on the Mac\n", path,
-           after.tv_sec, after.tv_nsec, st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec);
-    CHECK(after.tv_sec == st.st_mtimespec.tv_sec && after.tv_nsec == st.st_mtimespec.tv_nsec,
-          "the modification time asked for alone of a file that is not mapped misses a write on the Mac");
+    map = rdonly >= 0 ? mmap(NULL, sizeof(page), PROT_READ, MAP_SHARED, rdonly, 0) : MAP_FAILED;
+    byte = map != MAP_FAILED ? map[30] : 0;
+    printf("%s, no longer mapped: after a write on the Mac, %ld.%09ld asked for alone, %ld.%09ld on the Mac, then "
+           "'%c' through a new read-only mapping\n", path, after.tv_sec, after.tv_nsec, st.st_mtimespec.tv_sec,
+           st.st_mtimespec.tv_nsec, byte);
+    CHECK(after.tv_sec == st.st_mtimespec.tv_sec && after.tv_nsec == st.st_mtimespec.tv_nsec && byte == 'q',
+          "the modification time asked for alone of a file that is not mapped misses a write on the Mac, or leaves "
+          "the page that write made stale in the cache");
+    if (map != MAP_FAILED)
+        munmap((void *)map, sizeof(page));
+    if (rdonly >= 0)
+        close(rdonly);
     close(fd);
     return failures ? 1 : 0;
 }
@@ -2936,6 +2984,21 @@ host_difference(const char *name, const char *want, size_t size)
     return read ? first_difference(back, want, size) : 0;
 }
 
+struct toucher {
+    volatile char *map;
+    atomic_bool stop;
+};
+
+static void *
+touch_pages(void *arg)
+{
+    struct toucher *t = arg;
+    unsigned long sum = 0;
+    for (unsigned i = 0; !atomic_load(&t->stop); i++)
+        sum += (unsigned char)t->map[(i * 4096) % 65536];
+    return (void *)sum;
+}
+
 static void
 repush(const char *name, bool mapped, bool stat_later, bool wired)
 {
@@ -2946,13 +3009,28 @@ repush(const char *name, bool mapped, bool stat_later, bool wired)
     int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
     bool made = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data) && fsync(fd) == 0;
     int mapfd = made && wired ? open(name, O_RDONLY) : fd;
-    volatile char *map = made && mapped && mapfd >= 0 ? mmap(NULL, 65536, PROT_READ, MAP_SHARED, mapfd, 0) : NULL;
+    volatile char *map = !mapped ? NULL : made && mapfd >= 0 ? mmap(NULL, 65536, PROT_READ, MAP_SHARED, mapfd, 0)
+                                                              : MAP_FAILED;
     if (mapfd != fd)
         close(mapfd);
-    if (wired && map && map != MAP_FAILED && mlock((void *)map, 65536) != 0)
+    if (wired && map && map != MAP_FAILED && mlock((void *)map, 65536) != 0) {
+        munmap((void *)map, 65536);
         map = MAP_FAILED;
-    CHECK(made && map != MAP_FAILED && (mapped ? (c = map[0]) == 'A' : pread(fd, &c, 1, 0) == 1) &&
-          pwrite(fd, "X", 1, 100) == 1, "%s: create, cache a page and write into it: %s", name, strerror(errno));
+    }
+    bool cached = made && map != MAP_FAILED && (mapped ? (c = map[0]) == 'A' : pread(fd, &c, 1, 0) == 1);
+    struct toucher touching = { .map = map };
+    pthread_t toucher;
+    if (cached && wired) {
+        spawn(&toucher, touch_pages, &touching);
+        usleep(10000);
+    }
+    bool wrote = cached && pwrite(fd, "X", 1, 100) == 1;
+    int error = errno;
+    if (cached && wired) {
+        atomic_store(&touching.stop, true);
+        pthread_join(toucher, NULL);
+    }
+    CHECK(wrote, "%s: create, cache a page and write into it: %s", name, strerror(error));
     if (!made || map == MAP_FAILED) {
         close(fd);
         return;
@@ -2989,13 +3067,16 @@ wired_past(const char *name, off_t cut, off_t from, int how)
     int prot = how & (WIRED_READ | WIRED_RDONLY) ? PROT_READ : PROT_READ | PROT_WRITE;
     int mapfd = how & WIRED_RDONLY ? open(name, O_RDONLY) : fd;
     volatile char *map = made && mapfd >= 0 ? mmap(NULL, 65536, prot, MAP_SHARED, mapfd, 0) : MAP_FAILED;
-    CHECK(map != MAP_FAILED && mlock((void *)map, 65536) == 0, "create, map and wire %s: %s", name, strerror(errno));
-    if (map == MAP_FAILED) {
+    if (mapfd >= 0 && mapfd != fd)
+        close(mapfd);
+    bool wired = map != MAP_FAILED && mlock((void *)map, 65536) == 0;
+    CHECK(wired, "create, map and wire %s: %s", name, strerror(errno));
+    if (!wired) {
+        if (map != MAP_FAILED)
+            munmap((void *)map, 65536);
         close(fd);
         return;
     }
-    if (mapfd != fd)
-        close(mapfd);
     if (!(how & (WIRED_READ | WIRED_RDONLY)))
         map[40000] = 'o';
     memset(data, 'B', sizeof(data));
@@ -3721,6 +3802,8 @@ main(int argc, char **argv)
         return store_loop(argv[2], argv[3], atoi(argv[4]));
     if (argc == 4 && !strcmp(argv[1], "map-fail"))
         return map_fail(argv[2], atoi(argv[3]));
+    if (argc == 4 && !strcmp(argv[1], "refused-clean"))
+        return refused_clean(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "short-write"))
         return short_write(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "map-unpushed"))

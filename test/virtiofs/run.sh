@@ -58,6 +58,11 @@ check() {
   before=$(timeouts)
   if "$@" && [[ $(timeouts) == "$before" ]]; then echo "ok   $what"; else echo "FAIL $what"; rc=1; fi
 }
+guest_same() {
+  local want=$1 got=$2
+  shift 2
+  guest "$@" > "$got" && diff -u "$want" "$got"
+}
 fails() {
   ! "$@" >/dev/null 2>&1
 }
@@ -383,6 +388,23 @@ refused_kept() {
   echo "on a volume of this Mac that ran full: $(cat "$work/map-fail.out"), and this Mac reads $byte for those three"
   [[ $status == 0 && $byte == $(sed -n 's/.*the last read \(...\),.*/\1/p' "$work/map-fail.out") ]]
 }
+refused_clean() {
+  local holder status byte at=$((3 * 16384 + 100))
+  head -c 65536 /dev/zero | tr '\0' A > "$full/clean"
+  guest /tmp/t_virtiofs refused-clean /mnt/full/clean 4 > "$work/refused-clean.out" 2>&1 &
+  holder=$!
+  sleep 1
+  fill
+  sleep 3
+  room
+  printf M | dd of="$full/clean" bs=1 seek=$at conv=notrunc 2>/dev/null
+  wait $holder
+  status=$?
+  byte=$(dd if="$full/clean" bs=1 skip=$at count=1 2>/dev/null)
+  echo "cached pages under a write this Mac had no room for: $(cat "$work/refused-clean.out"), and this Mac reads" \
+    "$byte where it wrote M after there was room"
+  [[ $status == 0 && $byte == M ]]
+}
 unpushed_kept() {
   local holder status byte mode
   dd if=/dev/zero of="$full/unpushed" bs=1 count=0 seek=$((128 << 14)) 2>/dev/null
@@ -509,8 +531,8 @@ check "fcntl F_RDADVISE brings a file into memory without a read" guest /tmp/t_v
 check "megabyte reads with F_NOCACHE leave nothing in the cache" guest /tmp/t_virtiofs nocache /mnt/data/big/8m
 check "a user's read through a descriptor opened for raw encrypted bytes fails or reads as on this Mac" \
   guest /tmp/t_virtiofs raw-read /mnt/data/big/8m /mnt/data/small/1048583 501
-guest /tmp/t_virtiofs tree /mnt/data > "$work/tree.guest"
-check "the guest sees the same tree as this Mac" diff -u "$work/tree.host" "$work/tree.guest"
+check "the guest sees the same tree as this Mac" \
+  guest_same "$work/tree.host" "$work/tree.guest" /tmp/t_virtiofs tree /mnt/data
 check "the empty share is empty" prints "" guest /bin/ls -A /mnt/empty
 check "the device root lists the shares" prints "$(printf 'data\nempty\nfull\nlocked\nrw\n%s' "$wide")" \
   guest /bin/sh -c 'cd /mnt/root && printf "%s\n" *'
@@ -520,9 +542,9 @@ check "mount kido:locked" guest /sbin/mount -t virtiofs -o ro kido:locked /mnt/l
 check "a file the host cannot read cannot be opened" fails guest /bin/cat /mnt/locked/noaccess
 check "unmount kido:locked" guest /sbin/umount /mnt/locked
 check "errors of a read-only mount" guest /tmp/t_virtiofs errors /mnt/data kido:data
-guest /tmp/t_virtiofs xattr-list /mnt/data/small/4097 all > "$work/xattr.guest"
-check "the guest lists the extended attributes this Mac has" diff -u <("$work/t_virtiofs" xattr-list "$share/small/4097" all) \
-  "$work/xattr.guest"
+"$work/t_virtiofs" xattr-list "$share/small/4097" all > "$work/xattr.host"
+check "the guest lists the extended attributes this Mac has" \
+  guest_same "$work/xattr.host" "$work/xattr.guest" /tmp/t_virtiofs xattr-list /mnt/data/small/4097 all
 check "a 512-byte readdir buffer lists every entry" guest /tmp/t_virtiofs small-readdir /mnt/data/names 512
 check "a 256-byte readdir buffer stops only at an entry too large for it" \
   guest /tmp/t_virtiofs small-readdir /mnt/data/names 256
@@ -596,11 +618,14 @@ check "random writes, truncations and mapped stores on one file, and changes on 
   guest /tmp/t_virtiofs model /mnt/rw/model /mnt/peer/model 30000 1
 check "six writers on their own parts of one file, sharing pages, find every byte as they left it" \
   guest /tmp/t_virtiofs owned /mnt/rw/owned /mnt/peer/owned 10
-check "the modification time asked for alone of a mapped file follows a write here and one on the Mac" \
-  guest /tmp/t_virtiofs modtime /mnt/rw/modtime /mnt/peer/modtime
+check "the modification time asked for alone follows writes here and on the Mac, and drops stale pages if not mapped" \
+  guest /bin/sh -c 'mkdir -p /mnt/noatime && /sbin/mount -t virtiofs -o noatime kido:rw /mnt/noatime &&
+  /tmp/t_virtiofs modtime /mnt/noatime/modtime /mnt/peer/modtime; r=$?; /sbin/umount /mnt/noatime; exit $r'
 check "unmount the second mount of kido:rw" guest /sbin/umount /mnt/peer
 check "mount kido:full" guest /bin/sh -c 'mkdir -p /mnt/full && /sbin/mount -t virtiofs kido:full /mnt/full'
 check "a write and a push this Mac has no room for fail, and the store they met is pushed once there is room" refused_kept
+check "a write this Mac has no room for leaves the cached pages it covered clean, never to undo a later change" \
+  refused_clean
 check "a write this Mac has room for only in part reports what it wrote" short_kept
 check "a store whose pushes failed is still pushed after its mapping is gone and this Mac revoked writing" unpushed_kept
 check "unmount kido:full" guest /sbin/umount /mnt/full
