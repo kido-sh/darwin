@@ -2991,16 +2991,21 @@ sync_race(const char *name)
           "%d calls failed", name, s.rounds, late, rounds, failed + atomic_load(&s.failed));
 }
 
+enum { RANGE_READ = 10 * 16384 };
+
 static void *
 range_reader(void *arg)
 {
-    static char buf[32768];
     struct seer *s = arg;
-    while (!atomic_load(&s->stop)) {
-        if (msync((void *)s->map, 16384, MS_INVALIDATE) != 0 || pread(s->fd, buf, sizeof(buf), 0) != (ssize_t)sizeof(buf))
+    char *buf = malloc(RANGE_READ);
+    while (buf && !atomic_load(&s->stop)) {
+        if (msync((void *)s->map, 16384, MS_INVALIDATE) != 0 || pread(s->fd, buf, RANGE_READ, 0) != RANGE_READ)
             atomic_store(&s->failed, 1);
-        s->rounds++;
+        atomic_fetch_add(&s->done, 1);
     }
+    if (!buf)
+        atomic_store(&s->failed, 1);
+    free(buf);
     return NULL;
 }
 
@@ -3028,34 +3033,43 @@ paced_write(void *arg)
 static void
 sync_pages_race(const char *name)
 {
-    static char data[65536];
+    static char data[RANGE_READ];
     int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
     memset(data, 'x', sizeof(data));
     bool made = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data);
-    volatile char *map = made ? mmap(NULL, sizeof(data), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
-    struct seer s = { .fd = fd, .at = 16384 + 8000 };
-    pthread_t t;
+    volatile char *map = made ? mmap(NULL, 5 * 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    struct seer s = { .fd = fd, .at = 2 * 16384 + 8000 }, r = { .fd = fd, .map = map };
+    pthread_t t, u[2];
     bool ready = map != MAP_FAILED && pthread_create(&t, NULL, paced_write, &s) == 0;
     CHECK(ready, "create and map %s: %s", name, strerror(errno));
-    int rounds = 4000, late = 0, failed = 0;
+    int readers = 0;
+    while (ready && readers < 2 && pthread_create(&u[readers], NULL, range_reader, &r) == 0)
+        readers++;
+    int rounds = 4000, late = 0, failed = readers < 2;
     for (int i = 1; ready && i <= rounds; i++) {
         char want = (char)('A' + i % 26);
-        for (int page = 0; page < 4; page++)
+        for (int page = 1; page <= 4; page++)
             map[page * 16384 + 100] = want;
-        failed += msync((void *)map, sizeof(data), MS_SYNC) != 0;
-        late += !on_host(name, 16384 + 100, want);
+        failed += msync((void *)(map + 16384), 4 * 16384, MS_SYNC) != 0;
+        late += !on_host(name, 2 * 16384 + 100, want);
     }
     atomic_store(&s.stop, 1);
+    atomic_store(&r.stop, 1);
     if (ready)
         pthread_join(t, NULL);
+    while (readers)
+        pthread_join(u[--readers], NULL);
     if (map != MAP_FAILED)
-        munmap((void *)map, sizeof(data));
+        munmap((void *)map, 5 * 16384);
     if (fd >= 0)
         close(fd);
-    CHECK(late == 0 && failed == 0 && s.rounds > 0 && !atomic_load(&s.failed),
-          "%s: beside %d writes into the second of four pages, msync of all four returned %d times of %d before the "
-          "store into the second was on the Mac, and %d calls failed", name, s.rounds, late, rounds,
-          failed + atomic_load(&s.failed));
+    CHECK(late == 0 && failed == 0 && s.rounds > 0 && atomic_load(&r.done) > 0 && !atomic_load(&s.failed) &&
+              !atomic_load(&r.failed),
+          "%s: beside %d writes into the second of four pages and %d reads that hold them while they fetch the page "
+          "before, msync of all four returned %d times of %d before the store into the second was on the Mac, and "
+          "%d calls failed",
+          name, s.rounds, atomic_load(&r.done), late, rounds,
+          failed + atomic_load(&s.failed) + atomic_load(&r.failed));
 }
 
 static void
@@ -3114,7 +3128,7 @@ copy_kept(const char *name)
 static void
 read_race(const char *name)
 {
-    static char page[49152];
+    static char page[RANGE_READ];
     int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
     memset(page, 'x', sizeof(page));
     bool made = fd >= 0 && write(fd, page, sizeof(page)) == (ssize_t)sizeof(page);
@@ -3142,10 +3156,10 @@ read_race(const char *name)
     if (map != MAP_FAILED)
         munmap((void *)map, 49152);
     close(fd);
-    CHECK(late == 0 && failed == 0 && s.rounds > 0 && !atomic_load(&s.failed),
-          "%s: beside %d reads of the page before it and its own and a tight storer, msync returned %d times of %d "
-          "before its store was on the Mac, and %d calls failed", name, s.rounds, late, rounds,
-          failed + atomic_load(&s.failed));
+    CHECK(late == 0 && failed == 0 && atomic_load(&s.done) > 0 && !atomic_load(&s.failed),
+          "%s: beside %d reads that hold the page while they fetch the one before and a tight storer, msync returned "
+          "%d times of %d before its store was on the Mac, and %d calls failed",
+          name, atomic_load(&s.done), late, rounds, failed + atomic_load(&s.failed));
 }
 
 static void *
