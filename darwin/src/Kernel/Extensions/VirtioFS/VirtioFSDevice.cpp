@@ -191,7 +191,8 @@ VirtioFSDevice::setupSlots()
         slot->next = *pool;
         *pool = slot;
     }
-    fReapCall = thread_call_allocate(reapLater, this);
+    fReapCall = thread_call_allocate_with_options(reapLater, this, THREAD_CALL_PRIORITY_KERNEL,
+                                                  THREAD_CALL_OPTIONS_ONCE);
     return fReapCall != NULL;
 }
 
