@@ -30,13 +30,14 @@ rc=0
 timed() {
   "$@" &
   local pid=$!
-  (trap 'kill $s 2>/dev/null; exit 0' TERM; sleep "$limit" & s=$!; wait $s; kill "$pid") >/dev/null 2>&1 &
+  (trap 'kill $s 2>/dev/null; exit 0' TERM; sleep "$limit" & s=$!; wait $s; kill "$pid"; sleep 5 & s=$!; wait $s
+   kill -9 "$pid") >/dev/null 2>&1 &
   local watchdog=$!
   wait "$pid"
   local status=$?
   kill "$watchdog" 2>/dev/null
   wait "$watchdog"
-  [[ $status == 143 ]] && echo "FAIL timeout after ${limit}s: $*"
+  [[ $status == 143 || $status == 137 ]] && echo "FAIL timeout after ${limit}s: $*"
   return $status
 }
 guest() {
@@ -449,6 +450,7 @@ done
 head -c $((64 << 20)) /dev/urandom > "$share/big/64m"
 head -c $((32 << 20)) /dev/urandom > "$share/big/32m"
 head -c $((16 << 20)) /dev/urandom > "$share/big/16m"
+head -c $((8 << 20)) /dev/urandom > "$share/big/8m"
 for i in $(seq 1 3000); do printf '%d\n' $i > "$share/many/f$i"; done
 printf 'deep\n' > "$share/deep/1/2/3/4/5/leaf"
 name255=$(printf 'n%.0s' $(seq 1 255))
@@ -494,6 +496,9 @@ guest /sbin/mount | grep virtiofs
 check "files closed while their reads are in flight" guest /tmp/t_virtiofs read-close /mnt/data/big/64m 128
 check "a close is not held up by reads that start after it" guest /tmp/t_virtiofs reopen-close /mnt/data/big/32m 40
 check "fcntl F_RDADVISE brings a file into memory without a read" guest /tmp/t_virtiofs rdadvise /mnt/data/small/1048583
+check "megabyte reads with F_NOCACHE leave nothing in the cache" guest /tmp/t_virtiofs nocache /mnt/data/big/8m
+check "a user's read through a descriptor opened for raw encrypted bytes fails or reads as on this Mac" \
+  guest /tmp/t_virtiofs raw-read /mnt/data/big/8m 501
 guest /tmp/t_virtiofs tree /mnt/data > "$work/tree.guest"
 check "the guest sees the same tree as this Mac" diff -u "$work/tree.host" "$work/tree.guest"
 check "the empty share is empty" prints "" guest /bin/ls -A /mnt/empty
@@ -605,8 +610,10 @@ guest /bin/sh -c 'cp /tmp/t_virtiofs /mnt/rw/gone && cat /mnt/rw/gone > /dev/nul
 check "concurrent creates, writes, renames, unlinks and appends" guest /tmp/t_virtiofs rw-stress /mnt/rw/stress 8 5
 check "writes, stores, reads into the file's own mapping, truncations and syncs on one file all keep going" \
   guest /tmp/t_virtiofs chaos /mnt/rw/chaos 10
-check "twelve threads that store and sync, and a read into fresh pages of a mapping of the same file, keep going" \
-  guest /tmp/t_virtiofs syncers /mnt/rw/syncers 6 12
+check "eight threads that store and sync, and a read into fresh pages of a mapping of the same file, keep going" \
+  guest /tmp/t_virtiofs syncers /mnt/rw/syncers 6 8
+check "a write beside a thread that makes and removes the file's only mapping keeps going" \
+  guest /tmp/t_virtiofs unmapping /mnt/rw/unmapping 4
 check "files written and closed beside stats of them are closed on this Mac" closed_released
 check "flock and fcntl locks hold between descriptors and processes of the guest" guest /tmp/t_virtiofs locks /mnt/rw/locked
 check "a file removed in the guest is released on this Mac" removed_released

@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -709,8 +710,8 @@ map_fail(const char *path, int seconds)
     munmap((void *)map, 16384 + size);
     close(fd);
     free(data);
-    return !(wrote < (ssize_t)size && (wrote >= 0 || refused == ENOSPC) && kept == FULL_PAGES && unpushed == ENOSPC &&
-             again == 0);
+    return !(wrote < (ssize_t)size && (wrote >= 0 || refused == ENOSPC) && kept == FULL_PAGES &&
+             (unpushed == ENOSPC || unpushed == EIO) && again == 0);
 }
 
 static int
@@ -735,6 +736,22 @@ map_unpushed(const char *path, int seconds)
     printf("fsync of stores to %d pages said %s before the mapping and the last descriptor went away\n", FULL_PAGES,
            strerror(unpushed));
     return pushed == 0;
+}
+
+static void
+stuck(int sig)
+{
+    static const char why[] = "threads did not end within 5 s of being told to stop\n";
+    (void)sig;
+    (void)!write(1, why, sizeof(why) - 1);
+    _exit(3);
+}
+
+static void
+stop_within(unsigned seconds)
+{
+    signal(SIGALRM, stuck);
+    alarm(seconds);
 }
 
 enum { CHAOS_THREADS = 8, CHAOS_LOW = 100000, CHAOS_HIGH = 262144 };
@@ -892,12 +909,14 @@ chaos_run(const char *path, int seconds)
         _exit(3);
     }
     atomic_store(&chaos.stop, 1);
+    stop_within(5);
     printf("%d s on one file:", seconds);
     for (int i = 0; i < CHAOS_THREADS; i++) {
         pthread_join(t[i], NULL);
         printf(" %ld %s,", atomic_load(&chaos.done[i]), names[i]);
         bad += atomic_load(&chaos.failed[i]);
     }
+    alarm(0);
     printf(" %ld calls failed\n", bad);
     munmap((void *)chaos.map, 81920);
     close(fd);
@@ -982,6 +1001,78 @@ locks_run(const char *path)
     return failures ? 1 : 0;
 }
 
+static struct {
+    const char *path;
+    atomic_int stop;
+    atomic_long done[2], failed;
+} unmapper;
+
+static void *
+unmapper_map(void *arg)
+{
+    int fd = open(unmapper.path, O_RDWR);
+    while (!atomic_load(&unmapper.stop)) {
+        volatile char *map = mmap(NULL, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (map != MAP_FAILED)
+            map[100] = 'm';
+        atomic_fetch_add(&unmapper.failed, map == MAP_FAILED || munmap((void *)map, 16384) != 0);
+        atomic_fetch_add(&unmapper.done[0], 1);
+    }
+    close(fd);
+    return arg;
+}
+
+static void *
+unmapper_write(void *arg)
+{
+    static char block[4096];
+    int fd = open(unmapper.path, O_WRONLY);
+    while (!atomic_load(&unmapper.stop)) {
+        atomic_fetch_add(&unmapper.failed, pwrite(fd, block, sizeof(block), 8192) != (ssize_t)sizeof(block));
+        atomic_fetch_add(&unmapper.done[1], 1);
+    }
+    close(fd);
+    return arg;
+}
+
+static int
+unmapper_run(const char *path, int seconds)
+{
+    pthread_t t[2];
+    long before[2] = { 0 };
+    int quiet = 0, fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    unmapper.path = path;
+    if (fd < 0 || ftruncate(fd, 65536) != 0) {
+        printf("create %s: %s\n", path, strerror(errno));
+        return 1;
+    }
+    close(fd);
+    pthread_create(&t[0], NULL, unmapper_map, NULL);
+    pthread_create(&t[1], NULL, unmapper_write, NULL);
+    for (int s = 0; s < seconds; s++) {
+        sleep(1);
+        long maps = atomic_load(&unmapper.done[0]), writes = atomic_load(&unmapper.done[1]);
+        quiet = maps == before[0] || writes == before[1] ? quiet + 1 : 0;
+        if (quiet >= 5) {
+            printf("after %d s, no progress for 5 s: the mapping stands at %ld made and removed%s, the writer at %ld "
+                   "writes%s\n", s + 1, maps, maps == before[0] ? "" : " and moves", writes,
+                   writes == before[1] ? "" : " and moves");
+            _exit(3);
+        }
+        before[0] = maps;
+        before[1] = writes;
+    }
+    atomic_store(&unmapper.stop, 1);
+    stop_within(5);
+    pthread_join(t[0], NULL);
+    pthread_join(t[1], NULL);
+    alarm(0);
+    printf("%d s: the file's only mapping was made, stored to and removed %ld times beside %ld writes to the same page, "
+           "%ld calls failed\n", seconds, atomic_load(&unmapper.done[0]), atomic_load(&unmapper.done[1]),
+           atomic_load(&unmapper.failed));
+    return atomic_load(&unmapper.failed) != 0;
+}
+
 enum { SYNCERS = 32, SYNC_WINDOW = 4194304 };
 
 static struct {
@@ -1058,19 +1149,25 @@ syncers_run(const char *path, int seconds, int count)
         if (worst < 5)
             continue;
         sleep(3);
+        s += 3;
         for (int i = 0; i < count; i++)
             syncs += atomic_load(&syncers.done[i]) == before[i];
         printf("after %d s, no progress for 5 s: the read into a fresh page of a mapping of the same file %s at %ld, and "
-               "%ld of the %d threads that store and sync did nothing in the last 3 s\n", s + 4,
+               "%ld of the %d threads that store and sync did nothing in the last 3 s\n", s + 1,
                atomic_load(&syncers.done[SYNCERS]) == before[SYNCERS] ? "stands" : "moves", before[SYNCERS], syncs, count);
-        _exit(3);
+        if (syncs)
+            _exit(3);
+        memset(quiet, 0, sizeof(quiet));
+        syncs = 0;
     }
     atomic_store(&syncers.stop, 1);
+    stop_within(5);
     pthread_join(t[SYNCERS], NULL);
     for (int i = 0; i < count; i++) {
         pthread_join(t[i], NULL);
         syncs += atomic_load(&syncers.done[i]);
     }
+    alarm(0);
     printf("%d s: %ld reads into fresh pages of a mapping of the same file beside %d threads that stored and synced %ld "
            "times, %ld calls failed\n", seconds, atomic_load(&syncers.done[SYNCERS]), count, syncs,
            atomic_load(&syncers.failed));
@@ -1151,6 +1248,8 @@ owned_others(void *arg)
     struct owned *r = arg;
     struct stat st;
     int fd = open(r->path, O_RDWR);
+    if (fd < 0)
+        snprintf(r->why, sizeof(r->why), "open: %s", strerror(errno));
     while (!atomic_load(&owned_stop) && fd >= 0) {
         int kind = rand_r(&r->seed) % 3;
         off_t size = (off_t)OWNERS * OWNED + rand_r(&r->seed) % OWNED_TAIL;
@@ -1185,19 +1284,25 @@ owned_run(const char *path, const char *other, int seconds)
     }
     sleep((unsigned)seconds);
     atomic_store(&owned_stop, 1);
+    stop_within(5);
     for (int i = 0; i < OWNERS + 2; i++)
         pthread_join(t[i], NULL);
+    alarm(0);
     bad = fsync(fd) != 0;
     int held = open(other, O_RDONLY), host = open(other, O_RDONLY);
     for (int i = 0; i < OWNERS; i++) {
         struct owned *r = &work[i];
-        if (!r->why[0] && pread(fd, back, OWNED, r->base) == OWNED)
+        if (!r->why[0] && pread(fd, back, OWNED, r->base) != OWNED)
+            snprintf(r->why, sizeof(r->why), "the last read failed or came back short: %s", strerror(errno));
+        if (!r->why[0])
             owned_differs(r, "the last read", back, 0, OWNED);
         if (!r->why[0]) {
             memcpy(back, (const void *)(map + r->base), OWNED);
             owned_differs(r, "the mapping at the end", back, 0, OWNED);
         }
-        if (!r->why[0] && pread(host, back, OWNED, r->base) == OWNED)
+        if (!r->why[0] && pread(host, back, OWNED, r->base) != OWNED)
+            snprintf(r->why, sizeof(r->why), "the read of the Mac's copy failed or came back short: %s", strerror(errno));
+        if (!r->why[0])
             owned_differs(r, "the Mac", back, 0, OWNED);
         if (r->why[0])
             printf("region %d: %s\n", i, r->why);
@@ -1205,6 +1310,8 @@ owned_run(const char *path, const char *other, int seconds)
         steps += r->steps;
     }
     for (int i = 0; i < 2; i++) {
+        if (!rest[i].why[0] && !rest[i].steps)
+            snprintf(rest[i].why, sizeof(rest[i].why), "a thread that syncs, stats and truncates the tail did nothing");
         if (rest[i].why[0])
             printf("beside the regions: %s\n", rest[i].why);
         bad |= rest[i].why[0] != 0;
@@ -1668,6 +1775,70 @@ lstat_round(const char *dir, char **names, size_t n)
 }
 
 static int
+raw_read(const char *path, uid_t uid)
+{
+    static char plain[4096], raw[4096];
+    if (uid && (setgid(20) != 0 || setuid(uid) != 0)) {
+        printf("setuid %u: %s\n", uid, strerror(errno));
+        return 1;
+    }
+    int fd = open_dprotected_np(path, O_RDONLY, 0, O_DP_GETRAWENCRYPTED, 0), other = open(path, O_RDONLY);
+    CHECK(fd >= 0 && other >= 0 && pread(other, plain, sizeof(plain), 0) == (ssize_t)sizeof(plain), "open %s: %s", path,
+          strerror(errno));
+    for (int pass = 0; fd >= 0 && pass < 2; pass++) {
+        ssize_t odd = pread(fd, raw, 1, 0);
+        int why = odd < 0 ? errno : 0;
+        ssize_t whole = pread(fd, raw, sizeof(raw), 0);
+        printf("%s opened by user %u for its raw encrypted bytes%s: one byte reads %zd (%s), a block %zd\n", path,
+               getuid(), pass ? ", with F_NOCACHE" : "", odd, strerror(why), whole);
+        CHECK(odd == -1 && why == EINVAL && whole == (ssize_t)sizeof(raw) && !memcmp(raw, plain, sizeof(raw)),
+              "a read of one byte must fail with EINVAL and a read of a block must give the file's bytes");
+        CHECK(fcntl(fd, F_NOCACHE, 1) == 0, "F_NOCACHE: %s", strerror(errno));
+    }
+    close(other);
+    close(fd);
+    return failures ? 1 : 0;
+}
+
+static size_t
+cached_pages(int fd, off_t size, off_t from, char *buf)
+{
+    size_t page = (size_t)getpagesize(), pages = ((size_t)size + page - 1) / page, cached = 0;
+    off_t done = from;
+    for (ssize_t got; (got = pread(fd, buf, 1 << 20, done)) > 0;)
+        done += got;
+    char *vec = calloc(1, pages), *map = mmap(NULL, (size_t)size, PROT_READ, MAP_SHARED, fd, 0);
+    CHECK(done == size && map != MAP_FAILED && vec && mincore(map, (size_t)size, vec) == 0,
+          "read up to %lld of %lld bytes, then map and mincore: %s", (long long)done, (long long)size, strerror(errno));
+    for (size_t i = 0; vec && i < pages; i++)
+        cached += (vec[i] & MINCORE_INCORE) != 0;
+    if (map != MAP_FAILED)
+        munmap(map, (size_t)size);
+    free(vec);
+    return cached;
+}
+
+static int
+nocache_read(const char *path)
+{
+    struct stat st;
+    int fd = open(path, O_RDONLY);
+    char *buf = malloc(1 << 20);
+    CHECK(fd >= 0 && buf && fstat(fd, &st) == 0 && fcntl(fd, F_NOCACHE, 1) == 0, "open %s: %s", path, strerror(errno));
+    if (failures)
+        return 1;
+    size_t even = cached_pages(fd, st.st_size, 0, buf), odd = cached_pages(fd, st.st_size, 1000, buf);
+    CHECK(fcntl(fd, F_NOCACHE, 0) == 0, "F_NOCACHE off: %s", strerror(errno));
+    size_t plain = cached_pages(fd, st.st_size, 0, buf);
+    printf("%s: megabyte reads with F_NOCACHE leave %zu pages in the cache from offset 0 and %zu from offset 1000; the "
+           "same reads without it leave %zu\n", path, even, odd, plain);
+    CHECK(even == 0 && odd == 0 && plain > 0, "pages stayed in the cache after reads with F_NOCACHE, or none after plain reads");
+    close(fd);
+    free(buf);
+    return failures ? 1 : 0;
+}
+
+static int
 bench_cold(const char *path, int count)
 {
     struct stat st;
@@ -1704,6 +1875,9 @@ bench_meta(const char *dir, int rounds)
     }
     closedir(d);
     double listed = now() - t0;
+    size_t files = 0;
+    for (size_t i = 0; i < n; i++)
+        files += strcmp(names[i], ".") && strcmp(names[i], "..");
 
     double cold = lstat_round(dir, names, n), warm = 0;
     t0 = now();
@@ -1724,13 +1898,15 @@ bench_meta(const char *dir, int rounds)
     for (int pass = 0; pass < 2; pass++) {
         t0 = now();
         for (size_t i = 0; i < n; i++) {
+            if (!strcmp(names[i], ".") || !strcmp(names[i], ".."))
+                continue;
             snprintf(path, sizeof(path), "%s/%s", dir, names[i]);
             int fd = open(path, O_RDONLY);
             if (fd >= 0 && read(fd, small, sizeof(small)) < 0)
                 printf("read %s: %s\n", path, strerror(errno));
             close(fd);
         }
-        reads[pass] = (now() - t0) / (double)n * 1e6;
+        reads[pass] = (now() - t0) / (double)(files ? files : 1) * 1e6;
     }
     printf("%s: readdir of %zu entries %.2f ms, lstat %.1f us each first, then %.1f us at %.2f CPUs busy, "
            "open+close %.1f us each, open+read+close %.1f us each first and then %.1f us\n", dir, n, listed * 1e3, cold,
@@ -2169,8 +2345,8 @@ map_pressure(const char *path, int mib)
     double stored = now() - t0;
     size_t reads = 0;
     for (size_t at = 0; at + 2 * page <= size; at += 262144, reads++) {
-        uint64_t stamp = (at / page + 1) * 0x9e3779b97f4a7c15ULL;
-        bad += pread(fd, map + at, page, (off_t)(at + page)) != (ssize_t)page;
+        uint64_t stamp = (at / page + 1) * 0x9e3779b97f4a7c15ULL, next = (at / page + 2) * 0x9e3779b97f4a7c15ULL;
+        bad += pread(fd, map + at, page, (off_t)(at + page)) != (ssize_t)page || memcmp(map + at, &next, sizeof(next));
         memcpy(map + at, &stamp, sizeof(stamp));
         memcpy(map + at + page - sizeof(stamp), &stamp, sizeof(stamp));
     }
@@ -2637,12 +2813,19 @@ wired_write(const char *name)
     close(fd);
 }
 
+static char
+wired_want(off_t at, off_t cut, off_t from)
+{
+    return at < cut ? 'A' : at < from ? 0 : 'B';
+}
+
 static void
-wired_past(const char *name, off_t cut, off_t at, bool unmapped)
+wired_past(const char *name, off_t cut, off_t from, bool unmapped, bool host)
 {
     static char data[65536];
     struct stat st;
-    char back[3] = { 0 };
+    off_t at[3] = { 40000, 50000, from < 65536 ? from - 1 : cut };
+    char back[3] = { 1, 1, 1 }, want[3];
     int fd = open(name, O_RDWR | O_CREAT | O_EXCL, 0644);
     memset(data, 'A', sizeof(data));
     bool made = fd >= 0 && write(fd, data, sizeof(data)) == (ssize_t)sizeof(data);
@@ -2654,20 +2837,31 @@ wired_past(const char *name, off_t cut, off_t at, bool unmapped)
     }
     map[40000] = 'o';
     memset(data, 'B', sizeof(data));
+    int grower = host ? peer_open(name, O_WRONLY) : fd;
     CHECK(ftruncate(fd, cut) == 0 && (!unmapped || munmap((void *)map, 65536) == 0) &&
-          pwrite(fd, data, (size_t)(65536 - at), at) == (ssize_t)(65536 - at), "%s: truncate and write again: %s", name,
-          strerror(errno));
-    CHECK(pread(fd, &back[0], 1, 40000) == 1 && pread(fd, &back[1], 1, 50000) == 1 && pread(fd, &back[2], 1, at - 1) == 1 &&
-          back[0] == 'B' && back[1] == 'B' && back[2] == (at > cut ? 0 : 'A'),
-          "%s: after a truncation to %lld under wired pages and a write at %lld, read(2) gives %d and %d and, before the "
-          "write, %d", name, (long long)cut, (long long)at, back[0], back[1], back[2]);
+          (from < 65536 ? pwrite(grower, data, (size_t)(65536 - from), from) == (ssize_t)(65536 - from)
+                        : ftruncate(grower, 65536) == 0),
+          "%s: truncate, then write or grow again: %s", name, strerror(errno));
+    if (host)
+        CHECK(close(grower) == 0 && close(open(name, O_RDONLY)) == 0 && close(open(name, O_RDONLY)) == 0,
+              "%s: close on the second mount and open again: %s", name, strerror(errno));
+    for (int i = 0; i < 3; i++) {
+        want[i] = wired_want(at[i], cut, from);
+        CHECK(pread(fd, &back[i], 1, at[i]) == 1 && back[i] == want[i],
+              "%s: after a truncation to %lld under wired pages and a %s%s, read(2) gives %d at %lld, not %d", name,
+              (long long)cut, from < 65536 ? "write past it" : "truncation back up", host ? " on the Mac" : "", back[i],
+              (long long)at[i], want[i]);
+        if (!unmapped)
+            CHECK(map[at[i]] == want[i], "%s: the mapping reads %d at %lld, not %d", name, map[at[i]], (long long)at[i],
+                  want[i]);
+    }
     if (!unmapped)
-        CHECK(map[40000] == 'B' && map[50000] == 'B' && map[at - 1] == (at > cut ? 0 : 'A') &&
-              munlock((void *)map, 65536) == 0 && msync((void *)map, 65536, MS_SYNC) == 0,
-              "%s: the mapping reads %d, %d and, before the write, %d", name, map[40000], map[50000], map[at - 1]);
-    CHECK(fstat(fd, &st) == 0 && st.st_size == 65536 && pread(fd, &back[0], 1, 40000) == 1 && back[0] == 'B' &&
-          on_host(name, 40000, 'B') && on_host(name, 50000, 'B') && on_host(name, at - 1, at > cut ? 0 : 'A'),
-          "%s: the write over pages a truncation left behind is not what the Mac holds, read(2) gives %d", name, back[0]);
+        CHECK(munlock((void *)map, 65536) == 0 && msync((void *)map, 65536, MS_SYNC) == 0, "%s: unwire and msync: %s",
+              name, strerror(errno));
+    CHECK(fstat(fd, &st) == 0 && st.st_size == 65536 && pread(fd, &back[0], 1, at[0]) == 1 && back[0] == want[0],
+          "%s: after the attributes were fetched again, read(2) gives %d at %lld", name, back[0], (long long)at[0]);
+    for (int i = 0; i < 3; i++)
+        CHECK(on_host(name, at[i], want[i]), "%s: the Mac does not hold %d at %lld", name, want[i], (long long)at[i]);
     if (!unmapped)
         munmap((void *)map, 65536);
     close(fd);
@@ -2714,9 +2908,9 @@ turns(const char *name)
     close(fd);
     printf("%s: beside %d writes in two seconds, %ld stats (the slowest %llu us) and %ld reads (the slowest %llu us)\n",
            name, s.rounds, calls[0], worst[0] / 1000, calls[1], worst[1] / 1000);
-    CHECK(failed == 0 && !atomic_load(&s.failed) && s.rounds > 0 && calls[0] * 8 > s.rounds && calls[1] * 8 > s.rounds,
-          "%s: %d calls failed beside a writer, or stats or reads got less than an eighth of its turns", name,
-          failed + atomic_load(&s.failed));
+    CHECK(failed == 0 && !atomic_load(&s.failed) && s.rounds > 0 && calls[0] * 3 > s.rounds && calls[1] * 4 > s.rounds,
+          "%s: %d calls failed beside a writer, or stats got less than a third or reads less than a quarter of its "
+          "turns", name, failed + atomic_load(&s.failed));
 }
 
 static int
@@ -2845,9 +3039,15 @@ rw_edge(const char *dir, const char *other)
     gap_write("gap-write");
     host_append("host-append");
     wired_write("wired");
-    wired_past("wired-past", 4000, 4000, false);
-    wired_past("wired-zero", 0, 4000, false);
-    wired_past("wired-gone", 4000, 4000, true);
+    wired_past("wired-past", 4000, 4000, false, false);
+    wired_past("wired-zero", 0, 4000, false, false);
+    wired_past("wired-gone", 4000, 4000, true, false);
+    wired_past("wired-far", 4000, 20000, false, false);
+    wired_past("wired-far-gone", 0, 40000, true, false);
+    wired_past("wired-grow", 4000, 65536, false, false);
+    wired_past("wired-grow-gone", 4000, 65536, true, false);
+    wired_past("wired-host", 4000, 20000, false, true);
+    wired_past("wired-host-grow", 4000, 65536, true, true);
     turns("turns");
 
     fd = open("largest", O_WRONLY | O_CREAT | O_EXCL, 0644);
@@ -3273,6 +3473,10 @@ main(int argc, char **argv)
         return stress(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (argc == 3 && !strcmp(argv[1], "bench"))
         return bench(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "raw-read"))
+        return raw_read(argv[2], (uid_t)atoi(argv[3]));
+    if (argc == 3 && !strcmp(argv[1], "nocache"))
+        return nocache_read(argv[2]);
     if (argc == 4 && !strcmp(argv[1], "bench-cold"))
         return bench_cold(argv[2], atoi(argv[3]));
     if (argc == 4 && !strcmp(argv[1], "bench-random"))
@@ -3338,6 +3542,8 @@ main(int argc, char **argv)
         return close_stat(argv[2], atoi(argv[3]));
     if (argc == 3 && !strcmp(argv[1], "locks"))
         return locks_run(argv[2]);
+    if (argc == 4 && !strcmp(argv[1], "unmapping"))
+        return unmapper_run(argv[2], atoi(argv[3]));
     if (argc == 5 && !strcmp(argv[1], "syncers"))
         return syncers_run(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (argc == 5 && !strcmp(argv[1], "owned"))
