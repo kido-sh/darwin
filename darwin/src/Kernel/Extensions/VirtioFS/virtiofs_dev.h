@@ -12,6 +12,7 @@ __BEGIN_DECLS
 
 #define VIRTIOFS_DATA_OUT  0x1
 #define VIRTIOFS_ZERO_FILL 0x2
+#define VIRTIOFS_NO_REAP   0x4
 
 struct virtiofs_dev;
 

@@ -10,6 +10,7 @@
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/pci/IOPCIDevice.h>
+#include <kern/thread_call.h>
 #include "IOVirtIOTransport.h"
 #include "virtiofs_dev.h"
 
@@ -39,13 +40,15 @@ private:
     void interruptOccurred(IOInterruptEventSource *source, int count);
     void drainLocked(unsigned q);
     void failLocked(bool broken);
-    void pauseLocked(void *event);
+    void pauseLocked(void *event, bool reap = true);
     void spinLocked(virtiofs_poll_t done, void *arg, uint32_t datalen);
     void unlockAndReap();
-    VirtioFSSlot *takeSlotLocked();
+    void deferReapLocked();
+    static void reapLater(thread_call_param_t device, thread_call_param_t unused);
+    VirtioFSSlot *takeSlotLocked(bool reap = true);
     void putSlotLocked(VirtioFSSlot *slot);
-    bool submitLocked(unsigned q, VirtioFSSlot *slot, const VirtIOChainEntry *chain, unsigned count);
-    VirtioFSSlot *fillHeaderLocked(uint32_t opcode, uint64_t nodeid, uint32_t len);
+    bool submitLocked(unsigned q, VirtioFSSlot *slot, const VirtIOChainEntry *chain, unsigned count, bool reap = true);
+    VirtioFSSlot *fillHeaderLocked(uint32_t opcode, uint64_t nodeid, uint32_t len, bool reap = true);
     VirtioFSSlot *startLocked(struct virtiofs_call *call, VirtioFSRequest *request, uint32_t uid, uint32_t gid,
                               uint32_t pid, bool async, virtiofs_done_t done, void *arg);
 
@@ -56,7 +59,9 @@ private:
     IOBufferMemoryDescriptor *fSlotMem;
     VirtioFSSlot *fSlots;
     VirtioFSSlot *fFreeSlots;
+    VirtioFSSlot *fQuietSlots;
     VirtioFSSlot *fReaped;
+    thread_call_t fReapCall;
     unsigned fSlotCount;
     unsigned fSlotWaiters;
     IOLock *fLock;
