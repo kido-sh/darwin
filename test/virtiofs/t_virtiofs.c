@@ -1906,13 +1906,13 @@ mtime_of(int fd, struct timespec *t)
     return true;
 }
 
-enum { COW_SIZE = 64 << 20, COW_SHARED = 1 << 20 };
+enum { COW_SIZE = 64 << 20, COW_SHARED = 1 << 20, COW_HALF = (COW_SIZE - COW_SHARED) / 2 };
 
 struct cow {
     int fd;
     volatile char *shared;
-    atomic_long syncs, writes, fsyncs, failures;
-    atomic_bool stop;
+    atomic_long syncs, writes, fsyncs, reads, failures;
+    atomic_bool stop, pause;
 };
 
 struct cow_syncer {
@@ -1926,6 +1926,10 @@ cow_sync_one(void *arg)
     struct cow_syncer *s = arg;
     volatile char *page = s->cow->shared + s->page * 16384;
     while (!atomic_load(&s->cow->stop)) {
+        if (atomic_load(&s->cow->pause)) {
+            usleep(1000);
+            continue;
+        }
         page[7]++;
         if (msync((void *)page, 16384, MS_SYNC) != 0)
             atomic_fetch_add(&s->cow->failures, 1);
@@ -1942,10 +1946,25 @@ cow_write(void *arg)
     unsigned seed = 1;
     memset(buf, 'w', sizeof(buf));
     while (!atomic_load(&cow->stop)) {
-        off_t at = COW_SHARED + (off_t)(rand_r(&seed) % ((COW_SIZE - COW_SHARED) / 16384)) * 16384;
+        off_t at = COW_SHARED + (off_t)(rand_r(&seed) % (COW_HALF / 16384)) * 16384;
         if (pwrite(cow->fd, buf, sizeof(buf), at) != (ssize_t)sizeof(buf))
             atomic_fetch_add(&cow->failures, 1);
         atomic_fetch_add(&cow->writes, 1);
+    }
+    return NULL;
+}
+
+static void *
+cow_read(void *arg)
+{
+    static char buf[16384];
+    struct cow *cow = arg;
+    unsigned seed = 2;
+    while (!atomic_load(&cow->stop)) {
+        off_t at = COW_SHARED + COW_HALF + (off_t)(rand_r(&seed) % (COW_HALF / 16384)) * 16384;
+        if (pread(cow->fd, buf, sizeof(buf), at) != (ssize_t)sizeof(buf))
+            atomic_fetch_add(&cow->failures, 1);
+        atomic_fetch_add(&cow->reads, 1);
     }
     return NULL;
 }
@@ -1967,7 +1986,7 @@ cow_sync(const char *path, int seconds, int count)
 {
     static struct cow cow;
     static struct cow_syncer syncers[64];
-    pthread_t tid[66];
+    pthread_t tid[67];
     if (count < 1 || count > 64) {
         printf("cow-sync takes 1 to 64 threads, not %d\n", count);
         return 1;
@@ -1991,30 +2010,40 @@ cow_sync(const char *path, int seconds, int count)
     }
     spawn(&tid[count], cow_write, &cow);
     spawn(&tid[count + 1], cow_fsync, &cow);
-    long syncs = 0, writes = 0, fsyncs = 0;
-    int still = 0, unwritten = 0;
-    for (int s = 0; s < seconds; s++) {
+    spawn(&tid[count + 2], cow_read, &cow);
+    long syncs = 0, writes = 0, fsyncs = 0, reads = 0;
+    int still = 0, unwritten = 0, stalled = 0;
+    for (int s = 0; s < seconds + 2; s++) {
+        if (s == seconds)
+            atomic_store(&cow.pause, true);
         sleep(1);
-        long ns = atomic_load(&cow.syncs), nw = atomic_load(&cow.writes), nf = atomic_load(&cow.fsyncs);
-        still += ns == syncs || nf == fsyncs;
-        unwritten += nw == writes;
+        long ns = atomic_load(&cow.syncs), nw = atomic_load(&cow.writes), nf = atomic_load(&cow.fsyncs),
+             nr = atomic_load(&cow.reads);
+        if (s < seconds) {
+            still += ns == syncs || nf == fsyncs;
+            unwritten += nw == writes;
+        } else {
+            stalled += nw == writes || nr == reads;
+        }
         syncs = ns;
         writes = nw;
         fsyncs = nf;
+        reads = nr;
     }
-    printf("%d threads storing and syncing pages of a private mapping's file beside writes over uncached pages and "
-           "fsyncs: %ld syncs, %ld writes and %ld fsyncs in %d s, %d seconds without a sync or an fsync and %d "
-           "without a write, %ld calls failed\n",
-           count, syncs, writes, fsyncs, seconds, still, unwritten, atomic_load(&cow.failures));
+    printf("%d threads storing and syncing pages of a private mapping's file beside writes and reads of uncached pages "
+           "and fsyncs: %ld syncs, %ld writes, %ld reads and %ld fsyncs, %d of %d seconds without a sync or an fsync "
+           "and %d without a write, then %d of 2 seconds with the syncs paused without a write or a read, %ld calls "
+           "failed\n",
+           count, syncs, writes, reads, fsyncs, still, seconds, unwritten, stalled, atomic_load(&cow.failures));
     atomic_store(&cow.stop, true);
     stop_within(5);
-    for (int i = 0; i <= count + 1; i++)
+    for (int i = 0; i <= count + 2; i++)
         pthread_join(tid[i], NULL);
     alarm(0);
     munmap(copy, COW_SIZE);
     munmap((void *)cow.shared, COW_SHARED);
     close(cow.fd);
-    return still || !writes || atomic_load(&cow.failures);
+    return still || stalled || atomic_load(&cow.failures);
 }
 
 static int

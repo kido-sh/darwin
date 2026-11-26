@@ -656,7 +656,7 @@ check "eight threads that store and sync, and a read into fresh pages of a mappi
   guest /tmp/t_virtiofs syncers /mnt/rw/syncers 6 8
 check "a write beside a thread that makes and removes the file's only mapping keeps going" \
   guest /tmp/t_virtiofs unmapping /mnt/rw/unmapping 6
-check "sixteen threads that store and sync, writes over uncached pages and fsyncs of a privately mapped file go on" \
+check "beside sixteen threads that store and sync a privately mapped file, its fsyncs go on, and its writes and reads go on once the syncs pause" \
   guest /tmp/t_virtiofs cow-sync /mnt/rw/cow 8 16
 check "files written and closed beside stats of them are closed on this Mac" closed_released
 check "flock and fcntl locks hold between descriptors and processes of the guest" guest /tmp/t_virtiofs locks /mnt/rw/locked
