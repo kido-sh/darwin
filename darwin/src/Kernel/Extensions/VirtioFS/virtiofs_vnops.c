@@ -2036,7 +2036,7 @@ page_settled(vnode_t vp, off_t at)
 }
 
 static int
-pageout_held(vnode_t vp, off_t first, int count, int flags)
+pageout_held(vnode_t vp, off_t first, int count, uint64_t taken, int flags)
 {
     struct virtiofs_node *np = VTON(vp);
     bool rdonly = vfs_isrdonly(vnode_mount(vp));
@@ -2045,7 +2045,8 @@ pageout_held(vnode_t vp, off_t first, int count, int flags)
     for (int i = 0; i < count; i++) {
         off_t at = first + (off_t)i * PAGE_SIZE;
         int state = 0;
-        if (ubc_page_op(vp, at, 0, NULL, &state) != KERN_SUCCESS || !(state & UPL_POP_DIRTY))
+        if ((i < 64 && (taken & (1ULL << i))) || ubc_page_op(vp, at, 0, NULL, &state) != KERN_SUCCESS ||
+            !(state & UPL_POP_DIRTY))
             continue;
         IOLockLock(np->vmp->lock);
         np->held_pushes++;
@@ -2099,13 +2100,16 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
     IOLockUnlock(np->vmp->lock);
     uint32_t slot = push_begin(np);
     bool made = ubc_create_upl(vp, ap->a_f_offset, (int)ap->a_size, &upl, &pl, kind) == KERN_SUCCESS;
-    int error = EINVAL, flags = ap->a_flags & ~UPL_NOCOMMIT;
+    int error = EINVAL, flags = ap->a_flags & ~UPL_NOCOMMIT, count = (int)(ap->a_size / PAGE_SIZE);
+    uint64_t taken = 0;
+    for (int i = 0; made && i < MIN(count, 64); i++)
+        taken |= upl_page_present(pl, i) ? 1ULL << i : 0;
     if (made)
-        error = pageout_pages(vp, upl, pl, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
+        error = pageout_pages(vp, upl, pl, ap->a_f_offset, count, flags);
     else if (!rdonly)
         push_failed(np);
     if (made && sync && (flags & UPL_IOSYNC)) {
-        int failed = pageout_held(vp, ap->a_f_offset, (int)(ap->a_size / PAGE_SIZE), flags);
+        int failed = pageout_held(vp, ap->a_f_offset, count, taken, flags);
         error = error ? error : failed;
     }
     push_end(np, slot);
