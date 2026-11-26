@@ -95,8 +95,7 @@ struct virtiofs_node {
     uint32_t flags;
     off_t leftover;
     off_t read_end;
-    uint64_t glanced_mtime;
-    uint32_t glanced_mtimensec;
+    struct fuse_attr glanced;
     uint64_t glanced_until;
     uint64_t glanced_version;
     IOLock *wlock;
@@ -457,9 +456,7 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
         .opcode = FUSE_GETATTR, .flags = applied ? 0 : VIRTIOFS_NO_REAP, .nodeid = np->nodeid,
         .arg = { &in }, .arglen = { sizeof(in) }, .reply = &out, .replylen = sizeof(out),
     };
-    IOLockLock(np->vmp->lock);
-    uint64_t version = applied ? np->vmp->version : ++np->vmp->version;
-    IOLockUnlock(np->vmp->lock);
+    uint64_t version = virtiofs_version(np->vmp);
     int error = virtiofs_call(np->vmp, ctx, &c);
     if (!error && (c.replylen != sizeof(out) || !virtiofs_attr_ok(&out.attr) ||
                    IFTOVT(out.attr.mode) != vnode_vtype(np->vp)))
@@ -472,9 +469,12 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
         return 0;
     }
     IOLockLock(np->vmp->lock);
-    if (np->attr_version <= version && np->glanced_version < version) {
-        np->glanced_mtime = out.attr.mtime;
-        np->glanced_mtimensec = out.attr.mtimensec;
+    bool kept = mach_absolute_time() < np->glanced_until && np->attr_version <= np->glanced_version;
+    if (kept && change_cmp(&np->glanced, &out.attr) > 0) {
+        reply->mtime = np->glanced.mtime;
+        reply->mtimensec = np->glanced.mtimensec;
+    } else if (np->attr_version <= version) {
+        np->glanced = out.attr;
         np->glanced_until = deadline(out.attr_valid, out.attr_valid_nsec);
         np->glanced_version = version;
     }
@@ -507,8 +507,8 @@ node_glance(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
     bool glanced = !applied && now < np->glanced_until && np->attr_version <= np->glanced_version;
     *attr = np->attr;
     if (glanced) {
-        attr->mtime = np->glanced_mtime;
-        attr->mtimensec = np->glanced_mtimensec;
+        attr->mtime = np->glanced.mtime;
+        attr->mtimensec = np->glanced.mtimensec;
     }
     IOLockUnlock(np->vmp->lock);
     if (!mapped && !applied)
