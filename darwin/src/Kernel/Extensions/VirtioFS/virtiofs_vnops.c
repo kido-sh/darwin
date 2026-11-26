@@ -1891,9 +1891,12 @@ virtiofs_vnop_pageout(struct vnop_pageout_args *ap)
     else if (!rdonly)
         push_failed(np);
     IOLockLock(np->vmp->lock);
-    if (--np->pageouts == 0)
+    bool last = --np->pageouts == 0;
+    if (last)
         wake(np, 0);
     IOLockUnlock(np->vmp->lock);
+    if (last)
+        whandle_close(np, false);
     return error;
 }
 
