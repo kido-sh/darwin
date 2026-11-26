@@ -401,6 +401,7 @@ refused_clean() {
   holder=$!
   appears "$signals/cached" && fill && touch "$signals/full" && appears "$signals/wrote" && room &&
     printf M | dd of="$full/clean" bs=1 seek=$at conv=notrunc 2>/dev/null && touch "$signals/room"
+  room
   wait $holder
   status=$?
   byte=$(dd if="$full/clean" bs=1 skip=$at count=1 2>/dev/null)

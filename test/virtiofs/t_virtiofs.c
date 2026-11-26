@@ -1885,8 +1885,10 @@ raw_read(const char *path, const char *odd, uid_t uid)
     }
     if (tail >= 0)
         close(tail);
-    close(other);
-    close(fd);
+    if (other >= 0)
+        close(other);
+    if (fd >= 0)
+        close(fd);
     return failures ? 1 : 0;
 }
 
@@ -1966,13 +1968,21 @@ cow_sync(const char *path, int seconds, int count)
     static struct cow cow;
     static struct cow_syncer syncers[64];
     pthread_t tid[66];
+    if (count < 1 || count > 64) {
+        printf("cow-sync takes 1 to 64 threads, not %d\n", count);
+        return 1;
+    }
     cow.fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
     cow.shared = cow.fd < 0 || ftruncate(cow.fd, COW_SIZE) != 0
                      ? MAP_FAILED
                      : mmap(NULL, COW_SHARED, PROT_READ | PROT_WRITE, MAP_SHARED, cow.fd, 0);
     void *copy = cow.shared == MAP_FAILED ? MAP_FAILED : mmap(NULL, COW_SIZE, PROT_READ, MAP_PRIVATE, cow.fd, 0);
-    if (copy == MAP_FAILED || count < 1 || count > 64) {
+    if (copy == MAP_FAILED) {
         printf("create and map %s: %s\n", path, strerror(errno));
+        if (cow.shared != MAP_FAILED)
+            munmap((void *)cow.shared, COW_SHARED);
+        if (cow.fd >= 0)
+            close(cow.fd);
         return 1;
     }
     for (int i = 0; i < count; i++) {
@@ -1995,8 +2005,10 @@ cow_sync(const char *path, int seconds, int count)
            "fsyncs: %ld syncs, %ld writes and %ld fsyncs in %d s, %d seconds in which one kind stood still, %ld calls "
            "failed\n", count, syncs, writes, fsyncs, seconds, still, atomic_load(&cow.failures));
     atomic_store(&cow.stop, true);
+    stop_within(5);
     for (int i = 0; i <= count + 1; i++)
         pthread_join(tid[i], NULL);
+    alarm(0);
     munmap(copy, COW_SIZE);
     munmap((void *)cow.shared, COW_SHARED);
     close(cow.fd);
