@@ -2253,9 +2253,6 @@ gethostuuid(struct proc *p, struct gethostuuid_args *uap, __unused int32_t *retv
 int
 ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 {
-#if !CONFIG_MACF
-#pragma unused(p)
-#endif
 	int rval, pid, len, error;
 	task_t task;
 	proc_t proc;
@@ -2291,6 +2288,18 @@ ledger(struct proc *p, struct ledger_args *args, __unused int32_t *retval)
 		proc = proc_find(pid);
 		if (proc == NULL) {
 			return ESRCH;
+		}
+
+		if (proc != p && !kauth_cred_issuser(kauth_cred_get())) {
+			kauth_cred_t cur_cred = kauth_cred_get();
+			kauth_cred_t target_cred = kauth_cred_proc_ref(proc);
+			bool same_uid = (kauth_cred_getuid(target_cred) == kauth_cred_getuid(cur_cred) &&
+			    kauth_cred_getruid(target_cred) == kauth_cred_getruid(cur_cred));
+			kauth_cred_unref(&target_cred);
+			if (!same_uid) {
+				proc_rele(proc);
+				return EPERM;
+			}
 		}
 
 #if CONFIG_MACF
@@ -2369,6 +2378,10 @@ int
 telemetry(__unused struct proc *p, struct telemetry_args *args, __unused int32_t *retval)
 {
 	int error = 0;
+
+	if (!kauth_cred_issuser(kauth_cred_get())) {
+		return EPERM;
+	}
 
 	switch (args->cmd) {
 #if CONFIG_TELEMETRY

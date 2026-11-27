@@ -628,6 +628,24 @@ kernelOnlyVar(const char *varName)
 	return false;
 }
 
+#if CONFIG_CSR && XNU_TARGET_OS_OSX
+static bool
+isSIPProtectedVar(const char *varName)
+{
+	return strcmp(varName, "boot-args") == 0 ||
+	       strcmp(varName, "csr-active-config") == 0 ||
+	       strcmp(varName, "csr-data") == 0 ||
+	       strcmp(varName, "boot-command") == 0 ||
+	       strcmp(varName, "boot-device") == 0 ||
+	       strcmp(varName, "boot-file") == 0 ||
+	       strcmp(varName, "nvramrc") == 0 ||
+	       strcmp(varName, "use-nvramrc?") == 0 ||
+	       strcmp(varName, "security-mode") == 0 ||
+	       strcmp(varName, "ResetNVRam") == 0 ||
+	       strcmp(varName, "ObliterateNVRam") == 0;
+}
+#endif
+
 static bool
 verifyPermission(IONVRAMOperation op, const uuid_t varGuid, const char *varName, const bool systemActive, bool log)
 {
@@ -648,6 +666,13 @@ verifyPermission(IONVRAMOperation op, const uuid_t varGuid, const char *varName,
 		ok = kernel;
 		goto exit;
 	}
+
+#if CONFIG_CSR && XNU_TARGET_OS_OSX
+	if (!kernel && (OP_MOD_RST & (1 << op)) && isSIPProtectedVar(varName) &&
+	    csr_check(CSR_ALLOW_UNRESTRICTED_NVRAM) != 0) {
+		goto exit;
+	}
+#endif
 
 	if (perm.Bits.RestoreModifyOnly && (OP_MOD & (1 << op))) {
 		DEBUG_INFO_IF(log, "RestoreModifyOnly access for %s, gRestoreBoot=%d\n", varName, gRestoreBoot);

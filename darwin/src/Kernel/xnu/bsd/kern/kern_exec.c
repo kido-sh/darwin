@@ -4670,6 +4670,12 @@ posix_spawn(proc_t ap, struct posix_spawn_args *uap, int32_t *retval)
 			goto bad;
 		}
 
+		if (psa->psa_jetsam_flags != 0 &&
+		    !kauth_cred_issuser(kauth_cred_get())) {
+			error = EPERM;
+			goto bad;
+		}
+
 		if ((psa->psa_options & PSA_OPTION_PAGEIN_TELEMETRY) == PSA_OPTION_PAGEIN_TELEMETRY) {
 			start_pagein_telemetry = true;
 		}

@@ -6475,6 +6475,12 @@ is_io_catalog_module_loaded(
 		return kIOReturnNotPrivileged;
 	}
 
+	kern_return_t kr = IOUserClient::clientHasPrivilege((void *) current_task(),
+	    kIOClientPrivilegeAdministrator);
+	if (kIOReturnSuccess != kr) {
+		return kr;
+	}
+
 	//printf("io_catalog_module_loaded called. name %s\n", name);
 
 	if (!name) {
@@ -6493,6 +6499,12 @@ is_io_catalog_reset(
 {
 	if (main_port != main_device_port) {
 		return kIOReturnNotPrivileged;
+	}
+
+	kern_return_t kr = IOUserClient::clientHasPrivilege((void *) current_task(),
+	    kIOClientPrivilegeAdministrator);
+	if (kIOReturnSuccess != kr) {
+		return kr;
 	}
 
 	switch (flag) {

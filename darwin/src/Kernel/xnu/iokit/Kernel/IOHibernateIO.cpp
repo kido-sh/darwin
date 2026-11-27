@@ -1568,16 +1568,16 @@ SYSCTL_OID_MANUAL(_kern_bridge, OID_AUTO, bootsessionuuid,
     sysctl_handle_string, "A", "");
 
 SYSCTL_UINT(_kern, OID_AUTO, hibernategraphicsready,
-    CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_ANYBODY,
+    CTLFLAG_RW | CTLFLAG_KERN,
     &_hibernateStats.graphicsReadyTime, 0, "");
 SYSCTL_UINT(_kern, OID_AUTO, hibernatewakenotification,
-    CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_ANYBODY,
+    CTLFLAG_RW | CTLFLAG_KERN,
     &_hibernateStats.wakeNotificationTime, 0, "");
 SYSCTL_UINT(_kern, OID_AUTO, hibernatelockscreenready,
-    CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_ANYBODY,
+    CTLFLAG_RW | CTLFLAG_KERN,
     &_hibernateStats.lockScreenReadyTime, 0, "");
 SYSCTL_UINT(_kern, OID_AUTO, hibernatehidready,
-    CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_ANYBODY,
+    CTLFLAG_RW | CTLFLAG_KERN,
     &_hibernateStats.hidReadyTime, 0, "");
 
 SYSCTL_UINT(_kern, OID_AUTO, hibernatecount,

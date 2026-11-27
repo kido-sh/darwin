@@ -406,6 +406,10 @@ coalition_info(proc_t p, struct coalition_info_args *uap, __unused int32_t *retv
 	uint64_t cid;
 	coalition_t coal;
 
+	if (!kauth_cred_issuser(kauth_cred_get())) {
+		return EPERM;
+	}
+
 	error = copyin(cidp, &cid, sizeof(cid));
 	if (error) {
 		return error;
@@ -415,7 +419,6 @@ coalition_info(proc_t p, struct coalition_info_args *uap, __unused int32_t *retv
 	if (coal == COALITION_NULL) {
 		return ESRCH;
 	}
-	/* TODO: priv check? EPERM or ESRCH? */
 
 	if (IS_64BIT_PROCESS(p)) {
 		user64_size_t size64;

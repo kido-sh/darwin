@@ -932,6 +932,11 @@ SInt32 IONetworkStack::orderNetworkInterfaces(
 
 IOReturn IONetworkStack::setProperties( OSObject * properties )
 {
+    if (current_task() != kernel_task &&
+        IOUserClient::clientHasPrivilege(current_task(),
+        kIOClientPrivilegeAdministrator) != kIOReturnSuccess)
+        return kIOReturnNotPrivileged;
+
     IONetworkInterface *    netif = 0;
     OSDictionary *          dict = OSDynamicCast(OSDictionary, properties);
     OSString *              path;

@@ -1397,7 +1397,7 @@ sysctl_progressoptions SYSCTL_HANDLER_ARGS
 }
 
 static SYSCTL_PROC(_kern, OID_AUTO, progressoptions,
-    CTLTYPE_STRUCT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
+    CTLTYPE_STRUCT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_progressoptions, "S,vc_progress_user_options", "");
 
 
@@ -1661,7 +1661,7 @@ sysctl_aotmode
 }
 
 static SYSCTL_PROC(_kern, OID_AUTO, aotmode,
-    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED | CTLFLAG_ANYBODY,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_KERN | CTLFLAG_LOCKED,
     NULL, 0, sysctl_aotmode, "I", "");
 
 TUNABLE_DT(uint32_t, gAOTLingerTimeMS, "/product/iopm",

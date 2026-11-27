@@ -2423,6 +2423,8 @@ ext4_vnop_ioctl(struct vnop_ioctl_args *ap)
 		 * Apple Silicon macOS boots a Signed System Volume and bsd_init()
 		 * panics if the root file system cannot vouch for its own seal.
 		 */
+		if (vfs_context_suser(ap->a_context) != 0)
+			return EPERM;
 		return 0;
 #endif
 
