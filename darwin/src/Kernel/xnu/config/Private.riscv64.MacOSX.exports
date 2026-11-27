@@ -1,4 +1,5 @@
 _aes_decrypt
+_csr_check
 _bufattr_delayidlesleep
 _mountroot_post_hook
 _unmountroot_pre_hook

@@ -17,6 +17,7 @@ extern int copyout(const void *kaddr, user_addr_t udaddr, size_t len);
 #include <kern/cs_blobs.h>
 #include <string.h>
 #include <sys/codesign.h>
+#include <sys/csr.h>
 #include <pexpert/device_tree.h>
 #include <machine/machine_routines.h>
 #include <security/mac_policy.h>
@@ -581,10 +582,164 @@ pd_amfi_policy_syscall(struct proc *p, int call, user_addr_t arg)
 	return ENOSYS;
 }
 
+static int
+pd_amfi_system_check_kas_info(kauth_cred_t cred, int selector)
+{
+	(void)cred;
+	(void)selector;
+	if (csr_check(CSR_ALLOW_TASK_FOR_PID) != 0 &&
+	    csr_check(CSR_ALLOW_UNRESTRICTED_DTRACE) != 0) {
+		return EPERM;
+	}
+	return 0;
+}
+
+static int
+pd_amfi_kext_check_load(kauth_cred_t cred, const char *identifier)
+{
+	(void)cred;
+	(void)identifier;
+	if (csr_check(CSR_ALLOW_UNTRUSTED_KEXTS) != 0) {
+		return EPERM;
+	}
+	return 0;
+}
+
+static int
+pd_amfi_kext_check_unload(kauth_cred_t cred, const char *identifier)
+{
+	(void)cred;
+	(void)identifier;
+	if (csr_check(CSR_ALLOW_UNTRUSTED_KEXTS) != 0) {
+		return EPERM;
+	}
+	return 0;
+}
+
+static int
+pd_amfi_check_target_access(struct proc_ident *pident, bool allow_self)
+{
+	proc_t target;
+	uint64_t csflags = 0;
+	int error = 0;
+
+	if (csr_check(CSR_ALLOW_TASK_FOR_PID) == 0) {
+		return 0;
+	}
+	if (pident == NULL) {
+		return EPERM;
+	}
+	target = proc_find_ident(pident);
+	if (target == NULL) {
+		return ESRCH;
+	}
+	if (allow_self && proc_pid(target) == proc_selfpid()) {
+		proc_rele(target);
+		return 0;
+	}
+	if (proc_pid(target) <= 1 || proc_isinitproc(target) != 0 ||
+	    csproc_get_platform_binary(target) != 0 ||
+	    proc_csflags(target, &csflags) != 0 ||
+	    (csflags & (CS_HARD | CS_RESTRICT | CS_RUNTIME)) != 0) {
+		error = EPERM;
+	}
+	proc_rele(target);
+	return error;
+}
+
+static int
+pd_amfi_proc_check_get_task_with_flavor(kauth_cred_t cred, struct proc_ident *pident,
+    mach_task_flavor_t flavor)
+{
+	(void)cred;
+	if (flavor == TASK_FLAVOR_NAME) {
+		return 0;
+	}
+	return pd_amfi_check_target_access(pident, true);
+}
+
+static int
+pd_amfi_proc_check_expose_task_with_flavor(kauth_cred_t cred, struct proc_ident *pident,
+    mach_task_flavor_t flavor)
+{
+	(void)cred;
+	if (flavor == TASK_FLAVOR_NAME) {
+		return 0;
+	}
+	return pd_amfi_check_target_access(pident, true);
+}
+
+static int
+pd_amfi_proc_check_task_id_token_get_task(kauth_cred_t cred, struct proc_ident *pident,
+    mach_task_flavor_t flavor)
+{
+	(void)cred;
+	if (flavor == TASK_FLAVOR_NAME) {
+		return 0;
+	}
+	return pd_amfi_check_target_access(pident, true);
+}
+
+static int
+pd_amfi_proc_check_debug(kauth_cred_t cred, struct proc_ident *pident)
+{
+	(void)cred;
+	return pd_amfi_check_target_access(pident, false);
+}
+
+static int
+pd_amfi_proc_check_run_cs_invalid(struct proc *p)
+{
+	(void)p;
+	if (csr_check(CSR_ALLOW_TASK_FOR_PID) != 0) {
+		return EPERM;
+	}
+	return 0;
+}
+
+static int
+pd_amfi_proc_check_set_host_exception_port(kauth_cred_t cred, unsigned int exception)
+{
+	(void)cred;
+	(void)exception;
+	if (proc_selfpid() <= 1) {
+		return 0;
+	}
+	if (csr_check(CSR_ALLOW_TASK_FOR_PID) != 0) {
+		return EPERM;
+	}
+	return 0;
+}
+
+static int
+pd_amfi_proc_check_set_host_special_port(kauth_cred_t cred, int id, struct ipc_port *port)
+{
+	(void)cred;
+	(void)id;
+	(void)port;
+	if (proc_selfpid() <= 1) {
+		return 0;
+	}
+	if (csr_check(CSR_ALLOW_TASK_FOR_PID) != 0) {
+		return EPERM;
+	}
+	return 0;
+}
+
 static struct mac_policy_ops pd_amfi_ops = {
 	.mpo_vnode_check_signature = pd_amfi_vnode_check_signature,
 	.mpo_priv_grant = pd_amfi_priv_grant,
 	.mpo_policy_syscall = pd_amfi_policy_syscall,
+	.mpo_system_check_kas_info = pd_amfi_system_check_kas_info,
+	.mpo_kext_check_load = pd_amfi_kext_check_load,
+	.mpo_kext_check_unload = pd_amfi_kext_check_unload,
+	.mpo_proc_check_get_task_with_flavor = pd_amfi_proc_check_get_task_with_flavor,
+	.mpo_proc_check_expose_task_with_flavor = pd_amfi_proc_check_expose_task_with_flavor,
+	.mpo_proc_check_task_id_token_get_task = pd_amfi_proc_check_task_id_token_get_task,
+	.mpo_proc_check_debug = pd_amfi_proc_check_debug,
+	.mpo_proc_check_run_cs_invalid = pd_amfi_proc_check_run_cs_invalid,
+	.mpo_proc_check_set_host_exception_port = pd_amfi_proc_check_set_host_exception_port,
+	.mpo_proc_check_set_host_special_port = pd_amfi_proc_check_set_host_special_port,
 };
 
 // Apple's Quarantine policy: cfprefsd exits(-2) on ENOPOLICY and exits(-1) on ENOATTR for

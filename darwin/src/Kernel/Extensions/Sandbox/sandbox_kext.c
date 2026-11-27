@@ -17,6 +17,7 @@
 #include <sys/vnode.h>
 #include <sys/fcntl.h>
 #include <sys/stat.h>
+#include <sys/csr.h>
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -792,6 +793,27 @@ sb_vnode_check_setowner(kauth_cred_t cred, struct vnode *vp, struct label *label
 static int
 sb_vnode_check_setflags(kauth_cred_t cred, struct vnode *vp, struct label *label, u_long flags)
 {
+	struct vnode_attr va;
+	u_long cur_flags;
+
+	(void)label;
+	if (vp == NULL) {
+		return EPERM;
+	}
+	VATTR_INIT(&va);
+	VATTR_WANTED(&va, va_flags);
+	if (vnode_getattr(vp, &va, vfs_context_kernel()) != 0 ||
+	    !VATTR_IS_SUPPORTED(&va, va_flags)) {
+		return EPERM;
+	}
+	cur_flags = va.va_flags;
+	if (((flags | cur_flags) & UF_DATAVAULT) != 0) {
+		return EPERM;
+	}
+	if (((flags | cur_flags) & SF_RESTRICTED) != 0 &&
+	    csr_check(CSR_ALLOW_UNRESTRICTED_FS) != 0) {
+		return EPERM;
+	}
 	return sb_check_vnode(cred, vp, SB_OP_FILE_WRITE_ATTR);
 }
 
