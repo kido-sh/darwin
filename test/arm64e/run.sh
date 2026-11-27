@@ -35,6 +35,7 @@ flags=(-mmacosx-version-min=13.0 -O1)
 for arch in arm64e arm64; do
   xcrun clang -arch $arch "${flags[@]}" -o "$work/t_pac-$arch" "$here/t_pac.c" || exit 1
   xcrun clang -arch $arch "${flags[@]}" -o "$work/t_hardening-$arch" "$here/t_hardening.c" || exit 1
+  xcrun clang -arch $arch "${flags[@]}" -o "$work/t_isa-$arch" "$here/t_isa.c" || exit 1
   xcrun clang -arch $arch "${flags[@]}" -dynamiclib -o "$work/libt_atexit-$arch.dylib" "$here/t_atexit_lib.c" || exit 1
   xcrun clang -arch $arch "${flags[@]}" -o "$work/t_atexit-$arch" "$here/t_atexit.c" || exit 1
   xcrun clang++ -arch $arch "${flags[@]}" -std=c++17 -fno-exceptions -fno-objc-arc \
@@ -48,11 +49,12 @@ rc=0
 run() {
   timed "$kido" exec arm64e-test "$@" || rc=1
 }
-for f in "$work"/t_pac-* "$work"/t_hardening-* "$work"/libt_atexit-* "$work"/t_atexit-* "$work"/t_objcxx-* "$work/t_daemons"; do
+for f in "$work"/t_pac-* "$work"/t_hardening-* "$work"/t_isa-* "$work"/libt_atexit-* "$work"/t_atexit-* "$work"/t_objcxx-* "$work/t_daemons"; do
   "$kido" cp "$f" arm64e-test:/var/root/ || rc=1
 done
 for arch in arm64e arm64; do
   run /var/root/t_pac-$arch
+  run /var/root/t_isa-$arch
   run /var/root/t_atexit-$arch /var/root/libt_atexit-$arch.dylib
   run /var/root/t_objcxx-$arch
 done
