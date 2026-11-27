@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <sys/vnode.h>
 #include <sys/proc.h>
+#include <sys/kauth.h>
 #include <sys/errno.h>
 
 // sys/systm.h drags in libkern.h, which does not build after stdio.h here
@@ -50,7 +51,7 @@ pd_amfi_OSEntitlements_query(void *osentitlements, uint8_t cdhash[CS_CDHASH_LEN]
 	(void)cdhash;
 	(void)query;
 	(void)queryLength;
-	return (CEError_t)0;
+	return (CEError_t)(uintptr_t)1;
 }
 
 static bool
@@ -500,43 +501,84 @@ static const struct {
 	{ 1008, "com.apple.private.kernel.work-interval" },     // PRIV_WORK_INTERVAL: WindowServer
 };
 
+#define PD_AMFI_DYLD_INPUT_PROC_HAS_RESTRICT_SEG        (1ULL << 2)
+#define PD_AMFI_DYLD_OUTPUT_ALLOW_AT_PATH               (1ULL << 0)
+#define PD_AMFI_DYLD_OUTPUT_ALLOW_PATH_VARS             (1ULL << 1)
+#define PD_AMFI_DYLD_OUTPUT_ALLOW_CUSTOM_SHARED_CACHE   (1ULL << 2)
+#define PD_AMFI_DYLD_OUTPUT_ALLOW_FALLBACK_PATHS        (1ULL << 3)
+#define PD_AMFI_DYLD_OUTPUT_ALLOW_PRINT_VARS            (1ULL << 4)
+#define PD_AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING   (1ULL << 6)
+
 static int
 pd_amfi_priv_grant(kauth_cred_t cred, int priv)
 {
-	proc_t p = proc_self();
+	const char *entitlement = NULL;
+	proc_t p;
+	kauth_cred_t pcred;
 	int error = EPERM;
 
-	(void)cred;
-	if (p == NULL) {
+	if (cred == NULL) {
 		return EPERM;
 	}
 	for (size_t i = 0; i < sizeof(pd_amfi_priv_entitlements) / sizeof(pd_amfi_priv_entitlements[0]); i++) {
-		if (pd_amfi_priv_entitlements[i].priv == priv &&
-		    pd_amfi_entitlement_is_true(p, pd_amfi_priv_entitlements[i].entitlement)) {
-			error = 0;
+		if (pd_amfi_priv_entitlements[i].priv == priv) {
+			entitlement = pd_amfi_priv_entitlements[i].entitlement;
 			break;
 		}
+	}
+	if (entitlement == NULL) {
+		return EPERM;
+	}
+	p = proc_self();
+	if (p == NULL) {
+		return EPERM;
+	}
+	pcred = kauth_cred_proc_ref(p);
+	if (pcred == cred && csproc_get_platform_binary(p) != 0 &&
+	    pd_amfi_entitlement_is_true(p, entitlement)) {
+		error = 0;
+	}
+	if (pcred != NULL) {
+		kauth_cred_unref(&pcred);
 	}
 	proc_rele(p);
 	return error;
 }
 
-// __mac_syscall("AMFI", ...): 90 is dyld's amfi_check_dyld_policy_self {input flags, output ptr}
 static int
 pd_amfi_policy_syscall(struct proc *p, int call, user_addr_t arg)
 {
-	(void)p;
 	if (call == 90) {
 		uint64_t args[2];
-		uint64_t allow = ~0ull;         // Same grant as PureDarwin's own dyld stub
+		uint64_t csflags = 0;
+		uint64_t allow = 0;
 		int error = copyin(arg, args, sizeof(args));
 
-		if (error == 0 && args[1] != 0) {
+		if (error != 0) {
+			return error;
+		}
+		if (p != NULL && proc_csflags(p, &csflags) == 0 &&
+		    proc_issetugid(p) == 0 &&
+		    (args[0] & PD_AMFI_DYLD_INPUT_PROC_HAS_RESTRICT_SEG) == 0 &&
+		    (csflags & CS_RESTRICT) == 0) {
+			if ((csflags & (CS_REQUIRE_LV | CS_RUNTIME)) != 0 ||
+			    csproc_get_platform_binary(p) != 0) {
+				allow = PD_AMFI_DYLD_OUTPUT_ALLOW_AT_PATH;
+			} else {
+				allow = PD_AMFI_DYLD_OUTPUT_ALLOW_AT_PATH |
+				    PD_AMFI_DYLD_OUTPUT_ALLOW_PATH_VARS |
+				    PD_AMFI_DYLD_OUTPUT_ALLOW_CUSTOM_SHARED_CACHE |
+				    PD_AMFI_DYLD_OUTPUT_ALLOW_FALLBACK_PATHS |
+				    PD_AMFI_DYLD_OUTPUT_ALLOW_PRINT_VARS |
+				    PD_AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING;
+			}
+		}
+		if (args[1] != 0) {
 			error = copyout(&allow, (user_addr_t)args[1], sizeof(allow));
 		}
 		return error;
 	}
-	return 0;
+	return ENOSYS;
 }
 
 static struct mac_policy_ops pd_amfi_ops = {

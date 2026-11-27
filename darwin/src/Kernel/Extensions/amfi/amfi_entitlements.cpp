@@ -3,6 +3,7 @@
 
 #include <sys/types.h>
 #include <sys/proc.h>
+#include <kern/cs_blobs.h>
 #include <libkern/c++/OSBoolean.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSDictionary.h>
@@ -12,6 +13,8 @@
 extern "C" {
 struct cs_blob;
 struct cs_blob *csproc_get_blob(struct proc *p);
+int csblob_get_platform_binary(struct cs_blob *csblob);
+unsigned int csblob_get_flags(struct cs_blob *csblob);
 int csblob_get_entitlements(struct cs_blob *csblob, void **out_start, size_t *out_length);
 
 OSObject *pd_amfi_copy_entitlement(proc_t proc, const char *name);
@@ -25,11 +28,20 @@ static const size_t kBlobHeader = 8;
 static OSDictionary *
 pd_amfi_copy_entitlements(proc_t proc)
 {
+	uint64_t pflags = 0;
+
+	if (proc == NULL || proc_csflags(proc, &pflags) != 0 ||
+	    (pflags & CS_VALID) == 0) {
+		return NULL;
+	}
+
 	struct cs_blob *blob = csproc_get_blob(proc);
 	void *start = NULL;
 	size_t length = 0;
 
-	if (blob == NULL || csblob_get_entitlements(blob, &start, &length) != 0 ||
+	if (blob == NULL || !csblob_get_platform_binary(blob) ||
+	    (csblob_get_flags(blob) & (CS_VALID | CS_PLATFORM_BINARY)) != (CS_VALID | CS_PLATFORM_BINARY) ||
+	    csblob_get_entitlements(blob, &start, &length) != 0 ||
 	    start == NULL || length <= kBlobHeader) {
 		return NULL;
 	}
@@ -54,6 +66,9 @@ pd_amfi_copy_entitlements(proc_t proc)
 OSObject *
 pd_amfi_copy_entitlement(proc_t proc, const char *name)
 {
+	if (name == NULL) {
+		return NULL;
+	}
 	OSDictionary *dict = pd_amfi_copy_entitlements(proc);
 	OSObject *value = NULL;
 
