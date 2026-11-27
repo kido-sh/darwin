@@ -64,10 +64,12 @@ static bool pd_platform_is_bcm283x(void);
 static int
 pdArmHaltRestart(unsigned int type)
 {
+#if DEVELOPMENT || DEBUG
 	uint32_t log = 0;
 
 	if (PE_parse_boot_argn("pdhaltlog", &log, sizeof(log)) && log != 0)
 		IOLog("pdhaltlog: psci handler, type %u\n", type);
+#endif
 	if (type == kPERestartCPU) return PDArmCPU::systemReset(false);
 	if (type == kPEHaltCPU) return PDArmCPU::systemReset(true);
 	if (type == kPEPanicRestartCPU) return PDArmCPU::hypervisorPowerOff();

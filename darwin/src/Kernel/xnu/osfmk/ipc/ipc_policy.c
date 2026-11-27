@@ -75,15 +75,7 @@ extern int  exit_with_guard_exception(
 extern const vm_size_t  ipc_kmsg_max_vm_space;
 
 #if IPC_HAS_LEGACY_MACH_MSG_TRAP
-/*
- * PureDarwin's entire vendored userland (dyld-832, launchd-842-era, and
- * everything else) predates Apple's mach_msg2 migration and still relies on
- * the classic mach_msg_trap() calling convention throughout. Apple's own
- * bincompat allowlist below only covers a handful of hardcoded msgids;
- * default this on for this fork instead of allowlisting every legacy MIG
- * call as each one is discovered.
- */
-static TUNABLE(bool, allow_legacy_mach_msg, "allow_legacy_mach_msg", true);
+static TUNABLE(bool, allow_legacy_mach_msg, "allow_legacy_mach_msg", false);
 #endif /* IPC_HAS_LEGACY_MACH_MSG_TRAP */
 
 /* Note: Consider Developer Mode when changing the default. */

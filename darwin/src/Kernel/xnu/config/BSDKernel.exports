@@ -859,7 +859,6 @@ _wakeup
 _wakeup_one
 _xattr_protected
 _xattr_validatename
-_pd_cdev_mmap_register
 _pd_lfile_get
 _pd_lfile_install
 _pd_lfile_register

@@ -1050,7 +1050,9 @@ halt_log_enter(const char * what, const void * pc, uint64_t time)
 
 extern  uint32_t                           gFSState;
 
+#if DEVELOPMENT || DEBUG
 extern "C" int pd_halt_log_enabled(void);
+#endif
 
 extern "C" void
 IOSystemShutdownNotification(int howto, int stage)
@@ -1098,8 +1100,10 @@ IOSystemShutdownNotification(int howto, int stage)
 	startTime = mach_absolute_time();
 	IOPMRootDomainWillShutdown();
 	halt_log_enter("IOPMRootDomainWillShutdown", NULL, mach_absolute_time() - startTime);
+#if DEVELOPMENT || DEBUG
 	if (pd_halt_log_enabled())
 		printf("pdhaltlog: root domain will-shutdown done\n");
+#endif
 #if HIBERNATION
 	startTime = mach_absolute_time();
 	IOHibernateSystemPostWake(true);
@@ -1108,8 +1112,10 @@ IOSystemShutdownNotification(int howto, int stage)
 	if (OSCompareAndSwap(0, 1, &gPagingOff)) {
 		gRootDomain->handlePlatformHaltRestart(kPEPagingOff);
 	}
+#if DEVELOPMENT || DEBUG
 	if (pd_halt_log_enabled())
 		printf("pdhaltlog: paging-off notification done\n");
+#endif
 }
 
 extern "C" int sync_internal(void);

@@ -84,8 +84,7 @@ __XNU_PRIVATE_EXTERN    int             syscalls_log[SYS_MAXSYSCALL];
 extern int mach_trap_count;
 #endif
 
-// pdflushlog=SECS: SIGTERM logd every SECS so it writes its buffers out (launchd restarts it).
-// A VM that is quit rather than shut down otherwise loses the minutes before
+#if DEVELOPMENT || DEBUG
 extern void IOLog(const char *, ...) __printflike(1, 2);
 
 static int
@@ -248,6 +247,7 @@ pd_syserr_log(struct proc *proc, unsigned short code, int error, const uint64_t 
 	}
 	IOLog("PD-syserr: %s[%d] sys %u err %d arg0 0x%llx\n", proc->p_comm, proc_getpid(proc), code, error, arg0);
 }
+#endif
 
 /*
  * Function:	unix_syscall
@@ -269,8 +269,10 @@ unix_syscall(
 	struct uthread *uthread = get_bsdthread_info(thread_act);
 
 	uthread_reset_proc_refcount(uthread);
+#if DEVELOPMENT || DEBUG
 	pd_flush_logd_check();
 	pd_stack_check();
+#endif
 
 	code = arm_get_syscall_number(state);
 
@@ -352,11 +354,12 @@ unix_syscall(
 	AUDIT_SYSCALL_ENTER(code, proc, uthread);
 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
-	// a thread whose task has no proc yet (or any more) has nothing to name: both loggers read p_comm
+#if DEVELOPMENT || DEBUG
 	if (__improbable(proc != NULL && error != 0))
 		pd_syserr_log(proc, code, error, (const uint64_t *)&uthread->uu_arg[0]);
 	else if (__improbable(proc != NULL && (code == SYS_sysctl || code == SYS_sysctlbyname)))
 		pd_sysctl_log(proc, code, (const uint64_t *)&uthread->uu_arg[0]);
+#endif
 
 #if CONFIG_MACF
 skip_syscall:

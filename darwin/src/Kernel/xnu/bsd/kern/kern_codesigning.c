@@ -215,8 +215,7 @@ code_signing_configuration(
 #endif /* CONFIG_SPTM */
 #endif /* CODE_SIGNING_MONITOR */
 
-// PureDarwin's virt board runs a modified Apple userland: honor the exemptions in release too
-#if DEVELOPMENT || DEBUG || defined(ARM64_BOARD_CONFIG_VIRT)
+#if DEVELOPMENT || DEBUG
 	/*
 	 * We only ever need to parse for boot-args based exemption state on DEVELOPMENT
 	 * or DEBUG builds as this state is not respected by any code signing component

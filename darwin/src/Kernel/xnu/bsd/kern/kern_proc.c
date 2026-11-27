@@ -3695,9 +3695,9 @@ csops_copy_token(const void *start, size_t length, user_size_t usize, user_addr_
 	return copyout(start, uaddr, length);
 }
 
+#if DEVELOPMENT || DEBUG
 extern void IOLog(const char *format, ...) __printflike(1, 2);
 
-// pdcsops=name[,name]: log the code signing queries a listed process makes or is the target of (400 lines)
 static bool
 pd_csops_listed(const char *name, const char *list)
 {
@@ -3737,6 +3737,7 @@ pd_csops_log(proc_t pt, int ops, int error, bool token)
 	    proc_getpid(self), ops, token ? " (audit token)" : "", target, proc_getpid(pt), error,
 	    (uint32_t)proc_getcsflags(pt), csproc_get_platform_binary(pt), team ? team : "-");
 }
+#endif
 
 static int
 csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user_addr_t uaudittoken)
@@ -4238,7 +4239,9 @@ csops_internal(pid_t pid, int ops, user_addr_t uaddr, user_size_t usersize, user
 		break;
 	}
 out:
+#if DEVELOPMENT || DEBUG
 	pd_csops_log(pt, ops, error, uaudittoken != USER_ADDR_NULL);
+#endif
 	proc_rele(pt);
 	return error;
 }

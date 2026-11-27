@@ -184,7 +184,7 @@ extern int vm_swapfile_create_thread_running;
 extern int vm_swapfile_gc_thread_running;
 extern uint32_t cl_sparse_push_error;
 
-// pdhaltlog=1 prints each step of a reboot or halt, to find where one stops
+#if DEVELOPMENT || DEBUG
 int pd_halt_log_enabled(void);
 
 int
@@ -198,6 +198,9 @@ pd_halt_log_enabled(void)
 }
 
 #define PD_HALT_STEP(...) do { if (pd_halt_log_enabled()) printf("pdhaltlog: " __VA_ARGS__); } while (0)
+#else
+#define PD_HALT_STEP(...) do {} while (0)
+#endif
 
 int
 reboot_kernel(int howto, char *message)

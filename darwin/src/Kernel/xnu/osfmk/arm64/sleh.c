@@ -1359,18 +1359,6 @@ handle_uncategorized(arm_saved_state_t *state)
 
 	COPYIN(get_saved_state_pc(state), (char *)&instr, sizeof(instr));
 
-	// A PACGA another CPU rewrote to MOV Xd, XZR (below) after this one trapped on it: the
-	// trap is for the old instruction, so do what the new one does. MOV never traps on its own
-	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state)) && (instr & 0xFFFFFFE0U) == 0xAA1F03E0U) {
-		uint32_t rd = instr & 0x1F;
-
-		if (rd != 31) {
-			saved_state64(state)->x[rd] = 0;
-		}
-		saved_state64(state)->pc += 4;
-		return;
-	}
-
 	/*
 	 * Register-form PAC/XPAC (PACxx/AUTxx/XPACI/XPACD). PAuth is left off
 	 * below EL2 by the loader so these trap here rather than running against
@@ -1399,25 +1387,16 @@ handle_uncategorized(arm_saved_state_t *state)
 		return;
 	}
 
-	// PACGA Xd, Xn, Xm: sign/verify pairs only need the same code, zero keeps them agreeing
-	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state)) &&
+	if (PSR64_IS_USER64(get_saved_state_cpsr(state)) &&
 	    (instr & 0xFFE0FC00) == 0x9AC03000) {
 		uint32_t rd = instr & 0x1F;
-		uint64_t pc = get_saved_state_pc(state);
-		ppnum_t pn = pmap_find_phys(vm_map_pmap(current_map()), pc);
 
-		if (rd != 31) {
+		if (rd < 29) {
 			saved_state64(state)->x[rd] = 0;
-		}
-		// a zero code (an input hash broke Foundation), and the site is rewritten to MOV Xd, XZR
-		// in the backing page so it traps once system-wide. Executed code only, never data
-		if (pn != 0) {
-			volatile uint32_t *w = (volatile uint32_t *)phystokv(ptoa(pn) + (pc & PAGE_MASK));
-
-			if (*w == instr) {
-				*w = 0xAA1F03E0U | rd;
-				cache_sync_page(pn);
-			}
+		} else if (rd == 29) {
+			saved_state64(state)->fp = 0;
+		} else if (rd == 30) {
+			saved_state64(state)->lr = 0;
 		}
 		saved_state64(state)->pc += 4;
 		return;
@@ -1938,10 +1917,9 @@ find_user_brk_descriptor_by_comment(uint16_t comment)
 	return NULL;
 }
 
-// pdbrklog=NAME: a user brk in a process whose name starts with NAME dumps its registers and
-// any string they point at (directly or once removed), where libxpc and Swift leave their reason
 extern void IOLog(const char *, ...) __printflike(1, 2);
 
+#if DEVELOPMENT || DEBUG
 static int
 pd_brk_str(user_addr_t a, char *out, size_t len)
 {
@@ -2253,6 +2231,7 @@ pd_stack_check(void)
 	deadline = mach_absolute_time() + period;
 	state = 1;
 }
+#endif
 
 static void
 handle_user_breakpoint(arm_saved_state_t *state, uint64_t esr __unused)
@@ -2271,7 +2250,9 @@ handle_user_breakpoint(arm_saved_state_t *state, uint64_t esr __unused)
 		printf("User BRK pid %d pc=0x%llx label=0x%x%s\n",
 		    proc_pid(current_proc()), get_saved_state_pc(state), brk_label,
 		    (descriptor && descriptor->base == PTRAUTH_TRAP_START) ? " (PAC trap)" : "");
+#if DEVELOPMENT || DEBUG
 		pd_brk_dump(state);
+#endif
 		/*
 		 * Note it's no problem if we don't recognize the label.
 		 * In this case we'll just go through normal exception delivery.
@@ -2825,7 +2806,9 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 #endif
 
 	codes[1] = fault_addr;
+#if DEVELOPMENT || DEBUG
 	pd_fault_dump(state, esr, fault_addr, (kern_return_t)codes[0]);
+#endif
 #if __has_feature(ptrauth_calls) || HAS_USER_PAC
 	bool is_data_abort = (ESR_EC(esr) == ESR_EC_DABORT_EL0);
 	if (user_fault_matches_pac_error_code(fault_addr, get_saved_state_pc(state), is_data_abort)) {
@@ -3775,7 +3758,9 @@ handle_user_pac_fail(arm_saved_state_t *state, uint64_t esr)
 	IOLog("PAC failure in user pid %d (%s) at pc=0x%llx lr=0x%llx esr=0x%llx instr=0x%08x\n",
 	    proc_pid(current_proc()), proc_best_name(current_proc()), get_saved_state_pc(state),
 	    get_saved_state_lr(state), esr, instr);
+#if DEVELOPMENT || DEBUG
 	pd_fault_dump(state, esr, get_saved_state_pc(state), KERN_FAILURE);
+#endif
 	exception_triage(exception, codes, 2);
 	__builtin_unreachable();
 }

@@ -278,8 +278,11 @@ collectth_state(thread_t th_act, void *tirp)
 	t->hoffset = hoffset;
 }
 
-// PureDarwin logs core dumps in release kernels too, a dump that fails quietly leaves a crash with no trace
+#if DEVELOPMENT || DEBUG
 #define COREDUMPLOG(fmt, args...) printf("coredump (%s, pid %d): " fmt "\n", core_proc->p_comm, proc_getpid(core_proc), ## args)
+#else
+#define COREDUMPLOG(fmt, args...) do {} while (0)
+#endif
 
 /*
  * LC_NOTE support for userspace coredumps.

@@ -157,8 +157,7 @@
 #include <vfs/vfs_disk_conditioner.h>
 #include <libkern/section_keywords.h>
 
-// pdvntrace=NAME: every iocount change of the device vnode NAME (e.g. disk4s1), with the caller's
-// kernel frames, kept in a ring and printed when an unmount waits on that vnode (vnode_drain)
+#if DEVELOPMENT || DEBUG
 #define PD_VN_RING 256
 #define PD_VN_FRAMES 10
 static struct pd_vn_rec {
@@ -168,9 +167,13 @@ static struct pd_vn_rec {
 } pd_vn_ring[PD_VN_RING];
 static unsigned pd_vn_next;
 static char pd_vn_want[32];
-static int pd_vn_state;	// 0 unparsed, 1 on, 2 off
+static int pd_vn_state;
 static void pd_vn_trace(vnode_t vp, int delta);
 static void pd_vn_dump(vnode_t vp);
+#else
+#define pd_vn_trace(vp, delta) ((void)0)
+#define pd_vn_dump(vp) ((void)0)
+#endif
 
 
 static LCK_GRP_DECLARE(vnode_lck_grp, "vnode");
@@ -2883,8 +2886,10 @@ done:
  * that are found.
  */
 
+#if DEVELOPMENT || DEBUG
 int pd_halt_log_enabled(void);
 extern void IOLog(const char *format, ...) __printflike(1, 2);
+#endif
 
 int
 vflush(struct mount *mp, struct vnode *skipvp, int flags)
@@ -2946,8 +2951,8 @@ loop:
 		// If vnode is already terminating, wait for it...
 		while (vp->v_id == vid && ISSET(vp->v_lflag, VL_TERMINATE)) {
 			vp->v_lflag |= VL_TERMWANT;
+#if DEVELOPMENT || DEBUG
 			if (pd_halt_log_enabled()) {
-				// pdhaltlog: a reclaim that never ends blocks unmount, name the vnode every 10 s
 				struct timespec ts = { 10, 0 };
 
 				if (msleep(&vp->v_lflag, &vp->v_lock, PVFS, "vflush", &ts) == EWOULDBLOCK)
@@ -2955,7 +2960,9 @@ loop:
 					    "kusecount %d numoutput %d lflag 0x%x flag 0x%x\n", vp->v_name ? vp->v_name : "(none)",
 					    vp->v_type, vp->v_tag, mp->mnt_vfsstat.f_mntonname, vp->v_iocount, vp->v_usecount,
 					    vp->v_kusecount, vp->v_numoutput, vp->v_lflag, vp->v_flag);
-			} else {
+			} else
+#endif
+			{
 				msleep(&vp->v_lflag, &vp->v_lock, PVFS, "vflush", NULL);
 			}
 		}
@@ -6772,8 +6779,8 @@ vnode_drain(vnode_t vp)
 				vp->v_iocount = 1;
 				break;
 			}
+#if DEVELOPMENT || DEBUG
 		} else if (pd_halt_log_enabled()) {
-			// pdhaltlog: an iocount that never drops blocks unmount, name the vnode every 10 s
 			struct timespec ts = { 10, 0 };
 
 			if (msleep(&vp->v_iocount, &vp->v_lock, PVFS, "vnode_drain", &ts) == EWOULDBLOCK)
@@ -6783,6 +6790,7 @@ vnode_drain(vnode_t vp)
 				    "kusecount %d numoutput %d lflag 0x%x flag 0x%x\n", vp->v_name ? vp->v_name : "(none)",
 				    vp->v_type, vp->v_tag, vp->v_mount ? vp->v_mount->mnt_vfsstat.f_mntonname : "(none)",
 				    vp->v_iocount, vp->v_usecount, vp->v_kusecount, vp->v_numoutput, vp->v_lflag, vp->v_flag);
+#endif
 		} else {
 			msleep(&vp->v_iocount, &vp->v_lock, PVFS, "vnode_drain", NULL);
 		}
@@ -13619,6 +13627,7 @@ vnode_isappendonly(vnode_t vp)
 	return os_atomic_load(&vp->v_ext_flag, relaxed) & VE_APPENDONLY;
 }
 
+#if DEVELOPMENT || DEBUG
 static void
 pd_vn_trace(vnode_t vp, int delta)
 {
@@ -13638,7 +13647,6 @@ pd_vn_trace(vnode_t vp, int delta)
 	backtrace(r->bt, PD_VN_FRAMES, NULL, NULL);
 }
 
-// the recorded changes, oldest first: frames unslid and in decimal, so the console does not redact them
 static void
 pd_vn_dump(vnode_t vp)
 {
@@ -13660,3 +13668,4 @@ pd_vn_dump(vnode_t vp)
 		IOLog("pdvntrace: %+d -> %d %s[%d]%s\n", r->delta, r->iocount, r->comm, r->pid, line);
 	}
 }
+#endif
