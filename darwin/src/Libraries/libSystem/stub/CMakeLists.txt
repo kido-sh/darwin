@@ -320,6 +320,10 @@ target_link_options(libSystem_B_stub PRIVATE
     -Wl,-order_file,${LIBDISPATCH_ORDER}
     # libdispatch.aliases: the munmap destructor is the vm_deallocate one under mach
     -Wl,-alias,__dispatch_data_destructor_vm_deallocate,__dispatch_data_destructor_munmap
+    -Wl,-alias,_dispatch_assert_queue$V2,_dispatch_assert_queue
+    -Wl,-alias,_dispatch_assert_queue_not$V2,_dispatch_assert_queue_not
+    -Wl,-alias,_dispatch_queue_create_with_target$V2,_dispatch_queue_create_with_target
+    -Wl,-alias,_sched_yield,_pthread_yield_np
     -Wl,-dead_strip
     -Wl,-fixup_chains
     -Wl,-exported_symbols_list,${_libsystem_exports_for_link})
