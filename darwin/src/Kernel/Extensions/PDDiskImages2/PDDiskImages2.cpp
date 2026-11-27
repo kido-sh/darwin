@@ -5,6 +5,7 @@
 #include <IOKit/storage/IOStorage.h>
 #include <IOKit/storage/IOStorageProtocolCharacteristics.h>
 #include <IOKit/storage/IOStorageDeviceCharacteristics.h>
+#include <kern/task.h>
 
 OSDefineMetaClassAndStructors(AppleDiskImagesController, IOService);
 OSDefineMetaClassAndStructors(AppleDiskImageDevice, IOBlockStorageDevice);
@@ -27,7 +28,31 @@ enum {
 	kDIConnectLength = 0x10,
 	kDIConnectReadOnly = 0x3e,
 	kDIMaxTransfer = 0x200000,
+	kDIMinBlockSize = 512,
+	kDIMaxBlockSize = 65536,
 };
+
+static const UInt64 kDIMaxBackingBytes = 1ULL << 30;
+
+static bool
+validGeometry(UInt64 blocks, UInt32 blockSize, UInt64 *totalBytes)
+{
+	UInt64 total = 0;
+
+	if (blocks == 0 || blockSize < kDIMinBlockSize || blockSize > kDIMaxBlockSize) {
+		return false;
+	}
+	if ((blockSize & (blockSize - 1)) != 0) {
+		return false;
+	}
+	if (__builtin_mul_overflow(blocks, (UInt64)blockSize, &total) || total > kDIMaxBackingBytes) {
+		return false;
+	}
+	if (totalBytes != NULL) {
+		*totalBytes = total;
+	}
+	return true;
+}
 
 bool
 AppleDiskImagesController::start(IOService *provider)
@@ -45,12 +70,16 @@ AppleDiskImageDevice::initWithParams(UInt64 blocks, UInt32 blockSize, bool ram, 
 {
 	char uuid[37];
 	OSDictionary *proto;
+	UInt64 totalBytes = 0;
 
-	if (blocks == 0 || blockSize == 0 || !init(NULL)) {
+	if (!validGeometry(blocks, blockSize, &totalBytes) || !init(NULL)) {
 		return false;
 	}
 	fBlocks = blocks;
+	fTotalBytes = totalBytes;
 	fBlockSize = blockSize;
+	fConnecting = false;
+	fIOClient = NULL;
 	fLock = IOLockAlloc();
 	if (fLock == NULL) {
 		return false;
@@ -88,38 +117,91 @@ AppleDiskImageDevice::initWithParams(UInt64 blocks, UInt32 blockSize, bool ram, 
 	return true;
 }
 
+bool
+AppleDiskImageDevice::handleOpen(IOService *forClient, IOOptionBits options, void *arg)
+{
+	if (OSDynamicCast(DIDeviceIOUserClient, forClient) != NULL) {
+		if (fIOClient != NULL) {
+			return false;
+		}
+		fIOClient = forClient;
+		return true;
+	}
+	return IOBlockStorageDevice::handleOpen(forClient, options, arg);
+}
+
+void
+AppleDiskImageDevice::handleClose(IOService *forClient, IOOptionBits options)
+{
+	if (fIOClient == forClient) {
+		fIOClient = NULL;
+		return;
+	}
+	IOBlockStorageDevice::handleClose(forClient, options);
+}
+
+bool
+AppleDiskImageDevice::handleIsOpen(const IOService *forClient) const
+{
+	if (forClient == NULL) {
+		return fIOClient != NULL || IOBlockStorageDevice::handleIsOpen(NULL);
+	}
+	if (fIOClient == forClient) {
+		return true;
+	}
+	return IOBlockStorageDevice::handleIsOpen(forClient);
+}
+
 IOReturn
 AppleDiskImageDevice::connectMemory(task_t task, mach_vm_address_t base, mach_vm_size_t length, bool readOnly)
 {
 	IOMemoryDescriptor *md;
 	IOMemoryMap *map;
 
-	if (length < fBlocks * fBlockSize) {
+	if (length < fTotalBytes) {
 		return kIOReturnBadArgument;
 	}
 	IOLockLock(fLock);
-	if (fMemory != NULL) {
+	if (fMemory != NULL || fConnecting) {
 		IOLockUnlock(fLock);
 		return kIOReturnStillOpen;
 	}
+	fConnecting = true;
 	IOLockUnlock(fLock);
 
-	md = IOMemoryDescriptor::withAddressRange(base, fBlocks * fBlockSize, kIODirectionOutIn, task);
+	md = IOMemoryDescriptor::withAddressRange(base, fTotalBytes, kIODirectionOutIn, task);
 	if (md == NULL) {
+		IOLockLock(fLock);
+		fConnecting = false;
+		IOLockUnlock(fLock);
 		return kIOReturnNoMemory;
 	}
 	if (md->prepare() != kIOReturnSuccess) {
 		md->release();
+		IOLockLock(fLock);
+		fConnecting = false;
+		IOLockUnlock(fLock);
 		return kIOReturnVMError;
 	}
 	map = md->createMappingInTask(kernel_task, 0, kIOMapAnywhere);
 	if (map == NULL) {
 		md->complete();
 		md->release();
+		IOLockLock(fLock);
+		fConnecting = false;
+		IOLockUnlock(fLock);
 		return kIOReturnVMError;
 	}
 
 	IOLockLock(fLock);
+	fConnecting = false;
+	if (isInactive() || fMemory != NULL) {
+		IOLockUnlock(fLock);
+		map->release();
+		md->complete();
+		md->release();
+		return kIOReturnAborted;
+	}
 	fMemory = md;
 	fMap = map;
 	fReadOnly = readOnly;
@@ -166,7 +248,7 @@ AppleDiskImageDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block,
     IOStorageAttributes *attributes, IOStorageCompletion *completion)
 {
 	IOReturn ret = kIOReturnSuccess;
-	UInt64 bytes = nblks * fBlockSize;
+	UInt64 bytes = 0;
 	IOByteCount done;
 	uint8_t *disk;
 
@@ -181,7 +263,8 @@ AppleDiskImageDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block,
 	} else if (buffer->prepare() != kIOReturnSuccess) {
 		ret = kIOReturnVMError;
 	} else {
-		disk = (uint8_t *)fMap->getVirtualAddress() + block * fBlockSize;
+		bytes = nblks * (UInt64)fBlockSize;
+		disk = (uint8_t *)fMap->getVirtualAddress() + block * (UInt64)fBlockSize;
 		// a write's buffer is the source, a read's the destination
 		if (buffer->getDirection() & kIODirectionOut) {
 			done = buffer->readBytes(0, disk, bytes);
@@ -232,7 +315,7 @@ UInt32
 AppleDiskImageDevice::doGetFormatCapacities(UInt64 *capacities, UInt32 capacitiesMaxCount) const
 {
 	if (capacities != NULL && capacitiesMaxCount > 0) {
-		capacities[0] = fBlocks * fBlockSize;
+		capacities[0] = fTotalBytes;
 	}
 	return 1;
 }
@@ -287,6 +370,15 @@ AppleDiskImageDevice::reportWriteProtection(bool *isWriteProtected)
 	return kIOReturnSuccess;
 }
 
+bool
+DIDeviceCreatorUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
+{
+	if (clientHasPrivilege(owningTask, kIOClientPrivilegeAdministrator) != kIOReturnSuccess) {
+		return false;
+	}
+	return IOUserClient::initWithTask(owningTask, securityID, type);
+}
+
 IOReturn
 DIDeviceCreatorUserClient::clientClose(void)
 {
@@ -324,6 +416,9 @@ DIDeviceCreatorUserClient::externalMethod(uint32_t selector, IOExternalMethodArg
 	if (in[kDICreateLocation] != 2) {
 		return kIOReturnUnsupported;
 	}
+	if (!validGeometry(blocks, blockSize, NULL)) {
+		return kIOReturnBadArgument;
+	}
 
 	dev = OSTypeAlloc(AppleDiskImageDevice);
 	if (dev == NULL || !dev->initWithParams(blocks, blockSize, true, uid, gid, mode, in + kDICreateInstance, url)) {
@@ -351,11 +446,38 @@ DIDeviceCreatorUserClient::externalMethod(uint32_t selector, IOExternalMethodArg
 bool
 DIDeviceIOUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
 {
-	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
+	if (clientHasPrivilege(owningTask, kIOClientPrivilegeAdministrator) != kIOReturnSuccess) {
 		return false;
 	}
-	fTask = owningTask;
+	return IOUserClient::initWithTask(owningTask, securityID, type);
+}
+
+bool
+DIDeviceIOUserClient::start(IOService *provider)
+{
+	AppleDiskImageDevice *dev = OSDynamicCast(AppleDiskImageDevice, provider);
+
+	if (dev == NULL || !IOUserClient::start(provider)) {
+		return false;
+	}
+	if (!dev->open(this)) {
+		IOUserClient::stop(provider);
+		return false;
+	}
 	return true;
+}
+
+void
+DIDeviceIOUserClient::stop(IOService *provider)
+{
+	AppleDiskImageDevice *dev = OSDynamicCast(AppleDiskImageDevice, provider);
+
+	if (dev != NULL && dev->isOpen(this)) {
+		dev->terminate();
+		dev->disconnectMemory();
+		dev->close(this);
+	}
+	IOUserClient::stop(provider);
 }
 
 IOReturn
@@ -364,9 +486,10 @@ DIDeviceIOUserClient::clientClose(void)
 	AppleDiskImageDevice *dev = OSDynamicCast(AppleDiskImageDevice, getProvider());
 
 	// the memory belongs to diskimagesiod, the device cannot outlive its client
-	if (dev != NULL) {
+	if (dev != NULL && dev->isOpen(this)) {
 		dev->terminate();
 		dev->disconnectMemory();
+		dev->close(this);
 	}
 	terminate();
 	return kIOReturnSuccess;
@@ -397,9 +520,12 @@ DIDeviceIOUserClient::externalMethod(uint32_t selector, IOExternalMethodArgument
 		if (dev == NULL || in == NULL || args->structureInputSize < kDIConnectSize) {
 			return kIOReturnBadArgument;
 		}
+		if (!dev->isOpen(this)) {
+			return kIOReturnNotOpen;
+		}
 		memcpy(&base, in + kDIConnectBase, sizeof(base));
 		memcpy(&length, in + kDIConnectLength, sizeof(length));
-		return dev->connectMemory(fTask, base, length, in[kDIConnectReadOnly] != 0);
+		return dev->connectMemory(current_task(), base, length, in[kDIConnectReadOnly] != 0);
 	case 1:
 		return kIOReturnSuccess;
 	case 2:

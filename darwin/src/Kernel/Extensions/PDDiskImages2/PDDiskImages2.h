@@ -29,6 +29,9 @@ public:
 	void disconnectMemory(void);
 
 	virtual void free(void) override;
+	virtual bool handleOpen(IOService *forClient, IOOptionBits options, void *arg) override;
+	virtual void handleClose(IOService *forClient, IOOptionBits options) override;
+	virtual bool handleIsOpen(const IOService *forClient) const override;
 	virtual IOReturn doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block, UInt64 nblks,
 	    IOStorageAttributes *attributes, IOStorageCompletion *completion) override;
 	virtual IOReturn doSynchronize(UInt64 block, UInt64 nblks,
@@ -51,8 +54,11 @@ public:
 
 private:
 	UInt64 fBlocks;
+	UInt64 fTotalBytes;
 	UInt32 fBlockSize;
 	bool fReadOnly;
+	bool fConnecting;
+	IOService *fIOClient;
 	IOMemoryDescriptor *fMemory;
 	IOMemoryMap *fMap;
 	IOLock *fLock;
@@ -64,6 +70,7 @@ class DIDeviceCreatorUserClient : public IOUserClient
 	OSDeclareDefaultStructors(DIDeviceCreatorUserClient);
 
 public:
+	virtual bool initWithTask(task_t owningTask, void *securityID, UInt32 type) override;
 	virtual IOReturn clientClose(void) override;
 	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) override;
@@ -76,13 +83,12 @@ class DIDeviceIOUserClient : public IOUserClient
 
 public:
 	virtual bool initWithTask(task_t owningTask, void *securityID, UInt32 type) override;
+	virtual bool start(IOService *provider) override;
+	virtual void stop(IOService *provider) override;
 	virtual IOReturn clientClose(void) override;
 	virtual IOReturn registerNotificationPort(mach_port_t port, UInt32 type, io_user_reference_t refCon) override;
 	virtual IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 	    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference) override;
-
-private:
-	task_t fTask;
 };
 
 #endif
