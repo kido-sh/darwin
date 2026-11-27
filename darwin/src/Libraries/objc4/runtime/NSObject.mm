@@ -2193,6 +2193,14 @@ objc_retainAutoreleasedReturnValue(id obj)
     return objc_retain(obj);
 }
 
+id
+objc_claimAutoreleasedReturnValue(id obj)
+{
+    if (acceptOptimizedReturn() == ReturnAtPlus1) return obj;
+
+    return objc_retain(obj);
+}
+
 // Accept a value returned through a +0 autoreleasing convention for use at +0.
 id
 objc_unsafeClaimAutoreleasedReturnValue(id obj)

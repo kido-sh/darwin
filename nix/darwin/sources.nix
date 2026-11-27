@@ -197,6 +197,9 @@ let
   foundationSource = sourceWith "kido-foundation-source" [
     "src/Frameworks/Foundation"
   ];
+  metalSource = sourceWith "kido-metal-source" [
+    "src/Frameworks/Metal"
+  ];
 
 in {
   inherit
@@ -208,6 +211,7 @@ in {
     kextsOnlySource
     libSystemSource
     libcxxDylibSource
+    metalSource
     objcSource
     securitySource
     symptomReporterSource

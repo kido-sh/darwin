@@ -580,10 +580,18 @@ IOVirtIOTransport::sharedMemoryRegion(uint8_t shmid, uint64_t *outPhys, uint64_t
         if (lo & 0x1)
             return false;
         uint64_t base = lo & ~0x0fULL;
-        if ((lo & 0x6) == 0x4)
-            base |= (uint64_t)fPCIDevice->configRead32((UInt8)(reg + 4)) << 32;
-        if (!base)
+        uint32_t hi = 0;
+        if ((lo & 0x6) == 0x4) {
+            if (fShm[i].bar > 4)
+                return false;
+            hi = fPCIDevice->configRead32((UInt8)(reg + 4));
+            base |= (uint64_t)hi << 32;
+        }
+        if (!base) {
+            IOLog("IOVirtIOTransport: shm id=%u bar=%u unassigned (lo=0x%x hi=0x%x)\n",
+                  shmid, fShm[i].bar, lo, hi);
             return false;
+        }
 
         *outPhys = base + fShm[i].offset;
         *outLength = fShm[i].length;

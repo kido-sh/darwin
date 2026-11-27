@@ -26,6 +26,7 @@ let
     "IOVirtIOBlock"
     "IOVirtIONet"
     "VirtioFS"
+    "VirtioMetal"
     "PDWatchdog"
     "PDDiskImages2"
     "PDLifs"

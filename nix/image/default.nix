@@ -20,6 +20,7 @@ let
     libbz2DylibArm64eBuild
     liblzmaDylibArm64eBuild
     libutilArm64eBuild
+    metalArm64Build
     ncursesDylibArm64Build
     nghttp2Arm64eBuild
     securityArm64Build
@@ -90,7 +91,7 @@ let
     baseSystem = containerBaseSystemArm64;
     extraPackages = [
       zshArm64Build iconvArm64eBuild toyboxArm64Build
-      securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build
+      securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build metalArm64Build
       libzDylibArm64Build libbz2DylibArm64eBuild liblzmaDylibArm64eBuild libutilArm64eBuild
       ncursesDylibArm64Build libeditArm64Build curlArm64Build
       nghttp2Arm64eBuild expatArm64eBuild sqliteDylibArm64eBuild

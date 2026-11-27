@@ -28,6 +28,7 @@ let
     kextsOnlySource
     libSystemSource
     libcxxDylibSource
+    metalSource
     objcSource
     securitySource
     symptomReporterSource
@@ -235,6 +236,13 @@ let
   coreServicesArm64Build = mkArm64Build ./apple/coreservices.nix {
     src = coreServicesSource;
     corefoundation = coreFoundationArm64Build;
+  };
+  metalArm64Build = mkArm64Build ./apple/metal.nix {
+    src = metalSource;
+    libobjc = libobjcArm64Build;
+    corefoundation = coreFoundationArm64Build;
+    foundation = foundationArm64Build;
+    iokit = iokitArm64Build;
   };
   securityArm64Build = mkArm64Build ./apple/security.nix {
     pname = "kido-security-arm64";
@@ -454,7 +462,7 @@ let
     src = kextsOnlySource;
     buildTargets = [
       "PDArmPlatformExpert" "PDArmPCI" "PDEcamPCI" "IOPCIFamily" "IOStorageFamily"
-      "IOVirtIOFamily.kext" "IOVirtIONet.kext" "IOVirtIOBlock.kext" "VirtioFS.kext" "IONetworkingFamily.kext"
+      "IOVirtIOFamily.kext" "IOVirtIONet.kext" "IOVirtIOBlock.kext" "VirtioFS.kext" "VirtioMetal.kext" "IONetworkingFamily.kext"
       "corecrypto.kext" "ext4.kext" "AppleFileSystemDriver.kext" "Ext4FileSystemDriver.kext"
       "pthread.kext" "amfi.kext" "Sandbox.kext" "PDWatchdog.kext" "PDDiskImages2.kext"
       "PDLifs.kext" "PDKeyStore.kext"
@@ -465,7 +473,7 @@ let
     installKexts = true;
     installKextNames = [
       "PDArmPlatformExpert.kext" "PDArmPCI.kext" "PDEcamPCI.kext" "IOPCIFamily.kext"
-      "IOStorageFamily.kext" "IOVirtIOFamily.kext" "IOVirtIONet.kext" "IOVirtIOBlock.kext" "VirtioFS.kext"
+      "IOStorageFamily.kext" "IOVirtIOFamily.kext" "IOVirtIONet.kext" "IOVirtIOBlock.kext" "VirtioFS.kext" "VirtioMetal.kext"
       "IONetworkingFamily.kext" "corecrypto.kext" "ext4.kext" "AppleFileSystemDriver.kext"
       "Ext4FileSystemDriver.kext" "pthread.kext" "amfi.kext" "Sandbox.kext" "PDWatchdog.kext"
       "PDDiskImages2.kext" "PDLifs.kext" "PDKeyStore.kext"
@@ -546,6 +554,7 @@ in
     libbz2DylibArm64eBuild
     liblzmaDylibArm64eBuild
     libutilArm64eBuild
+    metalArm64Build
     ncursesDylibArm64Build
     nghttp2Arm64eBuild
     securityArm64Build

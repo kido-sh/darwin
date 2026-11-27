@@ -529,8 +529,8 @@ IOReturn CLASS::addHostBridge(IOPCIBridge * hostBridge)
       || (0x27AC8086 == fRootVendorProduct)
       || (0x25C08086 == fRootVendorProduct)
       || (CPUID_FEATURE_VMM & cpuid_features()))
-#endif
         fFlags &= ~kIOPCIConfiguratorPFM64;
+#endif
     DLOG("root id 0x%x, flags 0x%x\n", fRootVendorProduct, (int) fFlags);
 
     range = IOPCIRangeAlloc();

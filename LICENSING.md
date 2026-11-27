@@ -58,6 +58,7 @@ the release a directory came from and the other licenses its files carry.
 | `darwin/src/Kernel/Extensions/{IOVirtIOBlock,IOVirtIOFamily,IOVirtIONet,Sandbox}/**` | `BSD-2-Clause` | PureDarwin. Files with a header: `MPL-2.0 OR BSD-2-Clause` |
 | `darwin/src/Kernel/Extensions/VirtioFS/**` | `Apache-2.0` | kido's virtio-fs client |
 | `darwin/src/Kernel/Extensions/VirtioFS/fuse.h` | `BSD-2-Clause` | Linux 7.3's include/uapi/linux/fuse.h, FUSE 7.46, used under its BSD-2-Clause option. The header also offers `GPL-2.0 WITH Linux-syscall-note` |
+| `darwin/src/Kernel/Extensions/VirtioMetal/**` | `Apache-2.0` | kido's virtio-metal GPU passthrough driver |
 | `darwin/external/corecrypto/**` | `MPL-2.0` | NeoDarwin's corecrypto as forked by PureDarwin. Also `Brian-Gladman-3-Clause` (ccaes/src/gladman), `SSLeay-standalone` (Eric Young's code in cccast, ccrc4, ccsha1), `LicenseRef-Public-Domain` (LibTomCrypt-derived code), `APSL-2.0` (two xnu headers) |
 | `darwin/src/Libraries/libSystem/libc/**` | `APSL-2.0` | Libc-1439.141.1 with FreeBSD and NetBSD code. Also `APSL-1.0`, `APSL-1.1`, `BSD-2-Clause`, `BSD-2-Clause-FreeBSD`, `BSD-3-Clause`, `BSD-4-Clause`, `BSD-4-Clause-UC`, `ISC`, `CMU-Mach`, `HPND`, `dtoa`, `CDDL-1.0`, `Apache-2.0`, `MPL-2.0 OR BSD-2-Clause`, `LicenseRef-Public-Domain` |
 | `darwin/src/Libraries/libSystem/libc/libm/openlibm/**` | `BSD-2-Clause` | openlibm; see its LICENSE.md. Also `BSD-3-Clause`, `ISC`, `MIT`, `LicenseRef-Public-Domain`. kido's src/kido_fenv_arm64.c is `Apache-2.0` |
@@ -90,6 +91,7 @@ the release a directory came from and the other licenses its files carry.
 | `darwin/src/Libraries/{clang_bootstrap,libcxx,libcxxabi,libunwind,llvm-libc}/**` | `Apache-2.0 WITH LLVM-exception` | LLVM 21.1.8. Also `Unicode-3.0` (libcxx's Unicode data), `MIT`, `LicenseRef-Public-Domain` |
 | `darwin/src/Frameworks/CoreFoundation/**` | `Apache-2.0 WITH Swift-exception` | swift-corelibs-foundation 5.0.3. PureDarwin's files are `BSD-2-Clause`, `MPL-2.0` or `MPL-2.0 OR BSD-2-Clause` |
 | `darwin/src/Frameworks/Foundation/**` | `MPL-2.0` | PureDarwin, under the directory's own LICENSE. Also `MPL-2.0 OR BSD-2-Clause`, `MIT` |
+| `darwin/src/Frameworks/Metal/**` | `Apache-2.0` | kido's open-source Metal.framework backed by virtio-metal |
 | `darwin/src/Userspace/{diskdev_cmds,killall,ping,pkill,ps,shell_cmds,system_cmds,text_cmds}/**` | `APSL-2.0` | Apple's diskdev_cmds-757, shell_cmds-216.60.1, text_cmds-106, adv_cmds-174.0.1, network_cmds-606.140.1, system_cmds-880.120.1. Most files carry `BSD-2-Clause`, `BSD-3-Clause`, `BSD-4-Clause` or `BSD-4-Clause-UC`; also `APSL-1.0`, `ISC`, `LicenseRef-Public-Domain`. PureDarwin's files are `BSD-2-Clause` or `MPL-2.0 OR BSD-2-Clause` |
 | `darwin/src/Userspace/gpt/**` | `BSD-2-Clause` | NetBSD's gpt. Also `BSD-3-Clause`, `BSD-4-Clause` |
 | `darwin/src/Userspace/{doubleagentd,ext4tool,ext4util,mdnsd,netsetup,kido-dmesg-save,sh,sw_vers}/**` | `BSD-2-Clause` | PureDarwin. Also `MPL-2.0 OR BSD-2-Clause` |

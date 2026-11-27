@@ -76,13 +76,14 @@ bool PDArmPCI::configure(IOService *provider)
     if (!addRangesWindow(provider)) {
         /* QEMU virt's low MMIO window is 0x10000000..0x3efeffff; PIO and the low ECAM follow it */
         addBridgeMemoryRange(0x10000000ULL, 0x2eff0000ULL, true);
+        if (sECAMBase >= 0x100000000ULL)
+            addBridgePrefetchableMemoryRange(0x8000000000ULL, 0x8000000000ULL);
     }
     return super::configure(provider);
 }
 
-// the node's 32-bit non-prefetchable memory window from ranges (3 pci cells, then the parent's address
-// cells and 2 size cells; the loader stores 2 or more cells as one u64 in their last two). VZ's is
-// 0x50000000 + 0x1ffe0000, which QEMU virt's hardcoded window would miss, landing bars on the gic
+// Import 32-bit and 64-bit PCI memory windows from the host bridge's DeviceTree ranges property.
+// VZ exposes a 32-bit MMIO window (0x50000000) and a 64-bit high MMIO window for large VirtIO SHM BARs.
 bool PDArmPCI::addRangesWindow(IOService *provider)
 {
     OSData *ranges = provider ? OSDynamicCast(OSData, provider->getProperty("ranges")) : NULL;
@@ -108,10 +109,23 @@ bool PDArmPCI::addRangesWindow(IOService *provider)
             memcpy(&cpu, p + at + 12, sizeof(cpu));
         }
         memcpy(&size, p + at + 12 + parentCells * 4, sizeof(size));
-        // space code 2 is 32-bit memory; bars are programmed with cpu addresses, so pci must equal cpu
-        if (((hi >> 24) & 3) != 2 || (hi & 0x40000000) || pci != cpu || cpu + size > 0x100000000ULL)
+        UInt32 space = (hi >> 24) & 3;
+        bool pref = (hi & 0x40000000U) != 0;
+        if (pci != cpu || size == 0)
             continue;
-        added = addBridgeMemoryRange((IOPhysicalAddress)cpu, (IOPhysicalLength)size, true) || added;
+        if (space == 2 && !pref && cpu <= 0x100000000ULL && size <= 0x100000000ULL - cpu) {
+            IOLog("PDArmPCI: mem32 range 0x%llx + 0x%llx\n",
+                  (unsigned long long)cpu, (unsigned long long)size);
+            added = addBridgeMemoryRange((IOPhysicalAddress)cpu, (IOPhysicalLength)size, true) || added;
+        } else if (space == 3 || (space == 2 && pref)) {
+            const char *kind = pref ? (space == 3 ? "pref64" : "pref32") : "mem64";
+            IOLog("PDArmPCI: %s range 0x%llx + 0x%llx (space=%u)\n",
+                  kind, (unsigned long long)cpu, (unsigned long long)size, (unsigned)space);
+            if (pref)
+                added = addBridgePrefetchableMemoryRange((addr64_t)cpu, (addr64_t)size) || added;
+            else
+                added = addBridgeMemoryRange((IOPhysicalAddress)cpu, (IOPhysicalLength)size, true) || added;
+        }
     }
     return added;
 }
