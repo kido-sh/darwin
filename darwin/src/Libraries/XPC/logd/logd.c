@@ -48,7 +48,10 @@ logd_open_logfile(void)
 {
 	struct stat st;
 
-	logfile_fd = open(PD_LOGD_LOGFILE, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+	logfile_fd = open(PD_LOGD_LOGFILE, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0640);
+	if (logfile_fd >= 0) {
+		(void)fchmod(logfile_fd, 0640);
+	}
 	logfile_size = logfile_fd >= 0 && fstat(logfile_fd, &st) == 0 ? st.st_size : 0;
 }
 

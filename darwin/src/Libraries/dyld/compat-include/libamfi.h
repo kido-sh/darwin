@@ -28,6 +28,8 @@ enum amfi_dyld_policy_output_flag_set {
 	AMFI_DYLD_OUTPUT_ALLOW_LIBRARY_INTERPOSING        = (1 << 6),
 };
 
+#define AMFI_RETURNS_INTERPOSING_FLAG 1
+
 #ifdef __cplusplus
 extern "C"
 #endif

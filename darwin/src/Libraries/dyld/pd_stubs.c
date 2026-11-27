@@ -121,12 +121,22 @@ int __pd_fcntl_default(int fd, int cmd, ...)
 #if !defined(__arm__) && !defined(__arm64__) && !defined(__aarch64__)
 #endif
 
-/* AMFI: grant every dyld capability. */
+extern int __mac_syscall(const char *policy, int call, void *arg);
+
 int amfi_check_dyld_policy_self(uint64_t input_flags, uint64_t *output_flags)
 {
-	(void)input_flags;
+	uint64_t out = 0;
+	uint64_t args[2] = { input_flags, (uint64_t)(uintptr_t)&out };
+
+	if (__mac_syscall("AMFI", 90, args) == 0) {
+		if (output_flags)
+			*output_flags = out;
+		return 0;
+	}
 	if (output_flags)
-		*output_flags = ~0ull;   /* allow @path, path vars, fallback paths, interposing, ... */
+		*output_flags = 0;
+	if (errno == ENOSYS)
+		return ENOSYS;
 	return 0;
 }
 

@@ -144,6 +144,7 @@ daemon:*:1:1:System Services:/var/root:/usr/bin/false
 sshd:*:74:74:Privilege-separated SSH:/var/empty:/usr/bin/false
 messagebus:*:96:96:D-Bus Message Daemon User:/var/empty:/usr/bin/false
 _trustd:*:282:282:trustd:/var/empty:/usr/bin/false
+_doubleagentd:*:283:283:DoubleAgent Daemon:/var/empty:/usr/bin/false
 nobody:*:-2:-2:Unprivileged User:/var/empty:/usr/bin/false
 EOF
     # Darwin's libinfo file_module reads /etc/master.passwd when euid==0 (it is
@@ -158,6 +159,7 @@ daemon:*:1:1::0:0:System Services:/var/root:/usr/bin/false
 sshd:*:74:74::0:0:Privilege-separated SSH:/var/empty:/usr/bin/false
 messagebus:*:96:96::0:0:D-Bus Message Daemon User:/var/empty:/usr/bin/false
 _trustd:*:282:282::0:0:trustd:/var/empty:/usr/bin/false
+_doubleagentd:*:283:283::0:0:DoubleAgent Daemon:/var/empty:/usr/bin/false
 nobody:*:-2:-2::0:0:Unprivileged User:/var/empty:/usr/bin/false
 EOF
     chmod 600 $staging/etc/master.passwd
@@ -168,6 +170,7 @@ daemon:*:1:root
 sshd:*:74:
 messagebus:*:96:
 _trustd:*:282:
+_doubleagentd:*:283:
 nogroup:*:-1:
 nobody:*:-2:
 staff:*:20:root
@@ -271,6 +274,9 @@ PROMPT='%F{green}%n@%m%f %B%F{blue}%1~%f%b %# '
 EOF
     cat > $staging/etc/resolv.conf <<'EOF'
 nameserver 10.0.2.3
+EOF
+    cat > $staging/etc/notify.conf <<'EOF'
+reserve com.apple.system. 0 0 rwr-r-
 EOF
     cat > $staging/etc/shells <<'EOF'
 /bin/sh
@@ -379,6 +385,7 @@ EOF
       $staging/etc/zprofile \
       $staging/etc/zshrc \
       $staging/etc/resolv.conf \
+      $staging/etc/notify.conf \
       $staging/etc/shells \
       $staging/etc/ttys \
       $staging/var/root/.profile \

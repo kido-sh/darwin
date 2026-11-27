@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
 
@@ -40,10 +41,11 @@ static size_t squeeze(char *buf, size_t len)
 
 static void save(const char *path, const char *buf, size_t len)
 {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
 
     if (fd < 0)
         return;
+    (void)fchmod(fd, 0600);
     for (size_t done = 0; done < len; ) {
         ssize_t n = write(fd, buf + done, len - done);
         if (n <= 0)

@@ -18,6 +18,8 @@
     </dict>
     <key>StandardErrorPath</key>
     <string>/dev/console</string>
+    <key>UserName</key>
+    <string>_doubleagentd</string>
     <key>RunAtLoad</key>
     <true/>
 </dict>

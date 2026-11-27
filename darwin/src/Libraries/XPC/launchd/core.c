@@ -8404,6 +8404,13 @@ job_mig_swap_integer(job_t j, vproc_gsk_t inkey, vproc_gsk_t outkey, int64_t inv
 		}
  	}
 
+	if (unlikely(pid1_magic && (ldc->euid != 0 || ldc->uid != 0) &&
+	    (inkey == VPROC_GSK_GLOBAL_UMASK ||
+	     inkey == VPROC_GSK_GLOBAL_LOG_MASK ||
+	     inkey == VPROC_GSK_GLOBAL_ON_DEMAND))) {
+		return BOOTSTRAP_NOT_PRIVILEGED;
+	}
+
 	if (unlikely(inkey && outkey && !job_assumes(j, inkey == outkey))) {
 		return 1;
 	}
@@ -9065,6 +9072,9 @@ job_mig_check_in2(job_t j, name_t servicename, mach_port_t *serviceportp, uuid_t
 		}
 	} else if (ms == NULL) {
 		if (job_assumes(j, !j->dedicated_instance)) {
+			if (unlikely(pid1_magic && (j->mgr == root_jobmgr) && (ldc->euid != 0 || ldc->uid != 0))) {
+				return BOOTSTRAP_NOT_PRIVILEGED;
+			}
 			*serviceportp = MACH_PORT_NULL;
 
 #if HAVE_SANDBOX
@@ -9154,6 +9164,13 @@ job_mig_register2(job_t j, name_t servicename, mach_port_t serviceport, uint64_t
 	}
 #endif
 
+	if (unlikely(pid1_magic && (j->mgr == root_jobmgr) && (ldc->euid != 0 || ldc->uid != 0))) {
+		if (!launchd_no_per_user && j->anonymous) {
+			return VPROC_ERR_TRY_PER_USER;
+		}
+		return BOOTSTRAP_NOT_PRIVILEGED;
+	}
+
 	// 5641783 for the embedded hack
 #if !TARGET_OS_EMBEDDED
 	/*
@@ -9161,12 +9178,8 @@ job_mig_register2(job_t j, name_t servicename, mach_port_t serviceport, uint64_t
 	 * 92) is a rogue application (not our UID, not root and not a child of
 	 * us). We'll have to reconcile this design friction at a later date.
 	 */
-	if (unlikely(!launchd_no_per_user && j->anonymous && j->mgr->parentmgr == NULL && ldc->uid != 0 && ldc->uid != getuid() && ldc->uid != 92)) {
-		if (pid1_magic) {
-			return VPROC_ERR_TRY_PER_USER;
-		} else {
-			return BOOTSTRAP_NOT_PRIVILEGED;
-		}
+	if (unlikely(!pid1_magic && j->anonymous && j->mgr->parentmgr == NULL && ldc->uid != 0 && ldc->uid != getuid() && ldc->uid != 92)) {
+		return BOOTSTRAP_NOT_PRIVILEGED;
 	}
 #endif
 
@@ -9351,8 +9364,14 @@ job_mig_look_up2(job_t j, mach_port_t srp, name_t servicename, mach_port_t *serv
 kern_return_t
 job_mig_parent(job_t j, mach_port_t srp, mach_port_t *parentport)
 {
+	struct ldcred *ldc = runtime_get_caller_creds();
+
 	if (!j) {
 		return BOOTSTRAP_NO_MEMORY;
+	}
+
+	if (unlikely(pid1_magic && (ldc->euid != 0 || ldc->uid != 0))) {
+		return BOOTSTRAP_NOT_PRIVILEGED;
 	}
 
 	job_log(j, LOG_DEBUG, "Requested parent bootstrap port");
@@ -9373,8 +9392,14 @@ job_mig_parent(job_t j, mach_port_t srp, mach_port_t *parentport)
 kern_return_t
 job_mig_get_root_bootstrap(job_t j, mach_port_t *rootbsp)
 {
+	struct ldcred *ldc = runtime_get_caller_creds();
+
 	if (!j) {
 		return BOOTSTRAP_NO_MEMORY;
+	}
+
+	if (unlikely(ldc->euid != 0 || ldc->uid != 0)) {
+		return BOOTSTRAP_NOT_PRIVILEGED;
 	}
 
 	if (inherited_bootstrap_port == MACH_PORT_NULL) {
@@ -9781,6 +9806,11 @@ job_mig_move_subset(job_t j, mach_port_t target_subset, name_t session_type, mac
 		return BOOTSTRAP_NO_MEMORY;
 	}
 
+	if (unlikely(pid1_magic && (ldc->euid != 0 || ldc->uid != 0))) {
+		kr = BOOTSTRAP_NOT_PRIVILEGED;
+		goto out;
+	}
+
 	if (job_mig_intran2(root_jobmgr, target_subset, ldc->pid)) {
 		job_log(j, LOG_ERR, "Moving a session to ourself is bogus.");
 
@@ -9896,8 +9926,14 @@ out:
 kern_return_t
 job_mig_init_session(job_t j, name_t session_type, mach_port_t asport)
 {
+	struct ldcred *ldc = runtime_get_caller_creds();
+
 	if (!j) {
 		return BOOTSTRAP_NO_MEMORY;
+	}
+
+	if (unlikely(pid1_magic && (ldc->euid != 0 || ldc->uid != 0))) {
+		return BOOTSTRAP_NOT_PRIVILEGED;
 	}
 
 	job_t j2;
@@ -11662,7 +11698,7 @@ job_mig_spawn_internal(job_t j, vm_offset_t indata, mach_msg_type_number_t indat
 	}
 #endif
 
-	if (unlikely(pid1_magic && ldc->euid && ldc->uid)) {
+	if (unlikely(pid1_magic && (ldc->euid || ldc->uid))) {
 		job_log(j, LOG_DEBUG, "Punting spawn to per-user-context");
 		return VPROC_ERR_TRY_PER_USER;
 	}

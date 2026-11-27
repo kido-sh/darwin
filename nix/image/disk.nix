@@ -63,6 +63,7 @@ stdenv.mkDerivation {
     # the store strips write bits and special modes: u+w gives back the staged 644 and 755, the rest is set again
     chmod -R u+w "$staging"
     chmod 444  "$staging/etc/services" "$staging/etc/protocols"
+    chmod 600  "$staging/etc/master.passwd"
     chmod 1777 "$staging/private/tmp" "$staging/private/var/tmp"
     chmod 700  "$staging/var/root"
 
