@@ -75,6 +75,9 @@ struct virtiofs_node {
     uint64_t wfh;
     uint64_t fh_ctime;
     uint64_t changed;
+    uint64_t notified;
+    uint64_t notify_version; /* attr_version as a notification last set it */
+    uint64_t woken;          /* the flush that last woke this node's watchers */
     uint64_t expire;
     uint64_t attr_version;
     uint64_t parent;
@@ -516,17 +519,35 @@ node_getattr(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *repl
     return 0;
 }
 
+/*
+ * A reply kept out of the cache by a notification that came while it was on its way is asked for
+ * again, since a notification expires attributes but brings none, and the pages it should have
+ * dropped would stay; one kept out by a change made here is not, as the cache already holds that
+ * change. Either way the newer of the two is the answer.
+ */
 static int
 node_fetch(struct virtiofs_node *np, vfs_context_t ctx, struct fuse_attr *attr)
 {
-    bool applied;
-    int error = node_getattr(np, ctx, attr, &applied, NULL);
+    struct fuse_attr reply;
+    bool applied = false;
+    int error = 0;
 
+    for (int tries = 0; !error && !applied && tries < 3; tries++) {
+        IOLockLock(np->vmp->lock);
+        uint64_t before = np->vmp->version;
+        IOLockUnlock(np->vmp->lock);
+        error = node_getattr(np, ctx, &reply, &applied, NULL);
+        IOLockLock(np->vmp->lock);
+        bool notified = np->notify_version > before;
+        IOLockUnlock(np->vmp->lock);
+        if (!notified)
+            break;
+    }
     if (error)
         return error;
     IOLockLock(np->vmp->lock);
     wait_clear(np, VN_SIZING);
-    *attr = np->attr;
+    *attr = applied || change_cmp(&np->attr, &reply) >= 0 ? np->attr : reply;
     IOLockUnlock(np->vmp->lock);
     return 0;
 }
@@ -749,6 +770,20 @@ forget(struct virtiofs_mount *vmp, uint64_t nodeid, uint64_t nlookup)
         virtiofs_dev_forget(vmp->dev, nodeid, nlookup);
 }
 
+/*
+ * A reply to a request sent before a notification for its directory, or before a flush, may tell of
+ * the host as it was; the attributes it gave expire. Checked again where the node becomes findable
+ * by name, since a notification finds only nodes the names cache holds.
+ */
+static void
+notify_stale_locked(struct virtiofs_node *np, const struct virtiofs_node *dnp, uint64_t version)
+{
+    if (version < np->vmp->flushed || (dnp && version < dnp->notified)) {
+        np->expire = 0;
+        np->attr_version = np->notify_version = ++np->vmp->version;
+    }
+}
+
 static int
 node_found(struct virtiofs_node *np, vnode_t vp, const struct fuse_entry_out *entry, uint64_t version,
            uint64_t nlookup, vnode_t dvp, struct componentname *cnp)
@@ -766,6 +801,9 @@ node_found(struct virtiofs_node *np, vnode_t vp, const struct fuse_entry_out *en
     np->nlookup += nlookup;
     IOLockUnlock(np->vmp->lock);
     node_apply(np, &entry->attr, entry->attr_valid, entry->attr_valid_nsec, version, NULL);
+    IOLockLock(np->vmp->lock);
+    notify_stale_locked(np, dvp ? VTON(dvp) : NULL, version);
+    IOLockUnlock(np->vmp->lock);
     return 0;
 }
 
@@ -822,6 +860,7 @@ virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry
     np->attr = entry->attr;
     np->expire = deadline(entry->attr_valid, entry->attr_valid_nsec);
     np->attr_version = ++vmp->version;
+    np->woken = vmp->flushed;
     np->flags = VN_BUILDING | VN_HASHED;
     LIST_INSERT_HEAD(head, np, link);
     IOLockUnlock(vmp->lock);
@@ -842,10 +881,12 @@ virtiofs_node_get(struct virtiofs_mount *vmp, const struct fuse_entry_out *entry
     error = vnode_create(VNCREATE_FLAVOR, VCREATESIZE, &param, &vp);
 
     IOLockLock(vmp->lock);
-    if (error)
+    if (error) {
         LIST_REMOVE(np, link);
-    else
+    } else {
         np->vp = vp;
+        notify_stale_locked(np, dvp ? VTON(dvp) : NULL, version);
+    }
     wake(np, VN_BUILDING | (error ? VN_HASHED : 0));
     IOLockUnlock(vmp->lock);
     if (!error) {
@@ -1364,10 +1405,9 @@ name_bucket(struct virtiofs_mount *vmp, uint64_t parent, const char *name, uint3
 }
 
 static bool
-name_matches(const struct virtiofs_node *np, uint64_t parent, const struct componentname *cnp)
+name_matches(const struct virtiofs_node *np, uint64_t parent, const char *name, uint32_t len)
 {
-    return np->parent == parent && np->namelen == (uint32_t)cnp->cn_namelen &&
-           memcmp(np->name, cnp->cn_nameptr, np->namelen) == 0;
+    return np->parent == parent && np->namelen == len && memcmp(np->name, name, len) == 0;
 }
 
 static void
@@ -1393,7 +1433,7 @@ name_lookup(struct virtiofs_node *dnp, struct componentname *cnp)
         return NULLVP;
     IOLockLock(vmp->lock);
     LIST_FOREACH(np, name_bucket(vmp, dnp->nodeid, cnp->cn_nameptr, (uint32_t)cnp->cn_namelen), name_link) {
-        if (name_matches(np, dnp->nodeid, cnp)) {
+        if (name_matches(np, dnp->nodeid, cnp->cn_nameptr, (uint32_t)cnp->cn_namelen)) {
             if (mach_absolute_time() < np->entry_expire) {
                 vp = np->vp;
                 vid = vnode_vid(vp);
@@ -1422,13 +1462,14 @@ name_remember(struct virtiofs_node *dnp, vnode_t vp, struct componentname *cnp, 
         memcpy(name, cnp->cn_nameptr, len);
     IOLockLock(vmp->lock);
     LIST_FOREACH_SAFE(other, head, name_link, next) {
-        if (!name_matches(other, dnp->nodeid, cnp))
+        if (!name_matches(other, dnp->nodeid, cnp->cn_nameptr, len))
             continue;
         if (other->name_version > version)
             newer = true;
         else
             name_drop_locked(other);
     }
+    notify_stale_locked(np, dnp, version);
     if (version < dnp->changed || ((np->flags & VN_NAMED) && np->name_version > version))
         newer = true;
     else
@@ -1448,6 +1489,44 @@ name_remember(struct virtiofs_node *dnp, vnode_t vp, struct componentname *cnp, 
         IOFree(name, len);
 }
 
+/*
+ * After a rename here the moved node is indexed under its new name, so that notifications reach it
+ * and what is below it. The entry is expired: the next lookup still asks the host.
+ */
+static void
+name_moved(struct virtiofs_node *tdnp, vnode_t vp, struct componentname *cnp, uint64_t version)
+{
+    struct virtiofs_mount *vmp = tdnp->vmp;
+    struct virtiofs_node *np = VTON(vp), *other;
+    uint32_t len = (uint32_t)cnp->cn_namelen;
+    struct virtiofs_bucket *head = name_bucket(vmp, tdnp->nodeid, cnp->cn_nameptr, len);
+    char *name = virtiofs_entry_cache ? IOMalloc(len) : NULL;
+
+    if (!name)
+        return;
+    memcpy(name, cnp->cn_nameptr, len);
+    IOLockLock(vmp->lock);
+    bool taken = version < tdnp->changed || ((np->flags & VN_NAMED) && np->name_version > version);
+    LIST_FOREACH(other, head, name_link) {
+        if (name_matches(other, tdnp->nodeid, cnp->cn_nameptr, len))
+            taken = true;
+    }
+    if (!taken) {
+        name_drop_locked(np);
+        np->name = name;
+        np->namelen = len;
+        np->parent = tdnp->nodeid;
+        np->entry_expire = 0;
+        np->name_version = ++vmp->version;
+        np->flags |= VN_NAMED;
+        LIST_INSERT_HEAD(head, np, name_link);
+        name = NULL;
+    }
+    IOLockUnlock(vmp->lock);
+    if (name)
+        IOFree(name, len);
+}
+
 static uint64_t
 dir_changed(struct virtiofs_node *dnp, struct componentname *cnp, uint64_t before, bool *alone)
 {
@@ -1456,7 +1535,7 @@ dir_changed(struct virtiofs_node *dnp, struct componentname *cnp, uint64_t befor
 
     IOLockLock(vmp->lock);
     LIST_FOREACH_SAFE(np, name_bucket(vmp, dnp->nodeid, cnp->cn_nameptr, (uint32_t)cnp->cn_namelen), name_link, next) {
-        if (name_matches(np, dnp->nodeid, cnp))
+        if (name_matches(np, dnp->nodeid, cnp->cn_nameptr, (uint32_t)cnp->cn_namelen))
             name_drop_locked(np);
     }
     if (alone)
@@ -2350,6 +2429,236 @@ virtiofs_vnop_fsync(struct vnop_fsync_args *ap)
     return file_sync(ap->a_vp, ap->a_context);
 }
 
+struct notify_post {
+    vnode_t vp;
+    uint32_t vid;
+    uint32_t events;
+};
+
+static void
+notify_watch_locked(struct notify_post *post, struct virtiofs_node *np, uint32_t events)
+{
+    bool watched = np->vp && vnode_ismonitored(np->vp);
+    post->vp = watched ? np->vp : NULLVP;
+    post->vid = watched ? vnode_vid(np->vp) : 0;
+    post->events = events;
+}
+
+static void
+notify_post(const struct notify_post *post)
+{
+    if (!post->vp || vnode_getwithvid(post->vp, post->vid) != 0)
+        return;
+    vnode_notify(post->vp, post->events, NULL);
+    vnode_put(post->vp);
+}
+
+static struct virtiofs_node *
+name_find_locked(struct virtiofs_mount *vmp, uint64_t parent, const char *name, uint32_t len)
+{
+    struct virtiofs_node *np;
+
+    LIST_FOREACH(np, name_bucket(vmp, parent, name, len), name_link) {
+        if (name_matches(np, parent, name, len))
+            return np;
+    }
+    return NULL;
+}
+
+/*
+ * The host's state equals what the guest caches and still trusts, so the record is the echo of a
+ * change made here or one already seen. Times without nanoseconds can come from a file system too
+ * coarse to tell two changes apart, and never count.
+ */
+static bool
+notify_known_locked(const struct virtiofs_node *np, const struct virtiofs_notify_rec *rec)
+{
+    const struct fuse_attr *a = &np->attr;
+
+    return rec->state == VIRTIOFS_NOTIFY_PRESENT && rec->mtimensec && rec->ctimensec &&
+           mach_absolute_time() < np->expire && a->mode == rec->mode && a->nlink == rec->nlink &&
+           a->size == rec->size && (int64_t)a->mtime == rec->mtime && a->mtimensec == rec->mtimensec &&
+           (int64_t)a->ctime == rec->ctime && a->ctimensec == rec->ctimensec;
+}
+
+static uint32_t
+notify_events_locked(const struct virtiofs_node *np, const struct virtiofs_notify_rec *rec)
+{
+    const struct fuse_attr *a = &np->attr;
+    uint32_t events = 0;
+
+    if (rec->state == VIRTIOFS_NOTIFY_ABSENT)
+        return VNODE_EVENT_DELETE;
+    if (rec->state == VIRTIOFS_NOTIFY_UNKNOWN)
+        return VNODE_EVENT_WRITE | VNODE_EVENT_ATTRIB;
+    if (a->size != rec->size || (int64_t)a->mtime != rec->mtime || a->mtimensec != rec->mtimensec)
+        events |= VNODE_EVENT_WRITE;
+    if (rec->size > a->size)
+        events |= VNODE_EVENT_EXTEND;
+    if (!events || a->mode != rec->mode || a->nlink != rec->nlink)
+        events |= VNODE_EVENT_ATTRIB;
+    return events;
+}
+
+/*
+ * One path changed on the host. The names cache (one entry per node, kept after it expires) gives
+ * the directory and the node the path named. The node's entry expires, or goes if the name is gone
+ * or now names another file (whose watchers then hear of a deletion, as a local replace gives),
+ * so the next lookup asks the host, and the node's attributes expire with a new version, so that
+ * replies to requests sent before are discarded. If the name itself may have changed, the directory
+ * expires the same way and lookups in it that started before are not cached. A node built from a
+ * lookup in the directory sent before this starts expired (notify_stale_locked). A record equal to
+ * what the guest caches expires nothing, but its watchers still hear of it: a refresh may have
+ * taken in the change before the record came.
+ */
+static void
+notify_path(struct virtiofs_mount *vmp, const struct virtiofs_notify_rec *rec)
+{
+    struct notify_post post[2] = {};
+    const char *name = rec->path;
+    uint32_t left = rec->pathlen, len;
+    struct virtiofs_node *dnp, *np;
+
+    IOLockLock(vmp->lock);
+    dnp = VTON(vmp->root);
+    for (;;) {
+        for (len = 0; len < left && name[len] != '/'; len++)
+            ;
+        np = name_find_locked(vmp, dnp->nodeid, name, len);
+        if (len == left)
+            break;
+        if (!np) {
+            IOLockUnlock(vmp->lock);
+            return;
+        }
+        dnp = np;
+        name += len + 1;
+        left -= len + 1;
+    }
+    bool gone = rec->state == VIRTIOFS_NOTIFY_ABSENT;
+    bool replaced = (rec->flags & VIRTIOFS_NOTIFY_REPLACED) != 0;
+    bool renamed = gone || replaced || rec->state == VIRTIOFS_NOTIFY_UNKNOWN || (rec->flags & VIRTIOFS_NOTIFY_NAME);
+    bool echo = np && notify_known_locked(np, rec);
+    if (echo) {
+        notify_watch_locked(&post[1], np, VNODE_EVENT_WRITE | VNODE_EVENT_ATTRIB);
+    } else if (np) {
+        notify_watch_locked(&post[1], np, replaced ? VNODE_EVENT_DELETE : notify_events_locked(np, rec));
+        if (gone || replaced)
+            name_drop_locked(np);
+        else
+            np->entry_expire = 0;
+        np->expire = 0;
+        np->attr_version = np->notify_version = ++vmp->version;
+    }
+    if (renamed) {
+        notify_watch_locked(&post[0], dnp, VNODE_EVENT_WRITE);
+        dnp->changed = dnp->attr_version = dnp->notify_version = ++vmp->version;
+        dnp->expire = 0;
+    }
+    dnp->notified = ++vmp->version;
+    IOLockUnlock(vmp->lock);
+    if (echo)
+        __atomic_fetch_add(&virtiofs_notify_stats.echoes, 1, __ATOMIC_RELAXED);
+    if (renamed || (np && !echo))
+        __atomic_fetch_add(&virtiofs_notify_stats.invalidated, 1, __ATOMIC_RELAXED);
+    notify_post(&post[0]);
+    notify_post(&post[1]);
+}
+
+/*
+ * Anything may have changed on the host: every name, attribute and glance expires, a node built from
+ * a reply to a request sent before starts expired, and every watcher is woken. Watchers are taken a
+ * few at a time under the lock and stamped, so each is woken once however the table changes while the
+ * lock is dropped to post; vnode_iterate is no use here, since an unmount's vflush holds the mount's
+ * iterate lock while it waits for the root's iocount, which the caller of this ioctl holds.
+ */
+static void
+notify_flush(struct virtiofs_mount *vmp)
+{
+    struct notify_post post[32];
+    struct virtiofs_node *np;
+    uint32_t n, bucket = 0;
+
+    IOLockLock(vmp->lock);
+    for (uint32_t i = 0; i < 1U << vmp->hash_bits; i++) {
+        LIST_FOREACH(np, &vmp->hash[i], link) {
+            np->expire = 0;
+            np->entry_expire = 0;
+            np->changed = np->attr_version = np->notify_version = ++vmp->version;
+        }
+    }
+    uint64_t gen = vmp->flushed = ++vmp->version;
+    do {
+        n = 0;
+        while (bucket < 1U << vmp->hash_bits && n < 32) {
+            LIST_FOREACH(np, &vmp->hash[bucket], link) {
+                if (n == 32)
+                    break;
+                if (np->woken >= gen)
+                    continue;
+                notify_watch_locked(&post[n], np, VNODE_EVENT_WRITE | VNODE_EVENT_ATTRIB);
+                if (post[n].vp) {
+                    np->woken = gen;
+                    n++;
+                }
+            }
+            if (n < 32)
+                bucket++;
+        }
+        IOLockUnlock(vmp->lock);
+        for (uint32_t i = 0; i < n; i++)
+            notify_post(&post[i]);
+        IOLockLock(vmp->lock);
+    } while (n == 32);
+    IOLockUnlock(vmp->lock);
+    __atomic_fetch_add(&virtiofs_notify_stats.flushes, 1, __ATOMIC_RELAXED);
+}
+
+/*
+ * VIRTIOFS_IOC_NOTIFY. fsctl passes unknown selectors to the file system without a privilege check,
+ * so this one checks for root, and for the mount's root, before it reads anything. A batch is
+ * refused whole if any record is malformed.
+ */
+static int
+notify_ioctl(vnode_t vp, caddr_t data, vfs_context_t ctx)
+{
+    struct virtiofs_mount *vmp = VTON(vp)->vmp;
+    struct virtiofs_notify_arg arg;
+    struct virtiofs_notify_rec rec;
+    uint32_t pos = 0, count = 0;
+    bool flush = false;
+    int next = 0;
+
+    if (vfs_context_suser(ctx) != 0 || !vnode_isvroot(vp))
+        return EPERM;
+    memcpy(&arg, data, sizeof(arg));
+    if (arg.flags || arg.len > VIRTIOFS_NOTIFY_MAX_BATCH)
+        return EINVAL;
+    if (arg.len == 0)
+        return 0;
+    uint8_t *buf = IOMalloc(arg.len);
+    if (!buf)
+        return ENOMEM;
+    int error = copyin((user_addr_t)arg.ptr, buf, arg.len);
+    while (!error && (next = virtiofs_notify_next(buf, arg.len, &pos, &rec)) == 1) {
+        count++;
+        flush |= rec.kind == VIRTIOFS_NOTIFY_FLUSH;
+    }
+    if (!error && next != 0) {
+        error = EINVAL;
+        __atomic_fetch_add(&virtiofs_notify_stats.refused, 1, __ATOMIC_RELAXED);
+    }
+    if (!error) {
+        __atomic_fetch_add(&virtiofs_notify_stats.records, count, __ATOMIC_RELAXED);
+        if (flush)
+            notify_flush(vmp);
+        for (pos = 0; !flush && virtiofs_notify_next(buf, arg.len, &pos, &rec) == 1;)
+            notify_path(vmp, &rec);
+    }
+    IOFree(buf, arg.len);
+    return error;
+}
+
 static int
 virtiofs_vnop_ioctl(struct vnop_ioctl_args *ap)
 {
@@ -2358,6 +2667,8 @@ virtiofs_vnop_ioctl(struct vnop_ioctl_args *ap)
     struct radvisory *ra = (struct radvisory *)ap->a_data;
     struct fuse_attr attr;
 
+    if (ap->a_command == VIRTIOFS_IOC_NOTIFY)
+        return notify_ioctl(vp, ap->a_data, ap->a_context);
     if (ap->a_command == F_FULLFSYNC || ap->a_command == F_BARRIERFSYNC)
         return file_sync(vp, ap->a_context);
     if (ap->a_command != F_RDADVISE)
@@ -2989,9 +3300,10 @@ virtiofs_vnop_rename(struct vnop_rename_args *ap)
     error = virtiofs_call(fdnp->vmp, ap->a_context, &c);
     IOFree(target, tlen);
     dir_changed(fdnp, fcnp, 0, NULL);
-    dir_changed(tdnp, tcnp, 0, NULL);
+    uint64_t version = dir_changed(tdnp, tcnp, 0, NULL);
     if (!error) {
         node_stale(VTON(ap->a_fvp));
+        name_moved(tdnp, ap->a_fvp, tcnp, version);
         if (node_place(ap->a_fvp, ap->a_tdvp, tcnp)) {
             IOLockLock(fdnp->vmp->move_lock);
             const char *had = vnode_getname(ap->a_fvp);
@@ -3001,8 +3313,11 @@ virtiofs_vnop_rename(struct vnop_rename_args *ap)
             if (had)
                 vnode_putname(had);
         }
-        if (ap->a_tvp && ap->a_tvp != ap->a_fvp)
+        if (ap->a_tvp && ap->a_tvp != ap->a_fvp) {
             node_gone(ap->a_tvp);
+            struct fuse_attr attr;
+            (void)node_fetch(VTON(ap->a_fvp), ap->a_context, &attr);
+        }
     }
     return error;
 }
@@ -3230,6 +3545,12 @@ static const struct vnodeopv_entry_desc virtiofs_vnodeop_entries[] = {
 
 struct vnodeopv_desc virtiofs_vnodeop_opv_desc = { &virtiofs_vnodeop_p, virtiofs_vnodeop_entries };
 
+static int
+virtiofs_fifo_ioctl(struct vnop_ioctl_args *ap)
+{
+    return ap->a_command == VIRTIOFS_IOC_NOTIFY ? EPERM : fifo_ioctl(ap);
+}
+
 static const struct vnodeopv_entry_desc virtiofs_fifoop_entries[] = {
     { &vnop_default_desc, (VOPFUNC)vn_default_error },
     { &vnop_lookup_desc, (VOPFUNC)fifo_lookup },
@@ -3239,7 +3560,7 @@ static const struct vnodeopv_entry_desc virtiofs_fifoop_entries[] = {
     { &vnop_setattr_desc, (VOPFUNC)virtiofs_vnop_setattr },
     { &vnop_read_desc, (VOPFUNC)fifo_read },
     { &vnop_write_desc, (VOPFUNC)fifo_write },
-    { &vnop_ioctl_desc, (VOPFUNC)fifo_ioctl },
+    { &vnop_ioctl_desc, (VOPFUNC)virtiofs_fifo_ioctl },
     { &vnop_select_desc, (VOPFUNC)fifo_select },
     { &vnop_revoke_desc, (VOPFUNC)fifo_revoke },
     { &vnop_mmap_desc, (VOPFUNC)fifo_mmap },

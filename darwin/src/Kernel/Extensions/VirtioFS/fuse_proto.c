@@ -111,6 +111,83 @@ virtiofs_dirent_next(const uint8_t *buf, uint32_t len, uint32_t *pos, int plus, 
     return 1;
 }
 
+/* A path below the mount's root: components a name may be, never "." or "..", at most MAX_DEPTH. */
+int
+virtiofs_notify_path_ok(const char *path, uint32_t len)
+{
+    uint32_t start = 0, depth = 0;
+
+    if (len == 0 || len > VIRTIOFS_NOTIFY_MAX_PATH)
+        return 0;
+    for (uint32_t i = 0; i <= len; i++) {
+        if (i < len && path[i] != '/')
+            continue;
+        uint32_t n = i - start;
+        if (!virtiofs_name_ok(path + start, n) || ++depth > VIRTIOFS_NOTIFY_MAX_DEPTH)
+            return 0;
+        if (path[start] == '.' && (n == 1 || (n == 2 && path[start + 1] == '.')))
+            return 0;
+        start = i + 1;
+    }
+    return 1;
+}
+
+static uint16_t
+le16(const uint8_t *p)
+{
+    return (uint16_t)(p[0] | p[1] << 8);
+}
+
+static uint32_t
+le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+static uint64_t
+le64(const uint8_t *p)
+{
+    return (uint64_t)le32(p) | (uint64_t)le32(p + 4) << 32;
+}
+
+/* 1 with the record at *pos, 0 at the end, -1 if it is malformed, which refuses the whole batch. */
+int
+virtiofs_notify_next(const uint8_t *buf, uint32_t len, uint32_t *pos, struct virtiofs_notify_rec *rec)
+{
+    if (*pos == len)
+        return 0;
+    if (*pos > len || len - *pos < VIRTIOFS_NOTIFY_HEADER)
+        return -1;
+    const uint8_t *p = buf + *pos;
+    uint32_t n = le16(p), plen = le16(p + 6);
+    if (n != VIRTIOFS_NOTIFY_HEADER + plen || n > len - *pos || (p[4] & ~(VIRTIOFS_NOTIFY_NAME | VIRTIOFS_NOTIFY_REPLACED)) ||
+        p[5])
+        return -1;
+    rec->kind = p[2];
+    rec->state = p[3];
+    rec->flags = p[4];
+    rec->mode = le32(p + 8);
+    rec->nlink = le32(p + 12);
+    rec->size = le64(p + 16);
+    rec->mtime = (int64_t)le64(p + 24);
+    rec->ctime = (int64_t)le64(p + 32);
+    rec->mtimensec = le32(p + 40);
+    rec->ctimensec = le32(p + 44);
+    rec->path = (const char *)p + VIRTIOFS_NOTIFY_HEADER;
+    rec->pathlen = plen;
+    if (rec->state > VIRTIOFS_NOTIFY_PRESENT || rec->mtimensec >= 1000000000 || rec->ctimensec >= 1000000000)
+        return -1;
+    if (rec->kind == VIRTIOFS_NOTIFY_FLUSH) {
+        if (plen || rec->state || rec->flags || rec->mode || rec->nlink || rec->size || rec->mtime || rec->mtimensec ||
+            rec->ctime || rec->ctimensec)
+            return -1;
+    } else if (rec->kind != VIRTIOFS_NOTIFY_PATH || !virtiofs_notify_path_ok(rec->path, plen)) {
+        return -1;
+    }
+    *pos += n;
+    return 1;
+}
+
 #define ROTL(x, b) (uint64_t)(((x) << (b)) | ((x) >> (64 - (b))))
 
 struct sip {

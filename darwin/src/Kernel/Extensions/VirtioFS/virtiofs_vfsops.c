@@ -34,6 +34,27 @@ SYSCTL_INT(_vfs_generic_virtiofs, OID_AUTO, revalidate_open, CTLFLAG_RW | CTLFLA
 SYSCTL_INT(_vfs_generic_virtiofs, OID_AUTO, entry_cache, CTLFLAG_RW | CTLFLAG_LOCKED, &virtiofs_entry_cache, 0,
            "reuse a looked-up name until the host's entry timeout");
 
+struct virtiofs_notify_stats virtiofs_notify_stats;
+
+/* The counters tell when the host changes files, so only root may read them. */
+static int
+notify_stat(__unused struct sysctl_oid *oidp, void *arg1, __unused int arg2, struct sysctl_req *req)
+{
+    if (proc_suser(req->p) != 0)
+        return EPERM;
+    uint64_t v = __atomic_load_n((uint64_t *)arg1, __ATOMIC_RELAXED);
+    return SYSCTL_OUT(req, &v, sizeof(v));
+}
+
+#define NOTIFY_STAT(name, what)                                                                                     \
+    SYSCTL_PROC(_vfs_generic_virtiofs, OID_AUTO, notify_##name, CTLTYPE_QUAD | CTLFLAG_RD | CTLFLAG_LOCKED,            \
+                &virtiofs_notify_stats.name, 0, notify_stat, "Q", what)
+NOTIFY_STAT(records, "notification records applied");
+NOTIFY_STAT(echoes, "records for what the guest already knew");
+NOTIFY_STAT(invalidated, "records that dropped cached names or attributes");
+NOTIFY_STAT(flushes, "flushes of everything cached");
+NOTIFY_STAT(refused, "malformed batches refused whole");
+
 int
 virtiofs_call(struct virtiofs_mount *vmp, vfs_context_t ctx, struct virtiofs_call *c)
 {
@@ -359,6 +380,11 @@ virtiofs_vfs_register(void)
         sysctl_register_oid(&sysctl__vfs_generic_virtiofs_entry_cache);
         sysctl_register_oid(&sysctl__vfs_generic_virtiofs_idle_files);
         sysctl_register_oid(&sysctl__vfs_generic_virtiofs_revalidate_open);
+        sysctl_register_oid(&sysctl__vfs_generic_virtiofs_notify_records);
+        sysctl_register_oid(&sysctl__vfs_generic_virtiofs_notify_echoes);
+        sysctl_register_oid(&sysctl__vfs_generic_virtiofs_notify_invalidated);
+        sysctl_register_oid(&sysctl__vfs_generic_virtiofs_notify_flushes);
+        sysctl_register_oid(&sysctl__vfs_generic_virtiofs_notify_refused);
     }
     return error;
 }
@@ -369,6 +395,11 @@ virtiofs_vfs_unregister(void)
     if (virtiofs_vfsconf && vfs_fsremove(virtiofs_vfsconf) != 0)
         return EBUSY;
     if (virtiofs_vfsconf) {
+        sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_notify_refused);
+        sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_notify_flushes);
+        sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_notify_invalidated);
+        sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_notify_echoes);
+        sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_notify_records);
         sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_revalidate_open);
         sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_idle_files);
         sysctl_unregister_oid(&sysctl__vfs_generic_virtiofs_entry_cache);

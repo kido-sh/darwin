@@ -163,6 +163,100 @@ test_dirents(void)
     EXPECT(virtiofs_dirent_next(buf, len - 1, &pos, 1, &d) == -1);
 }
 
+
+/* The batch kido's internal/notify encodes in TestBatchGolden. */
+static const uint8_t notify_golden[] = {
+    0x38, 0x00, 0x01, 0x02, 0x00, 0x00, 0x08, 0x00, 0xa4, 0x81, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc0, 0x86, 0xfd, 0x6a, 0x00, 0x00, 0x00, 0x00, 0xc1, 0x86, 0xfd, 0x6a, 0x00, 0x00, 0x00, 0x00, 0x15, 0xcd, 0x5b, 0x07, 0xb1, 0x68, 0xde, 0x3a, 0x64, 0x69, 0x72, 0x2f, 0x66, 0x69, 0x6c, 0x65, 0x34, 0x00, 0x01, 0x01, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x67, 0x6f, 0x6e, 0x65, 0x30, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+
+static void
+put_notify(uint8_t *b, uint8_t kind, uint8_t state, const char *path)
+{
+    uint32_t n = (uint32_t)strlen(path), len = VIRTIOFS_NOTIFY_HEADER + n;
+    memset(b, 0, VIRTIOFS_NOTIFY_HEADER);
+    b[0] = (uint8_t)len;
+    b[1] = (uint8_t)(len >> 8);
+    b[2] = kind;
+    b[3] = state;
+    b[6] = (uint8_t)n;
+    b[7] = (uint8_t)(n >> 8);
+    memcpy(b + VIRTIOFS_NOTIFY_HEADER, path, n);
+}
+
+static void
+test_notify(void)
+{
+    struct virtiofs_notify_rec r;
+    uint32_t pos = 0, len = (uint32_t)sizeof(notify_golden);
+
+    EXPECT(virtiofs_notify_next(notify_golden, len, &pos, &r) == 1);
+    EXPECT(r.kind == VIRTIOFS_NOTIFY_PATH && r.state == VIRTIOFS_NOTIFY_PRESENT && r.mode == 0100644 && r.nlink == 1);
+    EXPECT(r.size == 42 && r.mtime == 1795000000 && r.mtimensec == 123456789 && r.ctime == 1795000001 &&
+           r.ctimensec == 987654321);
+    EXPECT(r.pathlen == 8 && memcmp(r.path, "dir/file", 8) == 0);
+    EXPECT(r.flags == 0);
+    EXPECT(virtiofs_notify_next(notify_golden, len, &pos, &r) == 1);
+    EXPECT(r.kind == VIRTIOFS_NOTIFY_PATH && r.state == VIRTIOFS_NOTIFY_ABSENT && r.flags == VIRTIOFS_NOTIFY_NAME &&
+           r.pathlen == 4);
+    EXPECT(virtiofs_notify_next(notify_golden, len, &pos, &r) == 1);
+    EXPECT(r.kind == VIRTIOFS_NOTIFY_FLUSH && r.pathlen == 0);
+    EXPECT(virtiofs_notify_next(notify_golden, len, &pos, &r) == 0 && pos == len);
+    pos = 0;
+    EXPECT(virtiofs_notify_next(notify_golden, len - 1, &pos, &r) == 1);
+    EXPECT(virtiofs_notify_next(notify_golden, len - 1, &pos, &r) == 1);
+    EXPECT(virtiofs_notify_next(notify_golden, len - 1, &pos, &r) == -1);
+
+    static char deep[2 * VIRTIOFS_NOTIFY_MAX_DEPTH + 1], name[VIRTIOFS_NAME_MAX + 2];
+    for (int i = 0; i < VIRTIOFS_NOTIFY_MAX_DEPTH; i++)
+        memcpy(deep + 2 * i, "d/", 2);
+    deep[2 * VIRTIOFS_NOTIFY_MAX_DEPTH - 1] = 0;
+    memset(name, 'n', VIRTIOFS_NAME_MAX);
+    EXPECT(virtiofs_notify_path_ok("a", 1) && virtiofs_notify_path_ok("a/b", 3) && virtiofs_notify_path_ok(".x", 2) &&
+           virtiofs_notify_path_ok("x..", 3) && virtiofs_notify_path_ok("...", 3));
+    EXPECT(virtiofs_notify_path_ok(deep, (uint32_t)strlen(deep)) && virtiofs_notify_path_ok(name, VIRTIOFS_NAME_MAX));
+    deep[2 * VIRTIOFS_NOTIFY_MAX_DEPTH - 1] = '/';
+    deep[2 * VIRTIOFS_NOTIFY_MAX_DEPTH] = 'd';
+    EXPECT(!virtiofs_notify_path_ok(deep, 2 * VIRTIOFS_NOTIFY_MAX_DEPTH + 1));
+    name[VIRTIOFS_NAME_MAX] = 'n';
+    EXPECT(!virtiofs_notify_path_ok(name, VIRTIOFS_NAME_MAX + 1));
+    const char *bad[] = {"", "/a", "a/", "a//b", ".", "..", "a/./b", "a/../b", "../a", "a/.."};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+        EXPECT(!virtiofs_notify_path_ok(bad[i], (uint32_t)strlen(bad[i])));
+    EXPECT(!virtiofs_notify_path_ok("a\0b", 3));
+
+    uint8_t b[128];
+    put_notify(b, VIRTIOFS_NOTIFY_PATH, VIRTIOFS_NOTIFY_ABSENT, "ok");
+    pos = 0;
+    EXPECT(virtiofs_notify_next(b, VIRTIOFS_NOTIFY_HEADER + 2, &pos, &r) == 1);
+    b[4] = VIRTIOFS_NOTIFY_NAME | VIRTIOFS_NOTIFY_REPLACED;
+    pos = 0;
+    EXPECT(virtiofs_notify_next(b, VIRTIOFS_NOTIFY_HEADER + 2, &pos, &r) == 1 &&
+           r.flags == (VIRTIOFS_NOTIFY_NAME | VIRTIOFS_NOTIFY_REPLACED));
+    struct {
+        int at;
+        uint8_t value;
+    } mutations[] = {{0, 49}, {2, 9}, {3, 3}, {4, 4}, {4, 0x80}, {5, 1}, {43, 0x3c}, {6, 3}, {48, '/'}, {49, 0}};
+    for (size_t i = 0; i < sizeof(mutations) / sizeof(mutations[0]); i++) {
+        put_notify(b, VIRTIOFS_NOTIFY_PATH, VIRTIOFS_NOTIFY_ABSENT, "ok");
+        b[mutations[i].at] = mutations[i].value;
+        pos = 0;
+        EXPECT(virtiofs_notify_next(b, VIRTIOFS_NOTIFY_HEADER + 2, &pos, &r) == -1);
+    }
+    put_notify(b, VIRTIOFS_NOTIFY_FLUSH, 0, "");
+    b[20] = 1;
+    pos = 0;
+    EXPECT(virtiofs_notify_next(b, VIRTIOFS_NOTIFY_HEADER, &pos, &r) == -1);
+    put_notify(b, VIRTIOFS_NOTIFY_FLUSH, 0, "");
+    b[4] = VIRTIOFS_NOTIFY_REPLACED;
+    pos = 0;
+    EXPECT(virtiofs_notify_next(b, VIRTIOFS_NOTIFY_HEADER, &pos, &r) == -1);
+    put_notify(b, VIRTIOFS_NOTIFY_PATH, VIRTIOFS_NOTIFY_ABSENT, "..");
+    pos = 0;
+    EXPECT(virtiofs_notify_next(b, VIRTIOFS_NOTIFY_HEADER + 2, &pos, &r) == -1);
+    pos = 0;
+    EXPECT(virtiofs_notify_next(b, VIRTIOFS_NOTIFY_HEADER - 1, &pos, &r) == -1);
+}
+
 static void
 test_name_hash(void)
 {
@@ -182,6 +276,7 @@ main(void)
     test_names();
     test_xattr_list();
     test_dirents();
+    test_notify();
     test_name_hash();
     printf("virtiofs proto: %d failures\n", failures);
     return failures != 0;

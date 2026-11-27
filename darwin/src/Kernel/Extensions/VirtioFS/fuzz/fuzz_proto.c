@@ -34,6 +34,10 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (size >= sizeof(struct fuse_attr))
         sink += (uint32_t)virtiofs_attr_ok((const struct fuse_attr *)buf);
     sink += (uint32_t)virtiofs_xattr_list_ok((const char *)buf, (uint32_t)size);
+    struct virtiofs_notify_rec rec;
+    uint32_t pos = 0;
+    while (virtiofs_notify_next(buf, (uint32_t)size, &pos, &rec) == 1)
+        sink += rec.pathlen ? (uint8_t)rec.path[rec.pathlen - 1] : rec.kind;
     const uint64_t key[2] = {size, ~(uint64_t)size};
     sink += (uint32_t)virtiofs_name_hash(key, size, (const char *)buf, (uint32_t)size);
     return 0;

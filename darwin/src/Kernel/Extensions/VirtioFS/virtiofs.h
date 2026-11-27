@@ -5,6 +5,7 @@
 #pragma once
 
 #include <sys/types.h>
+#include <sys/ioccom.h>
 #include <sys/mount.h>
 #include <sys/vnode.h>
 #include <sys/queue.h>
@@ -15,6 +16,27 @@
 struct virtiofs_node;
 LIST_HEAD(virtiofs_bucket, virtiofs_node);
 
+/*
+ * VIRTIOFS_IOC_NOTIFY, through fsctl or ffsctl on a mount's root and for root only: a batch of
+ * records (fuse_proto.h) naming what changed on the host, so that the guest drops what it cached.
+ * A len of 0 only tells the caller that the driver takes notifications.
+ */
+struct virtiofs_notify_arg {
+    uint64_t ptr;
+    uint32_t len;
+    uint32_t flags;
+};
+#define VIRTIOFS_IOC_NOTIFY _IOW('V', 1, struct virtiofs_notify_arg)
+
+struct virtiofs_notify_stats {
+    uint64_t records;
+    uint64_t echoes;
+    uint64_t invalidated;
+    uint64_t flushes;
+    uint64_t refused;
+};
+extern struct virtiofs_notify_stats virtiofs_notify_stats;
+
 struct virtiofs_mount {
     mount_t mp;
     struct virtiofs_dev *dev;
@@ -24,6 +46,7 @@ struct virtiofs_mount {
     IOLock *xattr_lock;
     uint64_t rootid;
     uint64_t version;
+    uint64_t flushed;
     uint64_t name_key[2];
     vnode_t root;
     uint32_t hash_bits;
