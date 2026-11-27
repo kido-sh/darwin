@@ -27,7 +27,7 @@ timed() {
   [[ $rc == 143 ]] && echo "FAIL timeout after ${limit}s: $*"
   return $rc
 }
-tests="t_math t_ucontext t_libc t_oslog t_keychain t_malloc"
+tests="t_math t_ucontext t_libc t_oslog t_keychain t_malloc t_exports"
 for t in $tests; do
   extra=
   min=13.0
