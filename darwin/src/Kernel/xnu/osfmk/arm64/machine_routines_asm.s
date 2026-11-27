@@ -1000,6 +1000,91 @@ Lcopyinframe_done:
 	POP_FRAME
 	ARM64_STACK_EPILOG EXT(copyinframe)
 
+	.text
+	.align 2
+	.globl EXT(_copyin_user_unpriv)
+LEXT(_copyin_user_unpriv)
+	COPYIO_STACK_PROLOG
+	PUSH_FRAME
+	COPYIO_RECOVER_RANGE Lcopyin_user_unpriv_done
+	cmp		x2, #1
+	b.eq	Lcopyin_user_unpriv_1
+	cmp		x2, #2
+	b.eq	Lcopyin_user_unpriv_2
+	cmp		x2, #4
+	b.eq	Lcopyin_user_unpriv_4
+	tst		x0, #7
+	b.ne	Lcopyin_user_unpriv_bytes
+	ldtr	x8, [x0]
+	b		Lcopyin_user_unpriv_store
+Lcopyin_user_unpriv_4:
+	tst		x0, #3
+	b.ne	Lcopyin_user_unpriv_bytes
+	ldtr	w8, [x0]
+	b		Lcopyin_user_unpriv_store
+Lcopyin_user_unpriv_2:
+	tst		x0, #1
+	b.ne	Lcopyin_user_unpriv_bytes
+	ldtrh	w8, [x0]
+	b		Lcopyin_user_unpriv_store
+Lcopyin_user_unpriv_1:
+	ldtrb	w8, [x0]
+Lcopyin_user_unpriv_store:
+	str		x8, [x1]
+	b		Lcopyin_user_unpriv_done
+Lcopyin_user_unpriv_bytes:
+	ldtrb	w8, [x0]
+	strb	w8, [x1], #1
+	add		x0, x0, #1
+	subs	x2, x2, #1
+	b.ne	Lcopyin_user_unpriv_bytes
+Lcopyin_user_unpriv_done:
+	mov		x0, xzr
+	mov		x8, xzr
+	POP_FRAME
+	ARM64_STACK_EPILOG EXT(_copyin_user_unpriv)
+
+	.text
+	.align 2
+	.globl EXT(_copyout_user_unpriv)
+LEXT(_copyout_user_unpriv)
+	COPYIO_STACK_PROLOG
+	PUSH_FRAME
+	COPYIO_RECOVER_RANGE Lcopyout_user_unpriv_done
+	cmp		x2, #1
+	b.eq	Lcopyout_user_unpriv_1
+	cmp		x2, #2
+	b.eq	Lcopyout_user_unpriv_2
+	cmp		x2, #4
+	b.eq	Lcopyout_user_unpriv_4
+	tst		x1, #7
+	b.ne	Lcopyout_user_unpriv_bytes
+	sttr	x0, [x1]
+	b		Lcopyout_user_unpriv_done
+Lcopyout_user_unpriv_4:
+	tst		x1, #3
+	b.ne	Lcopyout_user_unpriv_bytes
+	sttr	w0, [x1]
+	b		Lcopyout_user_unpriv_done
+Lcopyout_user_unpriv_2:
+	tst		x1, #1
+	b.ne	Lcopyout_user_unpriv_bytes
+	sttrh	w0, [x1]
+	b		Lcopyout_user_unpriv_done
+Lcopyout_user_unpriv_1:
+	sttrb	w0, [x1]
+	b		Lcopyout_user_unpriv_done
+Lcopyout_user_unpriv_bytes:
+	sttrb	w0, [x1]
+	lsr		x0, x0, #8
+	add		x1, x1, #1
+	subs	x2, x2, #1
+	b.ne	Lcopyout_user_unpriv_bytes
+Lcopyout_user_unpriv_done:
+	mov		x0, xzr
+	POP_FRAME
+	ARM64_STACK_EPILOG EXT(_copyout_user_unpriv)
+
 #if HAS_MTE
 /*
  * int _bcopy_recover_tag_write_fault(const char *src, char *dst, vm_size_t len)

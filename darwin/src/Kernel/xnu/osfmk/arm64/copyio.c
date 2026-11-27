@@ -49,6 +49,8 @@ extern int _copyin_atomic32_wait_if_equals(const user_addr_t src, uint32_t value
 extern int _copyin_atomic64(const user_addr_t src, uint64_t *dst);
 extern int _copyout_atomic32(uint32_t u32, user_addr_t dst);
 extern int _copyout_atomic64(uint64_t u64, user_addr_t dst);
+extern int _copyin_user_unpriv(const user_addr_t src, uint64_t *dst, vm_size_t len);
+extern int _copyout_user_unpriv(uint64_t val, user_addr_t dst, vm_size_t len);
 
 #if HAS_MTE
 extern int _unprivileged_bcopyin(const user_addr_t src, char *dst, vm_size_t len);
@@ -545,6 +547,54 @@ copyout_atomic64(uint64_t value, user_addr_t user_addr)
 
 	return WRAP_COPYIO(USER_ACCESS_WRITE, map,
 	           _copyout_atomic64(value, guarded_user_addr));
+}
+
+int
+copyin_user_unpriv(const user_addr_t user_addr, uint64_t *kernel_addr, vm_size_t nbytes)
+{
+	if (__improbable(nbytes != 1 && nbytes != 2 && nbytes != 4 && nbytes != 8)) {
+		return EINVAL;
+	}
+
+	vm_map_t map = current_thread()->map;
+	int result = copy_validate(map, user_addr, (uintptr_t)kernel_addr, nbytes, COPYIO_IN);
+	if (__improbable(result)) {
+		return result;
+	}
+
+	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+	*kernel_addr = 0;
+
+#if HAS_MTE
+	return WRAP_COPYIO_UNPRIVILEGED(USER_ACCESS_READ, map,
+	           _copyin_user_unpriv(guarded_user_addr, kernel_addr, nbytes));
+#else
+	return _copyin_user_unpriv(guarded_user_addr, kernel_addr, nbytes);
+#endif
+}
+
+int
+copyout_user_unpriv(uint64_t value, user_addr_t user_addr, vm_size_t nbytes)
+{
+	if (__improbable(nbytes != 1 && nbytes != 2 && nbytes != 4 && nbytes != 8)) {
+		return EINVAL;
+	}
+
+	vm_map_t map = current_thread()->map;
+	int result = copy_validate(map, user_addr, 0, nbytes,
+	    COPYIO_OUT | COPYIO_VALIDATE_USER_ONLY);
+	if (__improbable(result)) {
+		return result;
+	}
+
+	user_addr_t guarded_user_addr = copy_ensure_address_space_spec(map, user_addr);
+
+#if HAS_MTE
+	return WRAP_COPYIO_UNPRIVILEGED(USER_ACCESS_WRITE, map,
+	           _copyout_user_unpriv(value, guarded_user_addr, nbytes));
+#else
+	return _copyout_user_unpriv(value, guarded_user_addr, nbytes);
+#endif
 }
 
 int

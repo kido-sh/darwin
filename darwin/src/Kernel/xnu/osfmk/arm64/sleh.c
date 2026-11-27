@@ -1218,16 +1218,38 @@ pd_lse_init(void)
 STARTUP(LOCKS, STARTUP_RANK_LAST, pd_lse_init);
 
 static uint64_t
-pd_xreg(arm_saved_state64_t *ss, uint32_t r)
+pd_xreg(const arm_saved_state64_t *ss, uint32_t r)
 {
-	return r == 31 ? 0 : (uint64_t)ss->x[r];
+	if (r < 29) {
+		return ss->x[r];
+	}
+	if (r == 29) {
+		return ss->fp;
+	}
+	if (r == 30) {
+		return ss->lr;
+	}
+	return 0;
+}
+
+static uint64_t
+pd_base_reg(const arm_saved_state64_t *ss, uint32_t r)
+{
+	if (r == 31) {
+		return ss->sp;
+	}
+	return pd_xreg(ss, r);
 }
 
 static void
-pd_set_xreg(arm_saved_state64_t *ss, uint32_t r, uint64_t v)
+pd_set_xreg(arm_saved_state_t *state, uint32_t r, uint64_t v)
 {
-	if (r != 31) {
-		ss->x[r] = (int64_t)v;
+	if (r < 29) {
+		set_user_saved_state_reg(state, r, (register_t)v);
+	} else if (r == 29) {
+		set_saved_state_fp(state, (register_t)v);
+	} else if (r == 30) {
+		set_user_saved_state_lr(state, (register_t)v);
 	}
 }
 
@@ -1240,12 +1262,13 @@ pd_sext(uint64_t v, uint32_t bytes)
 
 // Returns 0 when emulated, -1 when not an LSE form, or the user fault address via *bad
 static int
-pd_emulate_lse(arm_saved_state64_t *ss, uint32_t instr, uint64_t *bad)
+pd_emulate_lse(arm_saved_state_t *state, uint32_t instr, uint64_t *bad)
 {
+	const arm_saved_state64_t *ss = const_saved_state64(state);
 	uint32_t size = instr >> 30, bytes = 1u << size;
 	uint32_t rs = (instr >> 16) & 0x1F, rn = (instr >> 5) & 0x1F, rt = instr & 0x1F;
 	uint64_t mask = bytes == 8 ? ~0ULL : ((1ULL << (8 * bytes)) - 1);
-	uint64_t addr = rn == 31 ? ss->sp : (uint64_t)ss->x[rn];
+	uint64_t addr = pd_base_reg(ss, rn);
 	lck_mtx_t *m;
 	uint64_t old = 0, nv, pair[2], opair[2];
 	bool atomic_op = (instr & 0x3F200C00U) == 0x38200000U;
@@ -1267,7 +1290,7 @@ pd_emulate_lse(arm_saved_state64_t *ss, uint32_t instr, uint64_t *bad)
 			return 1;
 		}
 		__builtin_arm_dmb(0xB);
-		pd_set_xreg(ss, rt, old & mask);
+		pd_set_xreg(state, rt, old & mask);
 		return 0;
 	}
 
@@ -1300,8 +1323,8 @@ pd_emulate_lse(arm_saved_state64_t *ss, uint32_t instr, uint64_t *bad)
 				return 1;
 			}
 		}
-		pd_set_xreg(ss, rs, opair[0]);
-		pd_set_xreg(ss, rs + 1, opair[1]);
+		pd_set_xreg(state, rs, opair[0]);
+		pd_set_xreg(state, rs + 1, opair[1]);
 	} else {
 		if (copyin(addr, (char *)&old, bytes) != 0) {
 			lck_mtx_unlock(m);
@@ -1317,7 +1340,7 @@ pd_emulate_lse(arm_saved_state64_t *ss, uint32_t instr, uint64_t *bad)
 					return 1;
 				}
 			}
-			pd_set_xreg(ss, rs, old);
+			pd_set_xreg(state, rs, old);
 		} else {
 			uint64_t v = pd_xreg(ss, rs) & mask;
 
@@ -1337,12 +1360,142 @@ pd_emulate_lse(arm_saved_state64_t *ss, uint32_t instr, uint64_t *bad)
 				lck_mtx_unlock(m);
 				return 1;
 			}
-			pd_set_xreg(ss, rt, old);
+			pd_set_xreg(state, rt, old);
 		}
 	}
 	__builtin_arm_dmb(0xB);
 	lck_mtx_unlock(m);
 	return 0;
+}
+
+static uint64_t
+pd_lrcpc2_fault_addr(uint64_t orig_addr, uint64_t recover_far)
+{
+	if (recover_far != 0 && (orig_addr & (1ULL << 55)) == 0) {
+		return (orig_addr & ARM_TBI_USER_MASK) | (recover_far & ~ARM_TBI_USER_MASK);
+	}
+	return orig_addr;
+}
+
+static int
+pd_emulate_lrcpc2(arm_saved_state_t *state, uint32_t instr, uint64_t *bad)
+{
+	if ((instr & 0x3F200C00U) != 0x19000000U) {
+		return -1;
+	}
+
+	uint32_t size = (instr >> 30) & 3U;
+	uint32_t opc = (instr >> 22) & 3U;
+	if ((size == 3U && opc >= 2U) || (size == 2U && opc == 3U)) {
+		return -1;
+	}
+
+	const arm_saved_state64_t *ss = const_saved_state64(state);
+	uint32_t rn = (instr >> 5) & 0x1FU;
+	if (rn == 31U && (ss->sp & 0xFULL) != 0) {
+		return 2;
+	}
+
+	uint32_t raw9 = (instr >> 12) & 0x1FFU;
+	int64_t imm9 = (raw9 & 0x100U) ? (int64_t)(raw9 | ~0x1FFULL) : (int64_t)raw9;
+	uint32_t rt = instr & 0x1FU;
+	uint32_t bytes = 1U << size;
+	uint64_t orig_addr = pd_base_reg(ss, rn) + (uint64_t)imm9;
+	uint64_t uaddr = orig_addr;
+	thread_t thread = current_thread();
+
+	if ((orig_addr & (1ULL << 55)) == 0) {
+		uaddr &= ~ARM_TBI_USER_MASK;
+	}
+
+	if (opc == 0U) {
+		uint64_t val = pd_xreg(ss, rt);
+
+		thread->machine.recover_far = 0;
+		os_atomic_thread_fence(release);
+		if (copyout_user_unpriv(val, uaddr, bytes) != 0) {
+			*bad = pd_lrcpc2_fault_addr(orig_addr, thread->machine.recover_far);
+			return 1;
+		}
+		os_atomic_thread_fence(seq_cst);
+		return 0;
+	}
+
+	uint64_t val = 0;
+	thread->machine.recover_far = 0;
+	if (copyin_user_unpriv(uaddr, &val, bytes) != 0) {
+		*bad = pd_lrcpc2_fault_addr(orig_addr, thread->machine.recover_far);
+		return 1;
+	}
+	os_atomic_thread_fence(acquire);
+
+	if (opc == 2U) {
+		val = (uint64_t)pd_sext(val, bytes);
+	} else if (opc == 3U) {
+		val = (uint64_t)(uint32_t)pd_sext(val, bytes);
+	}
+	pd_set_xreg(state, rt, val);
+	return 0;
+}
+
+static int
+pd_emulate_flagm_sb(arm_saved_state_t *state, uint32_t instr)
+{
+	const arm_saved_state64_t *ss = const_saved_state64(state);
+	uint32_t cpsr = get_saved_state_cpsr(state);
+
+	if (instr == 0xD50330FFU) {
+		__asm__ volatile("dsb sy; isb" ::: "memory");
+		return 0;
+	}
+	if (instr == 0xD500401FU) {
+		set_user_saved_state_cpsr(state, cpsr ^ (1U << 29));
+		return 0;
+	}
+	if ((instr & 0xFFE07C10U) == 0xBA000400U) {
+		uint32_t rn = (instr >> 5) & 0x1FU;
+		uint32_t lsh = (instr >> 15) & 0x3FU;
+		uint32_t mask = (instr & 0xFU) << 28;
+		uint64_t val = pd_xreg(ss, rn);
+		uint32_t res = (uint32_t)((lsh ? ((val >> lsh) | (val << (64U - lsh))) : val) & 0xFU);
+
+		set_user_saved_state_cpsr(state, (cpsr & ~mask) | ((res << 28) & mask));
+		return 0;
+	}
+	if ((instr & 0xFFFFBC1FU) == 0x3A00080DU) {
+		uint32_t rn = (instr >> 5) & 0x1FU;
+		uint32_t val = (uint32_t)pd_xreg(ss, rn);
+		uint32_t msb = ((instr >> 14) & 1U) ? 15U : 7U;
+		uint32_t width_mask = (msb == 15U) ? 0xFFFFU : 0xFFU;
+		uint32_t n = (val >> msb) & 1U;
+		uint32_t z = (val & width_mask) == 0U ? 1U : 0U;
+		uint32_t v = ((val >> (msb + 1U)) ^ (val >> msb)) & 1U;
+
+		set_user_saved_state_cpsr(state, (cpsr & ~0xD0000000U) | (n << 31) | (z << 30) | (v << 28));
+		return 0;
+	}
+	if (instr == 0xD500405FU) {
+		uint32_t z = (cpsr >> 30) & 1U;
+		uint32_t c = (cpsr >> 29) & 1U;
+		uint32_t v = (cpsr >> 28) & 1U;
+		uint32_t nz = z | v;
+		uint32_t nc = c & (v ^ 1U);
+
+		set_user_saved_state_cpsr(state, (cpsr & ~0xF0000000U) | (nz << 30) | (nc << 29));
+		return 0;
+	}
+	if (instr == 0xD500403FU) {
+		uint32_t z = (cpsr >> 30) & 1U;
+		uint32_t c = (cpsr >> 29) & 1U;
+		uint32_t nn = (c ^ 1U) & (z ^ 1U);
+		uint32_t nz = z & c;
+		uint32_t nc = c | z;
+		uint32_t nv = (c ^ 1U) & z;
+
+		set_user_saved_state_cpsr(state, (cpsr & ~0xF0000000U) | (nn << 31) | (nz << 30) | (nc << 29) | (nv << 28));
+		return 0;
+	}
+	return -1;
 }
 
 /*
@@ -1585,18 +1738,47 @@ handle_uncategorized(arm_saved_state_t *state)
 
 	if (!PSR64_IS_KERNEL(get_saved_state_cpsr(state))) {
 		uint64_t bad = 0;
-		int lr = pd_emulate_lse(saved_state64(state), instr, &bad);
+		int lr = pd_emulate_lse(state, instr, &bad);
 
 		if (lr == 0) {
-			saved_state64(state)->pc += 4;
+			add_user_saved_state_pc(state, 4);
+			mask_user_saved_state_cpsr(state, 0, PSR64_SS | PSR_BTYPE_MASK);
 			return;
 		}
 		if (lr > 0) {
+			set_saved_state_far(state, (register_t)bad);
 			exception = EXC_BAD_ACCESS;
 			codes[0] = KERN_INVALID_ADDRESS;
 			codes[1] = (mach_exception_data_type_t)bad;
 			exception_triage(exception, codes, numcodes);
 			__builtin_unreachable();
+		}
+	}
+
+	if (PSR64_IS_USER64(get_saved_state_cpsr(state))) {
+		uint64_t bad = 0;
+		int rc = pd_emulate_lrcpc2(state, instr, &bad);
+
+		if (rc == 0) {
+			add_user_saved_state_pc(state, 4);
+			mask_user_saved_state_cpsr(state, 0, PSR64_SS | PSR_BTYPE_MASK);
+			return;
+		}
+		if (rc == 2) {
+			handle_sp_align(state);
+		}
+		if (rc > 0) {
+			set_saved_state_far(state, (register_t)bad);
+			exception = EXC_BAD_ACCESS;
+			codes[0] = KERN_INVALID_ADDRESS;
+			codes[1] = (mach_exception_data_type_t)bad;
+			exception_triage(exception, codes, numcodes);
+			__builtin_unreachable();
+		}
+		if (pd_emulate_flagm_sb(state, instr) == 0) {
+			add_user_saved_state_pc(state, 4);
+			mask_user_saved_state_cpsr(state, 0, PSR64_SS | PSR_BTYPE_MASK);
+			return;
 		}
 	}
 

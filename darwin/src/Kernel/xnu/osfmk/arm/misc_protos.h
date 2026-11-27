@@ -53,6 +53,8 @@ extern void arm_vm_prot_finalize(boot_args *args);
 
 #if __arm64__
 void __attribute__((__noreturn__)) _was_in_userspace(void);
+extern int copyin_user_unpriv(const user_addr_t user_addr, uint64_t *kernel_addr, vm_size_t nbytes);
+extern int copyout_user_unpriv(uint64_t value, user_addr_t user_addr, vm_size_t nbytes);
 #endif /* __arm64__ */
 
 extern kern_return_t DebuggerXCallEnter(boolean_t, bool);
