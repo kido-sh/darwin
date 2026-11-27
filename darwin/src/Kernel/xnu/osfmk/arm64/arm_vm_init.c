@@ -49,6 +49,7 @@
 
 #include <libkern/kernel_mach_header.h>
 #include <libkern/section_keywords.h>
+#include <os/overflow.h>
 
 #include <san/kasan.h>
 
@@ -1203,12 +1204,125 @@ arm_vm_page_granular_RWNX(vm_offset_t start, unsigned long size, unsigned granul
 	arm_vm_page_granular_prot(start, size, 0, 1, AP_RWNA, 1, granule, ARM64_PAGE_UNGUARDED);
 }
 
-/* PureDarwin: needed for the coalesced kext region, which holds kext code and
- * kext data in the same pages. See the __PRELINK_TEXT mapping below. */
-static inline void
-arm_vm_page_granular_RWX(vm_offset_t start, unsigned long size, unsigned granule)
+static void
+arm_vm_prot_prelink_kexts(bool finalize)
 {
-	arm_vm_page_granular_prot(start, size, 0, 0, AP_RWNA, 0, granule, ARM64_PAGE_UNGUARDED);
+	if (!segSizePRELINKTEXT || !kernel_mach_header_is_in_fileset(&_mh_execute_header)) {
+		return;
+	}
+
+	kernel_mach_header_t *kc_mh = PE_get_kc_header(KCKindPrimary);
+	if (kc_mh == NULL || kc_mh->filetype != MH_FILESET) {
+		return;
+	}
+	if (kc_mh->magic != MH_MAGIC_64) {
+		panic("arm_vm_prot_prelink_kexts: invalid kc magic 0x%x", kc_mh->magic);
+	}
+
+	vm_offset_t prelink_start = segPRELINKTEXTB;
+	vm_offset_t prelink_end = 0;
+	if (os_add_overflow(prelink_start, segSizePRELINKTEXT, &prelink_end)) {
+		panic("arm_vm_prot_prelink_kexts: prelink range overflow");
+	}
+
+	uintptr_t kc_cmds_start = 0;
+	uintptr_t kc_cmds_end = 0;
+	if (os_add_overflow((uintptr_t)kc_mh, sizeof(*kc_mh), &kc_cmds_start) ||
+	    os_add_overflow(kc_cmds_start, kc_mh->sizeofcmds, &kc_cmds_end)) {
+		panic("arm_vm_prot_prelink_kexts: kc load commands overflow");
+	}
+
+	uintptr_t lc_addr = kc_cmds_start;
+	for (uint32_t i = 0; i < kc_mh->ncmds; i++) {
+		size_t rem = kc_cmds_end - lc_addr;
+		if (rem < sizeof(struct load_command)) {
+			panic("arm_vm_prot_prelink_kexts: truncated kc load command");
+		}
+		struct load_command *lc = (struct load_command *)lc_addr;
+		if (lc->cmdsize < sizeof(*lc) || lc->cmdsize > rem) {
+			panic("arm_vm_prot_prelink_kexts: invalid kc load command size %u", lc->cmdsize);
+		}
+		lc_addr += lc->cmdsize;
+
+		if (lc->cmd != LC_FILESET_ENTRY) {
+			continue;
+		}
+		if (lc->cmdsize < sizeof(struct fileset_entry_command)) {
+			panic("arm_vm_prot_prelink_kexts: truncated LC_FILESET_ENTRY %u", lc->cmdsize);
+		}
+		struct fileset_entry_command *fse = (struct fileset_entry_command *)(uintptr_t)lc;
+		if (fse->vmaddr < prelink_start || fse->vmaddr >= prelink_end) {
+			continue;
+		}
+
+		vm_offset_t kext_cmds_start = 0;
+		if (os_add_overflow((vm_offset_t)fse->vmaddr, sizeof(kernel_mach_header_t), &kext_cmds_start) ||
+		    kext_cmds_start > prelink_end) {
+			panic("arm_vm_prot_prelink_kexts: kext header out of prelink bounds");
+		}
+		kernel_mach_header_t *kext_mh = (kernel_mach_header_t *)(uintptr_t)fse->vmaddr;
+		if (kext_mh->magic != MH_MAGIC_64) {
+			panic("arm_vm_prot_prelink_kexts: invalid kext magic 0x%x", kext_mh->magic);
+		}
+		vm_offset_t kext_cmds_end = 0;
+		if (os_add_overflow(kext_cmds_start, kext_mh->sizeofcmds, &kext_cmds_end) ||
+		    kext_cmds_end > prelink_end) {
+			panic("arm_vm_prot_prelink_kexts: kext load commands out of prelink bounds");
+		}
+
+		uintptr_t klc_addr = (uintptr_t)kext_cmds_start;
+		for (uint32_t j = 0; j < kext_mh->ncmds; j++) {
+			size_t krem = (uintptr_t)kext_cmds_end - klc_addr;
+			if (krem < sizeof(struct load_command)) {
+				panic("arm_vm_prot_prelink_kexts: truncated kext load command");
+			}
+			struct load_command *klc = (struct load_command *)klc_addr;
+			if (klc->cmdsize < sizeof(*klc) || klc->cmdsize > krem) {
+				panic("arm_vm_prot_prelink_kexts: invalid kext load command size %u", klc->cmdsize);
+			}
+			klc_addr += klc->cmdsize;
+
+			if (klc->cmd != LC_SEGMENT_64) {
+				continue;
+			}
+			if (klc->cmdsize < sizeof(kernel_segment_command_t)) {
+				panic("arm_vm_prot_prelink_kexts: truncated LC_SEGMENT_64 %u", klc->cmdsize);
+			}
+			kernel_segment_command_t *seg = (kernel_segment_command_t *)(uintptr_t)klc;
+			if (seg->vmsize == 0) {
+				continue;
+			}
+
+			vm_offset_t seg_start = (vm_offset_t)seg->vmaddr;
+			vm_offset_t seg_end = 0;
+			if (os_add_overflow(seg_start, (vm_offset_t)seg->vmsize, &seg_end) ||
+			    (seg_start & PAGE_MASK) != 0 || (seg->vmsize & PAGE_MASK) != 0 ||
+			    seg_start < prelink_start || seg_end > prelink_end) {
+				panic("arm_vm_prot_prelink_kexts: invalid kext segment %.16s [0x%llx, 0x%llx)",
+				    seg->segname, (unsigned long long)seg->vmaddr, (unsigned long long)seg_end);
+			}
+			if ((seg->initprot & (VM_PROT_WRITE | VM_PROT_EXECUTE)) ==
+			    (VM_PROT_WRITE | VM_PROT_EXECUTE)) {
+				panic("arm_vm_prot_prelink_kexts: W+X kext segment %.16s", seg->segname);
+			}
+
+			unsigned long size = (unsigned long)seg->vmsize;
+			if (finalize) {
+				if (strncmp(seg->segname, "__DATA_CONST", sizeof(seg->segname)) == 0) {
+					arm_vm_page_granular_RNX(seg_start, size, 0);
+				}
+				continue;
+			}
+
+			if (seg->initprot & VM_PROT_EXECUTE) {
+				arm_vm_page_granular_ROX(seg_start, size, 0, ARM64_PAGE_UNGUARDED);
+			} else if (seg->initprot & VM_PROT_WRITE) {
+				arm_vm_page_granular_RWNX(seg_start, size, 0);
+			} else {
+				arm_vm_page_granular_RNX(seg_start, size, 0);
+			}
+		}
+	}
 }
 
 // Populate seg...AuxKC and fixup AuxKC permissions
@@ -1407,14 +1521,12 @@ arm_vm_prot_init(__unused boot_args * args)
 	arm_vm_page_granular_RWNX(auxkc_base, auxKC_range->length, 0);
 
 noAuxKC:
-	/* PureDarwin: upstream maps this RWNX and expects OSKext to refine it, but
-	 * that refinement is skipped for fileset KCs (setVMAttributes returns
-	 * early) and machine_lockdown() has not run by the time the first kext
-	 * starts. Our kexts are single-__TEXT bundles, so one kext's code, DATA
-	 * and DATA_CONST all sit in this region and it has to be both writable and
-	 * executable. Splitting kext code into __PLK_TEXT_EXEC in kc-tools would
-	 * let this go back to RWNX/ROX. */
-	arm_vm_page_granular_RWX(segPRELINKTEXTB, segSizePRELINKTEXT, ARM64_GRANULE_ALLOW_BLOCK);
+	if (kernel_mach_header_is_in_fileset(&_mh_execute_header)) {
+		arm_vm_page_granular_RNX(segPRELINKTEXTB, segSizePRELINKTEXT, 0);
+		arm_vm_prot_prelink_kexts(false);
+	} else {
+		arm_vm_page_granular_RWNX(segPRELINKTEXTB, segSizePRELINKTEXT, ARM64_GRANULE_ALLOW_BLOCK);
+	}
 
 	/* Map coalesced kext DATA_CONST segment RWNX (could be empty) */
 	arm_vm_page_granular_RWNX(segPLKDATACONSTB, segSizePLKDATACONST, ARM64_GRANULE_ALLOW_BLOCK); // Refined in OSKext::readPrelinkedExtensions
@@ -1696,8 +1808,11 @@ arm_vm_prot_finalize(boot_args * args __unused)
 	}
 
 	/* tighten permissions on kext read only data and code */
-	/* PureDarwin: keep the coalesced kext region RWX; see arm_vm_prot_init. */
-	arm_vm_page_granular_RWX(segPRELINKTEXTB, segSizePRELINKTEXT, ARM64_GRANULE_ALLOW_BLOCK);
+	if (kernel_mach_header_is_in_fileset(&_mh_execute_header)) {
+		arm_vm_prot_prelink_kexts(true);
+	} else {
+		arm_vm_page_granular_RNX(segPRELINKTEXTB, segSizePRELINKTEXT, ARM64_GRANULE_ALLOW_BLOCK);
+	}
 	arm_vm_page_granular_RNX(segPLKDATACONSTB, segSizePLKDATACONST, ARM64_GRANULE_ALLOW_BLOCK);
 
 	cpu_stack_alloc(&BootCpuData);
