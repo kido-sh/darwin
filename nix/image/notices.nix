@@ -2,8 +2,8 @@
 # each component's own license file from this tree or from the third-party source it is built from.
 { runCommand
 , lib
-, go
 , unzip
+, rustPlatform
 , zsh
 , ncurses
 , libedit
@@ -90,7 +90,6 @@ let
     [ "libffi" libffiReal.src "LICENSE" ]
     [ "libxml2" libxml2.src "Copyright" ]
     [ "libressl" libressl.src "COPYING" ]
-    [ "go" go.src "LICENSE" ]
   ] ++ lib.concatLists (lib.mapAttrsToList (name: pkg:
     let pin = lib.importJSON (../darwin/third-party + "/${name}/source.json");
     in lib.optional (pin.licenseFile != null) [ name pkg.src pin.licenseFile ]) pinned);
@@ -100,14 +99,14 @@ let
   notice = builtins.path { path = tree + "/NOTICE"; name = "notice"; };
   spdxTexts = builtins.path { path = tree + "/LICENSES"; name = "licenses"; };
 in
-runCommand "kido-notices" { nativeBuildInputs = [ go unzip ]; } ''
+runCommand "kido-notices" { nativeBuildInputs = [ unzip ]; } ''
   d=$out/usr/share/doc/kido/licenses
   mkdir -p $d
 
   cat > $out/usr/share/doc/kido/SOURCE <<'EOF'
   KidoDarwin is built from https://github.com/kido-sh/darwin at revision ${revision}.
   Its third-party packages come from nixpkgs ${nixpkgsRev}, and kido-agent from
-  https://github.com/kido-sh/kido at revision ${kido.rev}.
+  https://github.com/kido-sh/kido at revision ${kido.rev or "unknown"}.
   EOF
   install -Dm644 ${notice} $out/usr/share/doc/kido/NOTICE
   install -Dm644 -t $d/SPDX ${spdxTexts}/*.txt
@@ -132,15 +131,33 @@ runCommand "kido-notices" { nativeBuildInputs = [ go unzip ]; } ''
     fromSource ${builtins.elemAt s 0} ${builtins.elemAt s 1} ${builtins.elemAt s 2}
   '') fromSource}
 
-  # kido-agent: kido's own license, and those of the Go modules linked into it
+  # kido-agent: kido's own license, Rust standard library licenses (MIT / Apache-2.0 /
+  # compiler-builtins), and every vendored Cargo crate's license files from agent.cargoDeps
   install -Dm644 ${kido}/LICENSE "$d/kido-agent/LICENSE"
-  go version -m ${agent}/bin/kido-agent | while read -r kind path rest; do
-    [ "$kind" = dep ] || continue
-    for f in ${agent.goModules}/"$path"/LICENSE* ${agent.goModules}/"$path"/COPYING*; do
+  install -Dm644 ${rustPlatform.rustLibSrc}/stdarch/LICENSE-APACHE "$d/kido-agent/rust/LICENSE-APACHE"
+  install -Dm644 ${rustPlatform.rustLibSrc}/stdarch/LICENSE-MIT "$d/kido-agent/rust/LICENSE-MIT"
+  install -Dm644 ${rustPlatform.rustLibSrc}/compiler-builtins/LICENSE.txt "$d/kido-agent/rust/compiler-builtins-LICENSE.txt"
+
+  crate_count=0
+  for crate_dir in ${agent.cargoDeps}/source-registry-0/*; do
+    [ -d "$crate_dir" ] || continue
+    crate=$(basename "$crate_dir")
+    found=0
+    for f in "$crate_dir"/LICENSE* "$crate_dir"/COPYING* "$crate_dir"/COPYRIGHT* "$crate_dir"/UNLICENSE*; do
       if [ -f "$f" ]; then
-        install -Dm644 "$f" "$d/kido-agent/$path/$(basename "$f")"
+        install -Dm644 "$f" "$d/kido-agent/crates/$crate/$(basename "$f")"
+        found=1
       fi
     done
+    if [ "$found" -eq 0 ]; then
+      echo "ERROR: no license file found for vendored crate $crate" >&2
+      exit 1
+    fi
+    crate_count=$((crate_count + 1))
   done
+  if [ "$crate_count" -eq 0 ]; then
+    echo "ERROR: no vendored Cargo crates found under ${agent.cargoDeps}" >&2
+    exit 1
+  fi
   find $out -type f -exec chmod 644 {} +
 ''

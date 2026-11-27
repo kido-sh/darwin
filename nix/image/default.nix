@@ -13,6 +13,7 @@ let
     iconvArm64eBuild
     kernelArm64VirtBuild
     kextsArm64Build
+    libSystemArm64Build
     libeditArm64Build
     libresslArm64eBuild
     libzDylibArm64Build
@@ -28,7 +29,11 @@ let
     toyboxArm64Build
     zshArm64Build
     ;
-  agent = pkgs.callPackage ./agent.nix { inherit kido; };
+  agent = pkgs.callPackage ./agent.nix {
+    inherit kido;
+    inherit (toolchain) darwinCrossToolchain appleSdk;
+    libSystem = libSystemArm64Build;
+  };
   notices = pkgs.callPackage ./notices.nix {
     inherit kido revision nixpkgsRev;
     agent = agent.agent;

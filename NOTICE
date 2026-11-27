@@ -204,8 +204,11 @@ The FUSE protocol header of Linux 7.3, in the VirtioFS kernel extension
   https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
 
 kido-agent, https://github.com/kido-sh/kido
-  The kido authors. Apache License 2.0. Built with the Go standard library,
-  Copyright 2009 The Go Authors, BSD 3-Clause License.
+  The kido authors. Apache License 2.0. Built with the Rust standard library
+  (The Rust Project Developers, MIT License and Apache License 2.0, with
+  compiler-builtins under MIT and Apache License 2.0 with LLVM Exceptions) and
+  its Cargo crate dependencies (MIT, Apache-2.0, BSD-3-Clause, Unicode-3.0,
+  individual crate license files in /usr/share/doc/kido/licenses/kido-agent/).
 
 gnu-efi 4.0.2, linked into the EFI loader on the image's EFI system partition
   Copyright (c) 1998-2000 Intel Corporation, Copyright (c) 2025 GNU-EFI

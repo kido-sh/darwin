@@ -161,7 +161,7 @@ sources the recipes in nix/darwin/third-party pin by hash, and kido for its agen
 | Mozilla CA certificates (NSS) | 3.125 | `MPL-2.0` | /etc/ssl/cert.pem, /System/Library/Security/Certificates.bundle |
 | iana-etc | 20251215 | `MIT` | /etc/services, /etc/protocols |
 | LLVM compiler-rt builtins | 21.1.8 | `Apache-2.0 WITH LLVM-exception` | Linked into the libraries that need it |
-| kido-agent (github.com/kido-sh/kido) | | `Apache-2.0`, Go standard library `BSD-3-Clause` | /usr/libexec/kido-agent |
+| kido-agent (github.com/kido-sh/kido) | | `Apache-2.0`, Rust standard library `MIT`, `Apache-2.0`, `Apache-2.0 WITH LLVM-exception`, and Cargo crate dependencies (`MIT`, `Apache-2.0`, `BSD-3-Clause`, `Unicode-3.0`) | /usr/libexec/kido-agent |
 | gnu-efi | 4.0.2 | `LicenseRef-gnu-efi-efilib`, `BSD-3-Clause` (its GPL-2.0-or-later OR BSD-3-Clause files taken under BSD), `BSD-2-Clause-Patent` | Linked into the EFI loader on the ESP |
 
 xnu-loader (`BSD-3-Clause`) is the boot loader beside the disk and, as BOOTAA64.EFI, on the ESP.
