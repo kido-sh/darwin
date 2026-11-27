@@ -1,6 +1,7 @@
 #include "PDLifs.h"
 
 #include <IOKit/IOLib.h>
+#include <kern/task.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
 
@@ -78,6 +79,9 @@ com_apple_filesystems_lifs::start(IOService *provider)
 bool
 AppleLIFSUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
 {
+	if (clientHasPrivilege(securityID, kIOClientPrivilegeAdministrator) != kIOReturnSuccess)
+		return false;
+
 	if (!IOUserClient::initWithTask(owningTask, securityID, type))
 		return false;
 
@@ -85,7 +89,6 @@ AppleLIFSUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 ty
 	if (fLock == NULL)
 		return false;
 
-	fTask = owningTask;
 	fPid = proc_selfpid();
 	proc_selfname(fName, sizeof(fName));
 	IOLog("PDLifs: open type %u by %s[%d]\n", (unsigned)type, fName, fPid);
@@ -161,7 +164,7 @@ AppleLIFSUserClient::createVolumePort(IOExternalMethodArguments *args)
 	if (args->structureOutput == NULL || args->structureOutputSize < sizeof(name))
 		return kIOReturnBadArgument;
 
-	ret = copyPortNameForObjectInTask(fTask, this, &name);
+	ret = copyPortNameForObjectInTask(current_task(), this, &name);
 	if (ret != kIOReturnSuccess)
 		return ret;
 
@@ -182,7 +185,7 @@ AppleLIFSUserClient::configureUserClient(IOExternalMethodArguments *args)
 
 	// {port name of an extension's volume port, extension pid, ?, 1}
 	memcpy(in, args->structureInput, sizeof(in));
-	copyObjectForPortNameInTask(fTask, in[0], &obj);
+	copyObjectForPortNameInTask(current_task(), in[0], &obj);
 	IOLog("PDLifs: %s[%d] ConfigureUserClient port 0x%x pid %u 0x%x %u -> %s, refused (no LiveFS)\n",
 	    fName, fPid, in[0], in[1], in[2], in[3], OSDynamicCast(AppleLIFSUserClient, obj) ? "extension client" : "?");
 	OSSafeReleaseNULL(obj);

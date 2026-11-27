@@ -12,6 +12,7 @@
 #include <sys/kauth.h>
 #include <sys/proc.h>
 #include <pexpert/pexpert.h>
+#include <sys/random.h>
 #include <sys/systm.h>
 #include "PDKeyStoreFV.h"
 
@@ -71,25 +72,12 @@ static bool     sSecretReady;
 // (0xe00002c7 only makes opendirectoryd log "Unable to determine ownership state", it still adds a verifier)
 static IOReturn sOwnersReply = kIOReturnSuccess;
 
-// the wrapping secret comes from the platform UUID, computed once so it can't change under a bag
 static void
 loadSecret()
 {
-    SHA256_CTX c;
-    IOService *pe;
-    OSString *uuid = NULL;
-
     if (sSecretReady)
         return;
-    pe = IOService::getPlatform();
-    if (pe != NULL)
-        uuid = OSDynamicCast(OSString, pe->getProvider() ? pe->getProvider()->getProperty(kIOPlatformUUIDKey) : NULL);
-
-    SHA256_Init(&c);
-    SHA256_Update(&c, "PDKeyStore", 10);
-    if (uuid != NULL)
-        SHA256_Update(&c, uuid->getCStringNoCopy(), uuid->getLength());
-    SHA256_Final(sSecret, &c);
+    read_random(sSecret, sizeof(sSecret));
     fvSetSecret(sSecret);
     sSecretReady = true;
 }
@@ -104,22 +92,28 @@ bagForUid(int64_t uid)
     return NULL;
 }
 
-// -3 is the caller's session; root callers such as loginwindow get the newest session
 static PDKeyBag *
-resolve(int64_t h)
+resolve(int64_t h, bool isAdmin, int64_t callerUid)
 {
     PDKeyBag *b;
 
     if (h == AKS_HANDLE_DEVICE || h == AKS_HANDLE_DEVICE_ALT)
-        return &sDeviceBag;
+        return isAdmin ? &sDeviceBag : NULL;
     if (h == AKS_HANDLE_SESSION) {
-        b = bagForUid(kauth_cred_getuid(kauth_cred_get()));
-        if (b == NULL && sLastSessionUid >= 0)
+        b = bagForUid(callerUid);
+        if (b == NULL && isAdmin && sLastSessionUid >= 0)
             b = bagForUid(sLastSessionUid);
         return b;
     }
-    if (h < 0)
+    if (h < 0) {
+        if (h == INT64_MIN)
+            return NULL;
+        if (!isAdmin && -h != callerUid)
+            return NULL;
         return bagForUid(-h);
+    }
+    if (!isAdmin || h == 0)
+        return NULL;
 
     for (int i = 0; i < AKS_MAX_BAGS; i++) {
         if (sBags[i].used && sBags[i].handle == h)
@@ -494,11 +488,11 @@ fvDescribe(IOExternalMethodArguments *args)
 }
 
 static IOReturn
-dispatch(uint32_t selector, IOExternalMethodArguments *args)
+dispatch(uint32_t selector, IOExternalMethodArguments *args, bool isAdmin, int64_t callerUid)
 {
     const uint64_t *in = args->scalarInput;
     uint32_t n = args->scalarInputCount;
-    PDKeyBag *b = n > 0 ? resolve((int64_t)in[0]) : NULL;
+    PDKeyBag *b = n > 0 ? resolve((int64_t)in[0], isAdmin, callerUid) : NULL;
     DerOut o;
     uint8_t key[32], buf[40];
     int64_t h;
@@ -508,6 +502,8 @@ dispatch(uint32_t selector, IOExternalMethodArguments *args)
     case 0:
         return kIOReturnSuccess;
     case 2:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         ret = createBag(&h);
         if (ret == kIOReturnSuccess && args->scalarOutputCount > 0)
             args->scalarOutput[0] = (uint64_t)h;
@@ -516,6 +512,8 @@ dispatch(uint32_t selector, IOExternalMethodArguments *args)
         // the blob applekeystored saves: magic, uuid, uid
         uint8_t blob[32] = { 'P', 'D', 'K', 'B', 1 };
 
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         if (b == NULL)
             return AKS_ERR_NOT_FOUND;
         memcpy(blob + 8, b->uuid, 16);
@@ -529,11 +527,15 @@ dispatch(uint32_t selector, IOExternalMethodArguments *args)
         return output(args, blob, sizeof(blob));
     }
     case 4:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         if (b == NULL)
             return AKS_ERR_NOT_FOUND;
         b->handle = 0;
         return kIOReturnSuccess;
     case 5:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         if (b == NULL || n < 2)
             return AKS_ERR_NOT_FOUND;
         b->uid = (int64_t)in[1];
@@ -548,6 +550,8 @@ dispatch(uint32_t selector, IOExternalMethodArguments *args)
             args->scalarOutput[0] = b == &sDeviceBag ? AKS_STATE_DEVICE : AKS_STATE_SESSION;
         return kIOReturnSuccess;
     case 9:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         if (b == NULL)
             return AKS_ERR_NO_SESSION;
         if (b != &sDeviceBag)
@@ -576,8 +580,12 @@ dispatch(uint32_t selector, IOExternalMethodArguments *args)
         return AKS_ERR_SEP_POLICY;
     case 14:
         // by uid, or -3 for the caller's own session
-        if (n > 0 && (int64_t)in[0] != AKS_HANDLE_SESSION)
-            b = (int64_t)in[0] >= 0 ? bagForUid((int64_t)in[0]) : NULL;
+        if (n > 0 && (int64_t)in[0] != AKS_HANDLE_SESSION) {
+            int64_t targetUid = (int64_t)in[0];
+            if (!isAdmin && targetUid != callerUid)
+                return kIOReturnNotPrivileged;
+            b = targetUid >= 0 ? bagForUid(targetUid) : NULL;
+        }
         if (b == NULL)
             return AKS_ERR_NOT_FOUND;
         if (args->scalarOutputCount > 0)
@@ -601,6 +609,8 @@ dispatch(uint32_t selector, IOExternalMethodArguments *args)
     case 42:
         return AKS_ERR_NOT_PERMITTED;
     case 78:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         // Size queries observed from the entitled opendirectoryd client in
         // the macOS 26 reference VM. These are scalar replies, not keybags.
         if (n != 1 || args->scalarOutputCount != 1)
@@ -613,20 +623,32 @@ dispatch(uint32_t selector, IOExternalMethodArguments *args)
             return kIOReturnUnsupported;
         return kIOReturnSuccess;
     case 84:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         return fvCommand(args);
     case 74:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         loadSecret();
         return fvNewAccessToken(args);
     case 75:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         loadSecret();
         return fvUnwrapVolumeKey(args);
     case 76:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         loadSecret();
         return fvNewVerifier(args);
     case 77:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         loadSecret();
         return fvRewrap(args);
     case 85:
+        if (!isAdmin)
+            return kIOReturnNotPrivileged;
         loadSecret();
         return fvDescribe(args);
     }
@@ -667,10 +689,13 @@ AppleKeyStoreUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
                                         void *reference)
 {
     char name[32] = "?";
+    kauth_cred_t cred = kauth_cred_get();
+    bool isAdmin = kauth_cred_issuser(cred) != 0;
+    int64_t callerUid = (int64_t)kauth_cred_getuid(cred);
     IOReturn ret;
 
     IOLockLock(sLock);
-    ret = dispatch(selector, args);
+    ret = dispatch(selector, args, isAdmin, callerUid);
     IOLockUnlock(sLock);
 
     // every FileVault command with its reply, it decides Setup Assistant's security check

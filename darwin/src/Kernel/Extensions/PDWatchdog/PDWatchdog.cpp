@@ -78,6 +78,9 @@ IOReturn
 IOWatchdogUserClient::open(IOService *provider, task_t owningTask, void *securityID,
     UInt32 type, IOUserClient **handler)
 {
+	if (clientHasPrivilege(securityID, kIOClientPrivilegeAdministrator) != kIOReturnSuccess) {
+		return kIOReturnNotPrivileged;
+	}
 	IOWatchdogUserClient *uc = OSTypeAlloc(IOWatchdogUserClient);
 
 	if (uc == NULL || !uc->initWithTask(owningTask, securityID, type)) {

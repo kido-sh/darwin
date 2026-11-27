@@ -34,7 +34,6 @@ private:
 	IOReturn createVolumePort(IOExternalMethodArguments *args);
 	IOReturn configureUserClient(IOExternalMethodArguments *args);
 
-	task_t fTask;
 	int fPid;
 	char fName[32];
 	mach_port_t fMainPort;
