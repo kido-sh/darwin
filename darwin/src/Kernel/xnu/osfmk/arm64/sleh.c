@@ -174,6 +174,8 @@ static void handle_mach_continuous_time_trap(arm_saved_state_t *);
 static void handle_msr_trap(arm_saved_state_t *state, uint64_t esr);
 #if __has_feature(ptrauth_calls)
 static void handle_pac_fail(arm_saved_state_t *state, uint64_t esr) __dead2;
+#endif
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 static inline uint64_t fault_addr_bitmask(unsigned int bit_from, unsigned int bit_to);
 #endif
 static void handle_bti_fail(arm_saved_state_t *state, uint64_t esr);
@@ -1906,14 +1908,14 @@ typedef struct user_brk_label_range_descriptor {
 } user_brk_label_range_descriptor_t;
 
 const user_brk_label_range_descriptor_t user_brk_descriptors[] = {
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 	/* PAC failures detected in data by userspace */
 	{
 		/* Use the exact same label range as kernel PAC */
 		.base   = PTRAUTH_TRAP_START,
 		.max    = PTRAUTH_TRAP_END,
 	},
-#endif /* __has_feature(ptrauth_calls) */
+#endif /* __has_feature(ptrauth_calls) || HAS_USER_PAC */
 	/* Available for use by system libraries when detecting disallowed conditions */
 	{
 		/* Note this uses the same range as the kernel-specific XNU_HARD_TRAP range */
@@ -2277,7 +2279,7 @@ handle_user_breakpoint(arm_saved_state_t *state, uint64_t esr __unused)
 		if (descriptor != NULL) {
 			exception |= EXC_MAY_BE_UNRECOVERABLE_BIT;
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 			/*
 			 * We have additional policy specifically for PAC violations.
 			 * To make the rest of the code easier to follow, don't set
@@ -2289,7 +2291,7 @@ handle_user_breakpoint(arm_saved_state_t *state, uint64_t esr __unused)
 				exception &= ~(EXC_MAY_BE_UNRECOVERABLE_BIT);
 				exception |= EXC_PTRAUTH_BIT;
 			}
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 		}
 	}
 
@@ -2350,7 +2352,7 @@ inspect_data_abort(uint32_t iss, fault_status_t *fault_code, vm_prot_t *fault_ty
 	}
 }
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 static inline uint64_t
 fault_addr_bitmask(unsigned int bit_from, unsigned int bit_to)
 {
@@ -2460,12 +2462,12 @@ handle_pc_align(arm_saved_state_t *ss)
 	}
 
 	exc = EXC_BAD_ACCESS;
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 	uint64_t pc = get_saved_state_pc(ss);
 	if (user_fault_matches_pac_error_code(pc, pc, false)) {
 		exc |= EXC_PTRAUTH_BIT;
 	}
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 
 	codes[0] = EXC_ARM_DA_ALIGN;
 	codes[1] = get_saved_state_pc(ss);
@@ -2486,11 +2488,11 @@ handle_sp_align(arm_saved_state_t *ss)
 	}
 
 	exc = EXC_BAD_ACCESS;
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 	if (user_fault_matches_pac_error_code(get_saved_state_sp(ss), get_saved_state_pc(ss), true)) {
 		exc |= EXC_PTRAUTH_BIT;
 	}
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 
 	codes[0] = EXC_ARM_SP_ALIGN;
 	codes[1] = get_saved_state_sp(ss);
@@ -2824,12 +2826,12 @@ handle_user_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_addr
 
 	codes[1] = fault_addr;
 	pd_fault_dump(state, esr, fault_addr, (kern_return_t)codes[0]);
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 	bool is_data_abort = (ESR_EC(esr) == ESR_EC_DABORT_EL0);
 	if (user_fault_matches_pac_error_code(fault_addr, get_saved_state_pc(state), is_data_abort)) {
 		exc |= EXC_PTRAUTH_BIT;
 	}
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 
 	const self_restrict_mode_t self_restrict_mode = user_fault_in_self_restrict_mode(thread);
 	if ((self_restrict_mode != SELF_RESTRICT_NONE) &&
@@ -3760,7 +3762,7 @@ handle_bti_fail(arm_saved_state_t *state, uint64_t esr)
 static void
 handle_user_pac_fail(arm_saved_state_t *state, uint64_t esr)
 {
-	exception_type_t           exception = EXC_BAD_ACCESS;
+	exception_type_t           exception = EXC_BAD_ACCESS | EXC_PTRAUTH_BIT;
 	mach_exception_data_type_t codes[2]  = {EXC_ARM_PAC_FAIL};
 	uint32_t                   instr     = 0;
 

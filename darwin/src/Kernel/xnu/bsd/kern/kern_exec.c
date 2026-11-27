@@ -5438,9 +5438,9 @@ bad:
 		}
 #endif /* XNU_TARGET_OS_OSX */
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 		task_set_pac_exception_fatal_flag(new_task);
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 		task_set_jit_flags(new_task);
 	}
 
@@ -6281,9 +6281,9 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
 
 		task_set_main_thread_qos(new_task, main_thread);
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 		task_set_pac_exception_fatal_flag(new_task);
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 		task_set_jit_flags(new_task);
 
 #if CONFIG_ARCADE

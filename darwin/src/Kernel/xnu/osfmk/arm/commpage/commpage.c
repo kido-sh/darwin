@@ -509,17 +509,28 @@ commpage_init_arm_optional_features_isar1(uint64_t *commpage_bits)
 		gARM_FEAT_JSCVT = 1;
 		bits |= kHasFeatJSCVT;
 	}
-	if ((isar1 & ID_AA64ISAR1_EL1_API_MASK) >= ID_AA64ISAR1_EL1_API_PAuth_EN) {
+	uint64_t api = (isar1 & ID_AA64ISAR1_EL1_API_MASK) >> ID_AA64ISAR1_EL1_API_OFFSET;
+	uint64_t apa = (isar1 & ID_AA64ISAR1_EL1_APA_MASK) >> ID_AA64ISAR1_EL1_APA_OFFSET;
+	uint64_t apa3 = (__builtin_arm_rsr64("ID_AA64ISAR2_EL1") & ID_AA64ISAR2_EL1_APA3_MASK) >>
+	    ID_AA64ISAR2_EL1_APA3_OFFSET;
+	uint64_t pauth = api;
+	if (apa > pauth) {
+		pauth = apa;
+	}
+	if (apa3 > pauth) {
+		pauth = apa3;
+	}
+	if (pauth >= 1) {
 		gARM_FEAT_PAuth = 1;
 		bits |= kHasFeatPAuth;
 	}
-	if ((isar1 & ID_AA64ISAR1_EL1_API_MASK) >= ID_AA64ISAR1_EL1_API_PAuth2_EN) {
+	if (pauth >= 3) {
 		gARM_FEAT_PAuth2 = 1;
 	}
-	if ((isar1 & ID_AA64ISAR1_EL1_API_MASK) >= ID_AA64ISAR1_EL1_API_FPAC_EN) {
+	if (pauth >= 4) {
 		gARM_FEAT_FPAC = 1;
 	}
-	if ((isar1 & ID_AA64ISAR1_EL1_API_MASK) >= ID_AA64ISAR1_EL1_API_FPACCOMBINE) {
+	if (pauth >= 5) {
 		gARM_FEAT_FPACCOMBINE = 1;
 	}
 	if ((isar1 & ID_AA64ISAR1_EL1_DPB_MASK) >= ID_AA64ISAR1_EL1_DPB_EN) {

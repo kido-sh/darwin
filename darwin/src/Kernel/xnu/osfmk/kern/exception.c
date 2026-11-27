@@ -814,7 +814,7 @@ out:
 	return kr;
 }
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 static void
 pac_exception_triage(
 	exception_type_t        exception,
@@ -943,14 +943,14 @@ exception_triage(
 #endif /* MACH_BSD */
 #endif /* DEVELOPMENT || DEBUG */
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 	if (exception & EXC_PTRAUTH_BIT) {
 		exception &= ~EXC_PTRAUTH_BIT;
 		assert(codeCnt == 2);
 		/* Note this may consume control flow if it decides the exception is unrecoverable. */
 		pac_exception_triage(exception, code);
 	}
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 	if (exception & EXC_MAY_BE_UNRECOVERABLE_BIT) {
 		exception &= ~EXC_MAY_BE_UNRECOVERABLE_BIT;
 		assert(codeCnt == 2);

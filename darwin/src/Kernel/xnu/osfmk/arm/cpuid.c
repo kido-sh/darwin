@@ -111,10 +111,12 @@ bool
 arm64_pac_supported(void)
 {
 	uint64_t isar1 = __builtin_arm_rsr64("ID_AA64ISAR1_EL1");
+	uint64_t isar2 = __builtin_arm_rsr64("ID_AA64ISAR2_EL1");
 	uint64_t api = (isar1 & ID_AA64ISAR1_EL1_API_MASK) >> ID_AA64ISAR1_EL1_API_OFFSET;
 	uint64_t apa = (isar1 & ID_AA64ISAR1_EL1_APA_MASK) >> ID_AA64ISAR1_EL1_APA_OFFSET;
+	uint64_t apa3 = (isar2 & ID_AA64ISAR2_EL1_APA3_MASK) >> ID_AA64ISAR2_EL1_APA3_OFFSET;
 
-	return api != 0 || apa != 0;
+	return api != 0 || apa != 0 || apa3 != 0;
 }
 
 arm_cpu_info_t *

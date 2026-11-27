@@ -68,10 +68,18 @@
 
 
 #if defined(HAS_APPLE_PAC) || defined(HAS_USER_PAC)
+#if HAS_USER_PAC
+#define TASK_ADDITIONS_USER_PAC \
+	uint64_t pac_rop_keys[6]; \
+	uint64_t pac_jop_keys[4];
+#else
+#define TASK_ADDITIONS_USER_PAC
+#endif
 #define TASK_ADDITIONS_PAC \
 	uint64_t rop_pid; \
 	uint64_t jop_pid; \
-	uint8_t disable_user_jop;
+	uint8_t disable_user_jop; \
+	TASK_ADDITIONS_USER_PAC
 #else
 #define TASK_ADDITIONS_PAC
 #endif

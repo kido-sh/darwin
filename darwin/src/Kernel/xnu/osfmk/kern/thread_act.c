@@ -194,7 +194,7 @@ thread_set_state_allowed(
 		return false;
 	}
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 	/* Do not allow Fatal PAC exception binaries to set Debug state */
 	if ((flags & TSSF_CHECK_ENTITLEMENT) &&
 	    task_is_pac_exception_fatal(target_task) &&
@@ -203,7 +203,7 @@ thread_set_state_allowed(
 		mach_port_guard_exception(flavor, 0, kGUARD_EXC_THREAD_SET_STATE);
 		return false;
 	}
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 
 	return true;
 }

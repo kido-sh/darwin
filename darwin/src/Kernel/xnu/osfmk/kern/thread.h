@@ -1380,9 +1380,9 @@ extern void             machine_thread_init(void);
 
 extern void             machine_thread_template_init(thread_t thr_template);
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 extern bool             machine_thread_state_is_debug_flavor(int flavor);
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 
 
 extern void             machine_thread_create(

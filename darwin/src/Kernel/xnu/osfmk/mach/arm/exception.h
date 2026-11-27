@@ -39,14 +39,18 @@
 
 #if XNU_KERNEL_PRIVATE
 
-#if __has_feature(ptrauth_calls)
+#if defined(__arm64__)
+#include <pexpert/arm64/board_config.h>
+#endif
+
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 /*
  * Note that while this bit can show up in the reported exception code,
  * it also does double-duty by being set just while the exception is temporarily shuffled around
  * within xnu, and it can be cleared before we reached exception_triage_thread().
  */
 #define EXC_PTRAUTH_BIT                 0x200   /* Set if the exception was caused by a ptrauth failure */
-#endif /* __has_feature(ptrauth_calls) */
+#endif /* __has_feature(ptrauth_calls) || HAS_USER_PAC */
 #endif /* XNU_KERNEL_PRIVATE */
 
 /*

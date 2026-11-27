@@ -45,6 +45,7 @@
 #include <kern/machine.h>
 #include <kern/misc_protos.h>
 #include <prng/random.h>
+#include <sys/random.h>
 #include <kern/startup.h>
 #include <kern/thread.h>
 #include <kern/timer_queue.h>
@@ -2939,15 +2940,23 @@ ml_thread_set_disable_user_jop(thread_t thread, uint8_t disable_user_jop)
 }
 
 #if HAS_USER_PAC
+static uint64_t user_pac_key_gen;
+
 static uint64_t
 ml_user_pac_new_pid(void)
 {
 	uint64_t pid;
 
 	do {
-		pid = early_random();
-	} while (pid == CPU_USER_PAC_NO_KEY);
+		pid = os_atomic_inc(&user_pac_key_gen, relaxed);
+	} while (pid == CPU_USER_PAC_NO_KEY || pid == 0);
 	return pid;
+}
+
+static void
+ml_user_pac_fill_keys(uint64_t *keys, size_t count)
+{
+	read_frandom(keys, (u_int)(count * sizeof(uint64_t)));
 }
 #endif
 
@@ -2956,8 +2965,12 @@ ml_task_set_rop_pid(task_t task, task_t parent_task, boolean_t inherit)
 {
 	if (inherit) {
 		task->rop_pid = parent_task->rop_pid;
+#if HAS_USER_PAC
+		memcpy(task->pac_rop_keys, parent_task->pac_rop_keys, sizeof(task->pac_rop_keys));
+#endif
 	} else {
 #if HAS_USER_PAC
+		ml_user_pac_fill_keys(task->pac_rop_keys, sizeof(task->pac_rop_keys) / sizeof(task->pac_rop_keys[0]));
 		task->rop_pid = ml_user_pac_new_pid();
 #else
 		task->rop_pid = early_random();
@@ -2975,10 +2988,19 @@ ml_task_set_jop_pid(task_t task, task_t parent_task, boolean_t inherit, boolean_
 {
 	if (inherit) {
 		task->jop_pid = parent_task->jop_pid;
+#if HAS_USER_PAC
+		memcpy(task->pac_jop_keys, parent_task->pac_jop_keys, sizeof(task->pac_jop_keys));
+#endif
 	} else if (disable_user_jop) {
 		task->jop_pid = ml_non_arm64e_user_jop_pid();
+#if HAS_USER_PAC
+		bzero(task->pac_jop_keys, sizeof(task->pac_jop_keys));
+#endif
 	} else {
 		task->jop_pid = ml_default_jop_pid();
+#if HAS_USER_PAC
+		bzero(task->pac_jop_keys, sizeof(task->pac_jop_keys));
+#endif
 	}
 }
 
@@ -2987,9 +3009,13 @@ ml_task_set_jop_pid_from_shared_region(task_t task, boolean_t disable_user_jop)
 {
 	if (disable_user_jop) {
 		task->jop_pid = ml_non_arm64e_user_jop_pid();
+#if HAS_USER_PAC
+		bzero(task->pac_jop_keys, sizeof(task->pac_jop_keys));
+#endif
 		return;
 	}
 #if HAS_USER_PAC
+	ml_user_pac_fill_keys(task->pac_jop_keys, sizeof(task->pac_jop_keys) / sizeof(task->pac_jop_keys[0]));
 	task->jop_pid = ml_user_pac_new_pid();
 #else
 

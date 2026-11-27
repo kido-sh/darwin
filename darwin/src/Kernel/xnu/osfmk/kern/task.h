@@ -1356,10 +1356,10 @@ extern void task_get_owned_vmobjects(task_t task, size_t buffer_size, vmobject_l
 extern void task_set_filter_msg_flag(task_t task, boolean_t flag);
 extern boolean_t task_get_filter_msg_flag(task_t task);
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 extern bool task_is_pac_exception_fatal(task_t task);
 extern void task_set_pac_exception_fatal_flag(task_t task);
-#endif /*__has_feature(ptrauth_calls)*/
+#endif
 
 extern bool task_is_jit_exception_fatal(task_t task);
 extern void task_set_jit_flags(task_t task);

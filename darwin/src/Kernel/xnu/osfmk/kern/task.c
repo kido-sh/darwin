@@ -1496,11 +1496,11 @@ task_create_internal(
 	}
 
 	if (parent_task && inherit_memory) {
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 		/* Inherit the pac exception flags from parent if in fork */
 		task_ro_data.t_flags_ro |= (parent_t_flags_ro & (TFRO_PAC_ENFORCE_USER_STATE |
 		    TFRO_PAC_EXC_FATAL));
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 		/* Inherit the platform restrictions flags from parent if in fork */
 		task_ro_data.t_flags_ro |= parent_t_flags_ro & (TFRO_PLATFORM | TFRO_JIT_EXC_FATAL);
 #if XNU_TARGET_OS_OSX
@@ -10083,7 +10083,7 @@ current_task_has_sec_enabled(void)
 #endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 /* On FPAC, we want to deliver all PAC violations as fatal exceptions, regardless
  * of the enable_pac_exception boot-arg value or any other entitlements.
  * The only case where we allow non-fatal PAC exceptions on FPAC is for debugging,
@@ -10118,7 +10118,11 @@ task_set_pac_exception_fatal_flag(
 	 * avoid regressions in third party plugins and third party apps when using AMFI boot-args
 	 */
 	ipc_space_policy_t pol = ipc_policy_for_task(task);
+#if !__has_feature(ptrauth_calls) && HAS_USER_PAC
+	bool platform_binary = (pol & IPC_SPACE_POLICY_PLATFORM) || !task->disable_user_jop;
+#else
 	bool platform_binary = pol & IPC_SPACE_POLICY_PLATFORM;
+#endif
 #if XNU_TARGET_OS_OSX
 	platform_binary &= !(pol & IPC_SPACE_POLICY_OPTED_OUT);
 #endif /* XNU_TARGET_OS_OSX */
@@ -10156,7 +10160,7 @@ task_is_pac_exception_fatal(
 	assert(task != TASK_NULL);
 	return !!(task_ro_flags_get(task) & TFRO_PAC_EXC_FATAL);
 }
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 
 /*
  * FATAL_EXCEPTION_ENTITLEMENT, if present, will contain a list of

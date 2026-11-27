@@ -645,6 +645,20 @@ thread_generate_sigreturn_token(
 }
 #endif //__has_feature(ptrauth_calls)
 
+#if !__has_feature(ptrauth_calls) && HAS_USER_PAC
+static inline uintptr_t
+user_pac_strip_code(uintptr_t val)
+{
+	return (uintptr_t)((((uint64_t)val) << T0SZ_BOOT) >> T0SZ_BOOT);
+}
+
+static inline uintptr_t
+user_pac_strip_data(uintptr_t val)
+{
+	return (uintptr_t)((uint64_t)val & (0xFF00000000000000ULL | (~0ULL >> T0SZ_BOOT)));
+}
+#endif
+
 /*
  * Translate thread state arguments to userspace representation
  */
@@ -814,7 +828,7 @@ machine_thread_state_convert_to_user(
 #elif HAS_USER_PAC
 	arm_thread_state64_t *ts64 = NULL;
 
-	(void)thread; (void)tssf_flags;
+	(void)tssf_flags;
 	if (flavor == ARM_THREAD_STATE64 && *count >= ARM_THREAD_STATE64_COUNT) {
 		ts64 = (arm_thread_state64_t *)tstate;
 	} else if (flavor == ARM_THREAD_STATE && *count >= ARM_UNIFIED_THREAD_STATE_COUNT &&
@@ -823,6 +837,12 @@ machine_thread_state_convert_to_user(
 	}
 	if (ts64 != NULL) {
 		ts64->flags = __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH;
+		if (!(thread->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP) &&
+		    thread_is_64bit_addr(thread) &&
+		    ts64->lr &&
+		    ts64->lr != user_pac_strip_code(ts64->lr)) {
+			ts64->flags |= __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR;
+		}
 	}
 	return KERN_SUCCESS;
 #else
@@ -1109,6 +1129,56 @@ machine_thread_state_convert_from_user(
 	}
 
 	return KERN_SUCCESS;
+#elif HAS_USER_PAC
+	bool target_jop_disabled =
+	    !!(thread->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP) ||
+	    !thread_is_64bit_addr(thread);
+
+	if ((ts64->pc | ts64->sp) & TTBR_SELECTOR) {
+		return KERN_PROTECTION_FAILURE;
+	}
+	if (!(tssf_flags & TSSF_CHECK_SIGRETURN_TOKEN) &&
+	    ((ts64->lr | ts64->fp) & TTBR_SELECTOR)) {
+		return KERN_PROTECTION_FAILURE;
+	}
+
+	if ((current_thread()->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP) ||
+	    !thread_is_64bit_addr(current_thread())) {
+		if (target_jop_disabled) {
+			ts64->flags = __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH;
+			return KERN_SUCCESS;
+		}
+		return KERN_PROTECTION_FAILURE;
+	}
+
+	if (!(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_NO_PTRAUTH)) {
+		if (ts64->pc) {
+			ts64->pc = user_pac_strip_code(ts64->pc);
+		}
+		if (ts64->lr && !(ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR)) {
+			ts64->lr = user_pac_strip_code(ts64->lr);
+		}
+		if (ts64->sp) {
+			ts64->sp = user_pac_strip_data(ts64->sp);
+		}
+		if (ts64->fp) {
+			ts64->fp = user_pac_strip_data(ts64->fp);
+		}
+	}
+
+	if ((tssf_flags & TSSF_ALLOW_ONLY_USER_PTRS) && !target_jop_disabled) {
+		if (old_ts64 == NULL || old_count != count) {
+			return KERN_PROTECTION_FAILURE;
+		}
+		ts64->pc = old_ts64->pc;
+		ts64->lr = old_ts64->lr;
+		if (old_ts64->flags & __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR) {
+			ts64->flags |= __DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR;
+		} else {
+			ts64->flags &= ~__DARWIN_ARM_THREAD_STATE64_FLAGS_IB_SIGNED_LR;
+		}
+	}
+	return KERN_SUCCESS;
 #else
 	/* PD: same as above - strip PACs off a thread state handed in by an
 	 * arm64e userland, so the thread does not start at a signed PC. */
@@ -1128,7 +1198,7 @@ machine_thread_state_convert_from_user(
 #endif /* __has_feature(ptrauth_calls) */
 }
 
-#if __has_feature(ptrauth_calls)
+#if __has_feature(ptrauth_calls) || HAS_USER_PAC
 bool
 machine_thread_state_is_debug_flavor(int flavor)
 {
@@ -1139,7 +1209,7 @@ machine_thread_state_is_debug_flavor(int flavor)
 	}
 	return false;
 }
-#endif /* __has_feature(ptrauth_calls) */
+#endif
 
 /*
  * Translate signal context data pointer to userspace representation

@@ -440,18 +440,6 @@ machine_switch_cpu_data(thread_t old, thread_t new)
 
 static int8_t user_pac_present = -1;
 
-static inline uint64_t
-user_pac_key_half(uint64_t pid, uint64_t salt)
-{
-	uint64_t x = pid ^ (salt * 0x9e3779b97f4a7c15ULL);
-
-	x ^= x >> 31;
-	x *= 0x7fb5d329728ea185ULL;
-	x ^= x >> 27;
-	x *= 0x81dadef4bc2dd44dULL;
-	return x ^ (x >> 33);
-}
-
 void user_pac_return_to_user(void);
 
 void
@@ -465,26 +453,27 @@ user_pac_return_to_user(void)
 	}
 
 	thread_t thread = current_thread();
+	task_t task = get_threadtask(thread);
 	cpu_data_t *cdp = getCpuDatap();
 	uint64_t rop = thread->machine.rop_pid, jop = thread->machine.jop_pid;
 	bool jop_on = !(thread->machine.arm_machine_flags & ARM_MACHINE_THREAD_DISABLE_USER_JOP);
 	bool sync = false;
 
 	if (cdp->rop_key != rop) {
-		__builtin_arm_wsr64(APIBKEYLO_EL1, user_pac_key_half(rop, 5));
-		__builtin_arm_wsr64(APIBKEYHI_EL1, user_pac_key_half(rop, 6));
-		__builtin_arm_wsr64(APDBKEYLO_EL1, user_pac_key_half(rop, 7));
-		__builtin_arm_wsr64(APDBKEYHI_EL1, user_pac_key_half(rop, 8));
-		__builtin_arm_wsr64(APGAKEYLO_EL1, user_pac_key_half(rop, 9));
-		__builtin_arm_wsr64(APGAKEYHI_EL1, user_pac_key_half(rop, 10));
+		__builtin_arm_wsr64(APIBKEYLO_EL1, task->pac_rop_keys[0]);
+		__builtin_arm_wsr64(APIBKEYHI_EL1, task->pac_rop_keys[1]);
+		__builtin_arm_wsr64(APDBKEYLO_EL1, task->pac_rop_keys[2]);
+		__builtin_arm_wsr64(APDBKEYHI_EL1, task->pac_rop_keys[3]);
+		__builtin_arm_wsr64(APGAKEYLO_EL1, task->pac_rop_keys[4]);
+		__builtin_arm_wsr64(APGAKEYHI_EL1, task->pac_rop_keys[5]);
 		cdp->rop_key = rop;
 		sync = true;
 	}
 	if (jop_on && cdp->jop_key != jop) {
-		__builtin_arm_wsr64(APIAKEYLO_EL1, user_pac_key_half(jop, 1));
-		__builtin_arm_wsr64(APIAKEYHI_EL1, user_pac_key_half(jop, 2));
-		__builtin_arm_wsr64(APDAKEYLO_EL1, user_pac_key_half(jop, 3));
-		__builtin_arm_wsr64(APDAKEYHI_EL1, user_pac_key_half(jop, 4));
+		__builtin_arm_wsr64(APIAKEYLO_EL1, task->pac_jop_keys[0]);
+		__builtin_arm_wsr64(APIAKEYHI_EL1, task->pac_jop_keys[1]);
+		__builtin_arm_wsr64(APDAKEYLO_EL1, task->pac_jop_keys[2]);
+		__builtin_arm_wsr64(APDAKEYHI_EL1, task->pac_jop_keys[3]);
 		cdp->jop_key = jop;
 		sync = true;
 	}
