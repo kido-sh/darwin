@@ -64,7 +64,8 @@ MI_ENTRY_POINT(___ptrace)
 #elif defined(__arm64__)
 
 MI_ENTRY_POINT(___ptrace)
-	MI_GET_ADDRESS(x9,_errno)
+	adrp	x9, _errno@GOTPAGE
+	ldr		x9, [x9, _errno@GOTPAGEOFF]
 	str		wzr, [x9]
 	SYSCALL_NONAME(ptrace, 4, cerror)
 	ret
