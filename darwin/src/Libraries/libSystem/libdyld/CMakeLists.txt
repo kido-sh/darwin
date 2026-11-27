@@ -140,10 +140,26 @@ target_link_libraries(libdyld PRIVATE
     # constructors to libc++'s own stdexcept.cpp.
     $<TARGET_FILE:libcxx_static>)
 
-# libdyld resolves its c++ abi from the static archives above and keeps them private
+set(LIBDYLD_EXPORTS ${CMAKE_CURRENT_SOURCE_DIR}/libdyld.exports)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${LIBDYLD_EXPORTS})
+set(_libdyld_exports_for_link ${LIBDYLD_EXPORTS})
+if(PUREDARWIN_ARM32 OR PUREDARWIN_RISCV64)
+    file(STRINGS ${LIBDYLD_EXPORTS} _libdyld_export_lines)
+    if(PUREDARWIN_ARM32)
+        list(FILTER _libdyld_export_lines EXCLUDE REGEX "^__dyld_find_unwind_sections$")
+    endif()
+    if(PUREDARWIN_RISCV64)
+        list(FILTER _libdyld_export_lines EXCLUDE REGEX "^dyld_stub_binder$")
+    endif()
+    set(_libdyld_exports_for_link ${CMAKE_CURRENT_BINARY_DIR}/libdyld.filtered.exports)
+    file(WRITE ${_libdyld_exports_for_link} "")
+    foreach(_line ${_libdyld_export_lines})
+        file(APPEND ${_libdyld_exports_for_link} "${_line}\n")
+    endforeach()
+endif()
 target_link_options(libdyld PRIVATE
-    -Wl,-unexported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/libdyld.unexports)
-set_property(TARGET libdyld APPEND PROPERTY LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/libdyld.unexports)
+    -Wl,-exported_symbols_list,${_libdyld_exports_for_link})
+set_property(TARGET libdyld APPEND PROPERTY LINK_DEPENDS ${LIBDYLD_EXPORTS})
 
 # gCRAnnotations is declared hidden, so libdyld links its own copy
 # even though -lSystem, earlier on the line, exports one
