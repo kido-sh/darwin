@@ -3,13 +3,13 @@
 # name, tag and size, and the disk and the initrd compressed with zstd beside the kernel.
 { runCommand
 , zstd
+, jq
 , image
-, rootUUID
 , created
 , revision
 }:
 
-runCommand "kido-image-oci" { nativeBuildInputs = [ zstd ]; } ''
+runCommand "kido-image-oci" { nativeBuildInputs = [ zstd jq ]; } ''
   mkdir -p $out/blobs/sha256
   blob() {
     local digest
@@ -19,7 +19,7 @@ runCommand "kido-image-oci" { nativeBuildInputs = [ zstd ]; } ''
   }
   zstd -q -3 -o disk.img.zst ${image}/disk.img
   zstd -q -3 -o initrd.cpio.zst ${image}/initrd.cpio
-  printf '{"created":"%s","rootUUID":"%s","config":{}}' ${created} ${rootUUID} > config.json
+  jq -cj 'del(.name, .tag, .size) | if .parent == "" then del(.parent) else . end' ${image}/image.json > config.json
   layer() {
     echo -n "{\"mediaType\":\"$1\",$(blob "$2"),\"annotations\":{\"org.opencontainers.image.title\":\"$3\"$4}}"
   }

@@ -118,7 +118,7 @@ let
     kc = kcArm64ReleaseBuild;
     inherit loader disk rootUUID created;
   };
-  oci = pkgs.callPackage ./oci.nix { inherit image rootUUID created revision; };
+  oci = pkgs.callPackage ./oci.nix { inherit image created revision; };
 
 in
 {
