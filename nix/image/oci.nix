@@ -17,8 +17,8 @@ runCommand "kido-image-oci" { nativeBuildInputs = [ zstd jq ]; } ''
     cp "$1" "$out/blobs/sha256/$digest"
     echo "\"digest\":\"sha256:$digest\",\"size\":$(stat -c %s "$1")"
   }
-  zstd -q -3 -o disk.img.zst ${image}/disk.img
-  zstd -q -3 -o initrd.cpio.zst ${image}/initrd.cpio
+  zstd -q -T4 --ultra -22 -o disk.img.zst ${image}/disk.img
+  zstd -q -T4 --ultra -22 -o initrd.cpio.zst ${image}/initrd.cpio
   jq -cj 'del(.name, .tag, .size) | if .parent == "" then del(.parent) else . end' ${image}/image.json > config.json
   layer() {
     echo -n "{\"mediaType\":\"$1\",$(blob "$2"),\"annotations\":{\"org.opencontainers.image.title\":\"$3\"$4}}"
