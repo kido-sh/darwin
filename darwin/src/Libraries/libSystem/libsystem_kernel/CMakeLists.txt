@@ -326,6 +326,7 @@ target_sources(libsystem_kernel_static PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/host_priv.c
     ${CMAKE_CURRENT_BINARY_DIR}/host_security.c
     ${CMAKE_CURRENT_BINARY_DIR}/lock_set.c
+    ${CMAKE_CURRENT_BINARY_DIR}/mach_eventlink.c
     ${CMAKE_CURRENT_BINARY_DIR}/mach_host.c
     ${CMAKE_CURRENT_BINARY_DIR}/notify.c
     ${CMAKE_CURRENT_BINARY_DIR}/processor_set.c
