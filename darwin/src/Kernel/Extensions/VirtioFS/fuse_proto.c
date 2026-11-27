@@ -110,3 +110,67 @@ virtiofs_dirent_next(const uint8_t *buf, uint32_t len, uint32_t *pos, int plus, 
     *pos = at + (uint32_t)record;
     return 1;
 }
+
+#define ROTL(x, b) (uint64_t)(((x) << (b)) | ((x) >> (64 - (b))))
+
+struct sip {
+    uint64_t v0, v1, v2, v3, tail;
+    uint32_t ntail, total;
+};
+
+static void
+sip_word(struct sip *s, uint64_t m)
+{
+    s->v3 ^= m;
+    for (int i = 0; i < 2; i++) {
+        s->v0 += s->v1;
+        s->v1 = ROTL(s->v1, 13);
+        s->v1 ^= s->v0;
+        s->v0 = ROTL(s->v0, 32);
+        s->v2 += s->v3;
+        s->v3 = ROTL(s->v3, 16);
+        s->v3 ^= s->v2;
+        s->v0 += s->v3;
+        s->v3 = ROTL(s->v3, 21);
+        s->v3 ^= s->v0;
+        s->v2 += s->v1;
+        s->v1 = ROTL(s->v1, 17);
+        s->v1 ^= s->v2;
+        s->v2 = ROTL(s->v2, 32);
+    }
+    s->v0 ^= m;
+}
+
+static void
+sip_byte(struct sip *s, uint8_t b)
+{
+    s->tail |= (uint64_t)b << (8 * s->ntail);
+    s->total++;
+    if (++s->ntail == 8) {
+        sip_word(s, s->tail);
+        s->tail = 0;
+        s->ntail = 0;
+    }
+}
+
+/* SipHash-2-4 of the parent's node id (little-endian) followed by the name, under a per-mount key. */
+uint64_t
+virtiofs_name_hash(const uint64_t key[2], uint64_t parent, const char *name, uint32_t len)
+{
+    struct sip s = {
+        .v0 = key[0] ^ 0x736f6d6570736575ULL,
+        .v1 = key[1] ^ 0x646f72616e646f6dULL,
+        .v2 = key[0] ^ 0x6c7967656e657261ULL,
+        .v3 = key[1] ^ 0x7465646279746573ULL,
+    };
+    for (int i = 0; i < 8; i++)
+        sip_byte(&s, (uint8_t)(parent >> (8 * i)));
+    for (uint32_t i = 0; i < len; i++)
+        sip_byte(&s, (uint8_t)name[i]);
+    sip_word(&s, s.tail | (uint64_t)s.total << 56);
+    s.v2 ^= 0xff;
+    for (int i = 0; i < 2; i++)
+        sip_word(&s, 0);
+    return s.v0 ^ s.v1 ^ s.v2 ^ s.v3;
+}
+

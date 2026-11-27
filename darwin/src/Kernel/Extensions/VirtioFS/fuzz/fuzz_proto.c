@@ -34,5 +34,7 @@ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (size >= sizeof(struct fuse_attr))
         sink += (uint32_t)virtiofs_attr_ok((const struct fuse_attr *)buf);
     sink += (uint32_t)virtiofs_xattr_list_ok((const char *)buf, (uint32_t)size);
+    const uint64_t key[2] = {size, ~(uint64_t)size};
+    sink += (uint32_t)virtiofs_name_hash(key, size, (const char *)buf, (uint32_t)size);
     return 0;
 }

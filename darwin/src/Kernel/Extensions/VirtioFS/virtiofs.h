@@ -24,6 +24,7 @@ struct virtiofs_mount {
     IOLock *xattr_lock;
     uint64_t rootid;
     uint64_t version;
+    uint64_t name_key[2];
     vnode_t root;
     uint32_t hash_bits;
     uint32_t nidle;

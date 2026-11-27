@@ -163,6 +163,17 @@ test_dirents(void)
     EXPECT(virtiofs_dirent_next(buf, len - 1, &pos, 1, &d) == -1);
 }
 
+static void
+test_name_hash(void)
+{
+    /* SipHash-2-4 reference vectors: key 00..0f, messages 00..07 and 00..0e. */
+    const uint64_t key[2] = {0x0706050403020100ULL, 0x0f0e0d0c0b0a0908ULL};
+    const char tail[] = {8, 9, 10, 11, 12, 13, 14};
+    EXPECT(virtiofs_name_hash(key, 0x0706050403020100ULL, "", 0) == 0x93f5f5799a932462ULL);
+    EXPECT(virtiofs_name_hash(key, 0x0706050403020100ULL, tail, 7) == 0xa129ca6149be45e5ULL);
+    EXPECT(virtiofs_name_hash(key, 1, "a", 1) != virtiofs_name_hash(key, 2, "a", 1));
+}
+
 int
 main(void)
 {
@@ -171,6 +182,7 @@ main(void)
     test_names();
     test_xattr_list();
     test_dirents();
+    test_name_hash();
     printf("virtiofs proto: %d failures\n", failures);
     return failures != 0;
 }

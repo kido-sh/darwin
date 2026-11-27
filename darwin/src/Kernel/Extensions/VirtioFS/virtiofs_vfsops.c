@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <IOKit/IOLib.h>
+#include <libkern/crypto/rand.h>
 #include <libkern/libkern.h>
 #include "fuse_proto.h"
 #include "virtiofs.h"
@@ -177,6 +178,7 @@ virtiofs_mount(mount_t mp, __unused vnode_t devvp, user_addr_t data, vfs_context
         vmp->hash_bits++;
     vmp->hash = IOMallocZero(sizeof(*vmp->hash) << vmp->hash_bits);
     vmp->names = IOMallocZero(sizeof(*vmp->names) << vmp->hash_bits);
+    random_buf(vmp->name_key, sizeof(vmp->name_key));
     struct fuse_entry_out entry = {};
     uint64_t version = 0;
     vnode_t root = NULLVP;
