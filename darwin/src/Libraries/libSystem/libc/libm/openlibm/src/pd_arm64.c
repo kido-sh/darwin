@@ -11,6 +11,13 @@ nanl(const char *tagp)
 
 extern double nextafter(double, double);
 extern float nextafterf(float, float);
+extern double scalbn(double, int);
+
+long double
+scalbnl(long double x, int n)
+{
+    return (long double)scalbn((double)x, n);
+}
 
 double
 nexttoward(double x, long double y)

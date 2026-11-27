@@ -86,21 +86,22 @@ if(PUREDARWIN_ARM64 OR PUREDARWIN_ARM32 OR PUREDARWIN_RISCV64)
     #   fe*except      - openlibm's fenv is the x86 SSE/x87 implementation
     #   *context       - libplatform builds ucontext for x86_64, arm64 and riscv64
     list(FILTER _libsystem_export_lines EXCLUDE REGEX
-        "^_(i386_set_ldt|i386_get_ldt|scalbnl|roundl|lroundl|llroundl|floorl|frexpl|getfsstat)$")
-    # arm64 has nexttoward and nexttowardf over double, in pd_arm64.c
+        "^_(i386_set_ldt|i386_get_ldt|getfsstat)$")
     if(NOT PUREDARWIN_ARM64)
-        list(FILTER _libsystem_export_lines EXCLUDE REGEX "^_(nexttoward|nexttowardf)$")
+        list(FILTER _libsystem_export_lines EXCLUDE REGEX
+            "^_(scalbnl|roundl|lroundl|llroundl|floorl|frexpl|nexttoward|nexttowardf)$")
     endif()
     # riscv64 and arm64 build the ucontext family, arm does not yet
     if(NOT PUREDARWIN_RISCV64 AND NOT PUREDARWIN_ARM64)
         list(FILTER _libsystem_export_lines EXCLUDE REGEX
             "^_(getcontext|setcontext|makecontext|swapcontext)$")
     endif()
-    # The rest of openlibm's long double surface (math.h and complex.h *l)
-    list(FILTER _libsystem_export_lines EXCLUDE REGEX
-        "^_(acoshl|acosl|asinhl|asinl|atan2l|atanhl|atanl|cbrtl|ceill|copysignl|coshl|cosl|erfcl|erfl|exp2l|expl|expm1l|fabsl|fmal|fmaxl|fminl|fmodl|hypotl|ilogbl|lgammal|lgammal_r|llrintl|log10l|log1pl|log2l|logbl|logl|lrintl|modfl|nearbyintl|nextafterl|nexttowardl|powl|remainderl|remquol|rintl|scalblnl|sinhl|sinl|sqrtl|tanhl|tanl|tgammal|truncl)$")
-    list(FILTER _libsystem_export_lines EXCLUDE REGEX
-        "^_(cabsl|cacoshl|cacosl|cargl|casinhl|casinl|catanhl|catanl|ccoshl|ccosl|cexpl|cimagl|clogl|conjl|cpowl|cprojl|creall|csinhl|csinl|csqrtl|ctanhl|ctanl)$")
+    if(NOT PUREDARWIN_ARM64)
+        list(FILTER _libsystem_export_lines EXCLUDE REGEX
+            "^_(acoshl|acosl|asinhl|asinl|atan2l|atanhl|atanl|cbrtl|ceill|copysignl|coshl|cosl|erfcl|erfl|exp2l|expl|expm1l|fabsl|fmal|fmaxl|fminl|fmodl|hypotl|ilogbl|lgammal|lgammal_r|llrintl|log10l|log1pl|log2l|logbl|logl|lrintl|modfl|nearbyintl|nextafterl|nexttowardl|powl|remainderl|remquol|rintl|scalblnl|sinhl|sinl|sqrtl|tanhl|tanl|tgammal|truncl)$")
+        list(FILTER _libsystem_export_lines EXCLUDE REGEX
+            "^_(cabsl|cacoshl|cacosl|cargl|casinhl|casinl|catanhl|catanl|ccoshl|ccosl|cexpl|cimagl|clogl|conjl|cpowl|cprojl|creall|csinhl|csinl|csqrtl|ctanhl|ctanl)$")
+    endif()
     # openlibm's fenv is the x86 SSE/x87 one, riscv64 has its own fcsr fenv and
     # arm64 the macOS one in kido_fenv_arm64.c
     if(NOT PUREDARWIN_RISCV64 AND NOT PUREDARWIN_ARM64)
@@ -138,7 +139,9 @@ if(PUREDARWIN_ARM64 OR PUREDARWIN_ARM32 OR PUREDARWIN_RISCV64)
     endif()
     if(PUREDARWIN_ARM64)
         list(APPEND _libsystem_export_lines
-            _fegetexceptflag _fesetround __FE_DFL_ENV __FE_DFL_DISABLE_DENORMS_ENV)
+            _fegetexceptflag _fesetround __FE_DFL_ENV __FE_DFL_DISABLE_DENORMS_ENV
+            ___fpclassifyl ___isfinited ___isfinitel ___isinfd ___isinfl
+            ___isnand ___isnanl ___isnormald ___isnormall ___signbitd ___signbitl)
     endif()
     set(_libsystem_exports_for_link ${CMAKE_CURRENT_BINARY_DIR}/libSystem.arm64.exports)
     file(WRITE ${_libsystem_exports_for_link} "")
@@ -334,6 +337,12 @@ if(PUREDARWIN_USE_LD64_LLD)
     target_link_options(libSystem_B_stub PRIVATE -Wl,--dead-strip-duplicates)
 endif()
 set_property(TARGET libSystem_B_stub APPEND PROPERTY LINK_DEPENDS ${LIBSYSTEM_EXPORTS})
+if(PUREDARWIN_ARM64)
+    target_link_options(libSystem_B_stub PRIVATE
+        -Wl,-alias_list,${CMAKE_CURRENT_SOURCE_DIR}/libm_arm64.aliases)
+    set_property(TARGET libSystem_B_stub APPEND PROPERTY LINK_DEPENDS
+        ${CMAKE_CURRENT_SOURCE_DIR}/libm_arm64.aliases)
+endif()
 
 add_dependencies(libSystem_B_stub libdyld)
 target_link_libraries(libSystem_B_stub PRIVATE $<TARGET_FILE:libdyld>)

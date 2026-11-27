@@ -74,5 +74,5 @@ scalblnl (long double x, long n)
 		else
 			in = INT_MIN;
 	}
-	return (scalbnl(x, (int)n));
+	return (scalbnl(x, in));
 }

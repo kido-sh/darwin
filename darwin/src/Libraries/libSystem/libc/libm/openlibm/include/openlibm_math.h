@@ -25,7 +25,7 @@
     #define __WIN32__
 #endif
 
-#ifndef __arm__
+#if !defined(__arm__) && !defined(__arm64__) && !defined(__aarch64__)
 #define LONG_DOUBLE
 #endif
 
