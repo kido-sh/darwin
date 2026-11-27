@@ -15,16 +15,19 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/event.h>
 #include <sys/file.h>
+#include <sys/ioccom.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <time.h>
@@ -4099,6 +4102,702 @@ bench_files(const char *dir, int count)
     return 0;
 }
 
+
+/*
+ * Notifications (VIRTIOFS_IOC_NOTIFY, fuse_proto.h): a batch of records, each a u16 length, u8 kind,
+ * u8 state, u8 flags, u8 zero, u16 path length, u32 mode, u32 nlink, u64 size, i64 mtime sec, i64
+ * ctime sec, u32 mtime nsec, u32 ctime nsec and the path below the mount's root, little-endian.
+ */
+struct notify_arg {
+    uint64_t ptr;
+    uint32_t len;
+    uint32_t flags;
+};
+extern char **environ;
+int fsctl(const char *path, unsigned long request, void *data, unsigned int options);
+int ffsctl(int fd, unsigned long request, void *data, unsigned int options);
+#define VIRTIOFS_IOC_NOTIFY _IOW('V', 1, struct notify_arg)
+enum { N_PATH = 1, N_FLUSH = 2, N_UNKNOWN = 0, N_ABSENT = 1, N_PRESENT = 2, N_HEADER = 48, N_NAME = 1, N_REPLACED = 2 };
+
+static void
+put_le(uint8_t *b, uint64_t v, int n)
+{
+    for (int i = 0; i < n; i++)
+        b[i] = (uint8_t)(v >> (8 * i));
+}
+
+static size_t
+notify_rec(uint8_t *b, int kind, int state, int flags, const struct stat *st, const char *path)
+{
+    size_t n = path ? strlen(path) : 0;
+    memset(b, 0, N_HEADER);
+    put_le(b, N_HEADER + n, 2);
+    b[2] = (uint8_t)kind;
+    b[3] = (uint8_t)state;
+    b[4] = (uint8_t)flags;
+    put_le(b + 6, n, 2);
+    if (st && state == N_PRESENT) {
+        put_le(b + 8, st->st_mode, 4);
+        put_le(b + 12, st->st_nlink, 4);
+        put_le(b + 16, (uint64_t)st->st_size, 8);
+        put_le(b + 24, (uint64_t)st->st_mtimespec.tv_sec, 8);
+        put_le(b + 32, (uint64_t)st->st_ctimespec.tv_sec, 8);
+        put_le(b + 40, (uint64_t)st->st_mtimespec.tv_nsec, 4);
+        put_le(b + 44, (uint64_t)st->st_ctimespec.tv_nsec, 4);
+    }
+    memcpy(b + N_HEADER, path ? path : "", n);
+    return N_HEADER + n;
+}
+
+static int
+notify_send(const char *root, const void *buf, uint32_t len, uint32_t flags)
+{
+    struct notify_arg a = {(uint64_t)(uintptr_t)buf, len, flags};
+    return fsctl(root, VIRTIOFS_IOC_NOTIFY, &a, 0) == 0 ? 0 : errno;
+}
+
+/* One record for path below root, with the host's state of hostpath (absent if it is gone). */
+static int
+notify_one(const char *root, const char *path, const char *hostpath, int flags)
+{
+    uint8_t b[N_HEADER + 1024];
+    struct stat st;
+    int state = lstat(hostpath, &st) == 0 ? N_PRESENT : N_ABSENT;
+    return notify_send(root, b, (uint32_t)notify_rec(b, N_PATH, state, flags, &st, path), 0);
+}
+
+static int
+notify_flush_n(const char *root, int n)
+{
+    uint8_t b[4 * N_HEADER];
+    size_t len = 0;
+    for (int i = 0; i < n; i++)
+        len += notify_rec(b + len, N_FLUSH, N_UNKNOWN, 0, NULL, NULL);
+    return notify_send(root, b, (uint32_t)len, 0);
+}
+
+static uint64_t
+notify_count(const char *name)
+{
+    char key[96];
+    uint64_t v = 0;
+    size_t len = sizeof(v);
+    snprintf(key, sizeof(key), "vfs.generic.virtiofs.notify_%s", name);
+    return sysctlbyname(key, &v, &len, NULL, 0) == 0 ? v : UINT64_MAX;
+}
+
+static int
+put_file(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    bool ok = fd >= 0 && write(fd, text, strlen(text)) == (ssize_t)strlen(text);
+    if (fd >= 0)
+        close(fd);
+    return ok ? 0 : -1;
+}
+
+static int
+append_file(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY | O_APPEND);
+    bool ok = fd >= 0 && write(fd, text, strlen(text)) == (ssize_t)strlen(text);
+    if (fd >= 0)
+        close(fd);
+    return ok ? 0 : -1;
+}
+
+static int
+get_file(const char *path, char *buf, size_t size)
+{
+    int fd = open(path, O_RDONLY);
+    ssize_t n = fd >= 0 ? read(fd, buf, size - 1) : -1;
+    if (fd >= 0)
+        close(fd);
+    buf[n > 0 ? n : 0] = 0;
+    return n >= 0 ? 0 : -1;
+}
+
+static double
+seconds_since(const struct timespec *t0)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)(t.tv_sec - t0->tv_sec) + (double)(t.tv_nsec - t0->tv_nsec) / 1e9;
+}
+
+/* Who may call VIRTIOFS_IOC_NOTIFY, on what, and what a malformed batch does. */
+static int
+notify_entry(const char *root, const char *dir)
+{
+    uint8_t b[2 * N_HEADER + 64];
+    char sub[1024], fifo[1024];
+    snprintf(sub, sizeof(sub), "%s/sub", dir);
+    snprintf(fifo, sizeof(fifo), "%s/fifo", dir);
+    mkdir(dir, 0755);
+    mkdir(sub, 0755);
+    unlink(fifo);
+    CHECK(mkfifo(fifo, 0644) == 0, "mkfifo %s: %s", fifo, strerror(errno));
+    CHECK(notify_send(root, NULL, 0, 0) == 0, "the probe on %s failed", root);
+    uint64_t records = notify_count("records"), refused = notify_count("refused");
+    CHECK(records != UINT64_MAX && refused != UINT64_MAX, "root cannot read the counters");
+
+    size_t n = notify_rec(b, N_FLUSH, N_UNKNOWN, 0, NULL, NULL);
+    CHECK(notify_send(sub, b, (uint32_t)n, 0) == EPERM, "a notification on a directory below the root was taken");
+    CHECK(notify_send(fifo, b, (uint32_t)n, 0) == EPERM, "a notification on a FIFO was not refused");
+    CHECK(notify_count("records") == records, "a notification on a FIFO reached the driver");
+    CHECK(notify_send(root, b, (uint32_t)n, 1) == EINVAL, "flags other than 0 were taken");
+    CHECK(notify_send(root, b, 32769, 0) == EINVAL, "a batch over 32 KiB was taken");
+    CHECK(notify_send(root, (void *)1, N_HEADER, 0) == EFAULT, "a bad pointer did not give EFAULT");
+    n = notify_rec(b, N_PATH, N_ABSENT, 0, NULL, "x");
+    n += notify_rec(b + n, N_PATH, N_ABSENT, 0, NULL, "y");
+    b[N_HEADER + 1 + 2] = 9;
+    CHECK(notify_send(root, b, (uint32_t)n, 0) == EINVAL, "a batch with a malformed second record was taken");
+    n = notify_rec(b, N_PATH, N_ABSENT, 0, NULL, "../x");
+    CHECK(notify_send(root, b, (uint32_t)n, 0) == EINVAL, "a record naming .. was taken");
+    CHECK(notify_count("records") == records, "records of refused batches were applied: %llu, then %llu",
+          (unsigned long long)records, (unsigned long long)notify_count("records"));
+    CHECK(notify_count("refused") == refused + 2, "refused batches were not counted");
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        uint64_t v = 0;
+        size_t len = sizeof(v);
+        if (setgid(20) != 0 || setuid(501) != 0)
+            _exit(2);
+        n = notify_rec(b, N_FLUSH, N_UNKNOWN, 0, NULL, NULL);
+        int e1 = notify_send(root, b, (uint32_t)n, 0);
+        int e2 = sysctlbyname("vfs.generic.virtiofs.notify_records", &v, &len, NULL, 0) == 0 ? 0 : errno;
+        int e3 = notify_send(root, (void *)1, N_HEADER, 0);
+        _exit(e1 == EPERM && e2 == EPERM && e3 == EPERM ? 0 : 1);
+    }
+    int status = -1;
+    CHECK(pid > 0 && waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "a user other than root could notify, read the counters, or reach copyin (status %d)", status);
+    unlink(fifo);
+    rmdir(sub);
+    return failures ? 1 : 0;
+}
+
+/* stale_then_fresh: what reads leaves at first, and what it leaves once a record names the path. */
+#define STALE_THEN_FRESH(what, flags, stale, fresh)                                                                \
+    do {                                                                                                           \
+        CHECK(seconds_since(&t0) < 0.5 && (stale), "%s: the cache was not stale before the record, so the test "   \
+              "proves nothing (%.3f s)", what, seconds_since(&t0));                                                \
+        CHECK(notify_one(root, rel, host, flags) == 0, "%s: the record was refused", what);                        \
+        CHECK(fresh, "%s: still stale after the record", what);                                                     \
+    } while (0)
+
+static int
+kevent_wait(int kq, int ident, double seconds, uint32_t *fflags)
+{
+    struct kevent got;
+    struct timespec wait = {(time_t)seconds, (long)((seconds - (time_t)seconds) * 1e9)};
+    for (;;) {
+        int n = kevent(kq, NULL, 0, &got, 1, &wait);
+        if (n != 1)
+            return 0;
+        if ((int)got.ident == ident) {
+            *fflags = got.fflags;
+            return 1;
+        }
+    }
+}
+
+static int
+notify_semantics(const char *root, const char *dir, const char *peer)
+{
+    char local[1024], host[1024], rel[1024], tmp[1024], buf[64];
+    struct stat st;
+    struct timespec t0;
+    const char *sub = dir + strlen(root) + 1;
+    mkdir(dir, 0755);
+
+    snprintf(local, sizeof(local), "%s/a", dir);
+    snprintf(host, sizeof(host), "%s/a", peer);
+    snprintf(rel, sizeof(rel), "%s/a", sub);
+    CHECK(put_file(local, "1") == 0 && stat(local, &st) == 0 && st.st_size == 1, "create %s", local);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK(append_file(host, "2345") == 0, "append through %s: %s", host, strerror(errno));
+    STALE_THEN_FRESH("size after an append", 0, stat(local, &st) == 0 && st.st_size == 1,
+                     stat(local, &st) == 0 && st.st_size == 5);
+
+    char drel[1024];
+    snprintf(drel, sizeof(drel), "%s", sub);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK(append_file(host, "6") == 0, "append through %s", host);
+    CHECK(stat(local, &st) == 0 && st.st_size == 5 && seconds_since(&t0) < 0.5, "a stale size before the records");
+    uint8_t b[24 * (N_HEADER + 64)];
+    size_t n = notify_rec(b, N_PATH, N_UNKNOWN, 0, NULL, drel);
+    CHECK(notify_send(root, b, (uint32_t)n, 0) == 0 && notify_one(root, rel, host, 0) == 0, "the records were refused");
+    CHECK(stat(local, &st) == 0 && st.st_size == 6,
+          "a record for a file after one for its directory did not reach it: the directory left the index");
+
+    snprintf(local, sizeof(local), "%s/b", dir);
+    snprintf(host, sizeof(host), "%s/b", peer);
+    snprintf(tmp, sizeof(tmp), "%s/b.tmp", peer);
+    snprintf(rel, sizeof(rel), "%s/b", sub);
+    CHECK(put_file(local, "old") == 0 && stat(local, &st) == 0 && st.st_size == 3, "create %s", local);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK(put_file(tmp, "new!") == 0 && rename(tmp, host) == 0, "replace %s: %s", host, strerror(errno));
+    STALE_THEN_FRESH("a name replaced by another file", N_NAME, stat(local, &st) == 0 && st.st_size == 3,
+                     stat(local, &st) == 0 && st.st_size == 4 && get_file(local, buf, sizeof(buf)) == 0 &&
+                         !strcmp(buf, "new!"));
+
+    snprintf(local, sizeof(local), "%s/c", dir);
+    snprintf(host, sizeof(host), "%s/c", peer);
+    snprintf(rel, sizeof(rel), "%s/c", sub);
+    CHECK(put_file(local, "c") == 0 && stat(local, &st) == 0, "create %s", local);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK(unlink(host) == 0, "unlink %s: %s", host, strerror(errno));
+    STALE_THEN_FRESH("a removed file", N_NAME, stat(local, &st) == 0, stat(local, &st) != 0 && errno == ENOENT);
+
+    snprintf(local, sizeof(local), "%s/d", dir);
+    snprintf(rel, sizeof(rel), "%s/d", sub);
+    CHECK(put_file(local, "mine") == 0 && stat(local, &st) == 0, "create %s", local);
+    uint64_t echoes = notify_count("echoes"), invalidated = notify_count("invalidated");
+    n = notify_rec(b, N_PATH, N_PRESENT, 0, &st, rel);
+    CHECK(notify_send(root, b, (uint32_t)n, 0) == 0, "the echo was refused");
+    CHECK(notify_count("echoes") == echoes + 1 && notify_count("invalidated") == invalidated,
+          "a record equal to the cache was not skipped as an echo (echoes %llu to %llu, invalidated %llu to %llu)",
+          (unsigned long long)echoes, (unsigned long long)notify_count("echoes"), (unsigned long long)invalidated,
+          (unsigned long long)notify_count("invalidated"));
+    int ekq = kqueue(), edir = open(dir, O_EVTONLY);
+    struct kevent ee;
+    EV_SET(&ee, edir, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_WRITE, 0, 0);
+    CHECK(ekq >= 0 && edir >= 0 && kevent(ekq, &ee, 1, NULL, 0, NULL) == 0, "watch %s", dir);
+    n = notify_rec(b, N_PATH, N_PRESENT, N_NAME, &st, rel);
+    uint32_t eff = 0;
+    CHECK(notify_send(root, b, (uint32_t)n, 0) == 0 && notify_count("echoes") == echoes + 2 &&
+              kevent_wait(ekq, edir, 2, &eff) && (eff & NOTE_WRITE),
+          "an echo whose name may have changed did not still wake its directory");
+    close(edir);
+    close(ekq);
+    const char *what[] = {"mtime nsec", "mode", "nlink", "size", "ctime", "ctime nsec", "zero nsec"};
+    for (int i = 0; i < 7; i++) {
+        struct stat v;
+        CHECK(stat(local, &v) == 0, "stat %s", local);
+        switch (i) {
+        case 0: v.st_mtimespec.tv_nsec = (v.st_mtimespec.tv_nsec + 1) % 1000000000; break;
+        case 1: v.st_mode ^= 0100; break;
+        case 2: v.st_nlink++; break;
+        case 3: v.st_size++; break;
+        case 4: v.st_ctimespec.tv_sec++; break;
+        case 5: v.st_ctimespec.tv_nsec = (v.st_ctimespec.tv_nsec + 1) % 1000000000; break;
+        case 6: v.st_mtimespec.tv_nsec = v.st_ctimespec.tv_nsec = 0; break;
+        }
+        invalidated = notify_count("invalidated");
+        n = notify_rec(b, N_PATH, N_PRESENT, 0, &v, rel);
+        CHECK(notify_send(root, b, (uint32_t)n, 0) == 0 && notify_count("invalidated") == invalidated + 1,
+              "a record with a different %s was taken for an echo", what[i]);
+    }
+
+    struct timeval whole[2] = {{1700000000, 0}, {1700000000, 0}};
+    CHECK(utimes(local, whole) == 0 && stat(local, &st) == 0 && st.st_mtimespec.tv_nsec == 0, "utimes %s", local);
+    struct stat hs;
+    snprintf(host, sizeof(host), "%s/d", peer);
+    CHECK(lstat(host, &hs) == 0 && hs.st_mtimespec.tv_sec == st.st_mtimespec.tv_sec && hs.st_size == st.st_size,
+          "%s differs from %s", host, local);
+    echoes = notify_count("echoes");
+    n = notify_rec(b, N_PATH, N_PRESENT, 0, &hs, rel);
+    CHECK(notify_send(root, b, (uint32_t)n, 0) == 0 && notify_count("echoes") == echoes,
+          "a record with whole-second times was taken for an echo");
+    char ql[1024], qrel[1024];
+    snprintf(ql, sizeof(ql), "%s/q", dir);
+    snprintf(host, sizeof(host), "%s/q", peer);
+    snprintf(qrel, sizeof(qrel), "%s/q", sub);
+    CHECK(put_file(ql, "q") == 0 && stat(ql, &st) == 0 && lstat(host, &hs) == 0 && hs.st_mtimespec.tv_nsec &&
+              hs.st_ctimespec.tv_nsec,
+          "create %s with times that have nanoseconds", ql);
+    echoes = notify_count("echoes");
+    n = notify_rec(b, N_PATH, N_PRESENT, 0, &hs, qrel);
+    CHECK(notify_send(root, b, (uint32_t)n, 0) == 0 && notify_count("echoes") == echoes + 1,
+          "a record equal to fresh attributes was not an echo");
+    usleep(1500000);
+    echoes = notify_count("echoes");
+    CHECK(notify_send(root, b, (uint32_t)n, 0) == 0 && notify_count("echoes") == echoes,
+          "a record equal to attributes the guest no longer trusts was taken for an echo");
+
+    char files[3][1024], hosts[3][1024];
+    for (int i = 0; i < 3; i++) {
+        snprintf(files[i], sizeof(files[i]), "%s/e%d", dir, i);
+        snprintf(hosts[i], sizeof(hosts[i]), "%s/e%d", peer, i);
+        CHECK(put_file(files[i], "e") == 0 && stat(files[i], &st) == 0, "create %s", files[i]);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    CHECK(put_file(hosts[0], "flushed") == 0 && put_file(hosts[1], "flushed") == 0 && unlink(hosts[2]) == 0,
+          "change the e files through %s", peer);
+    bool stale = stat(files[0], &st) == 0 && st.st_size == 1 && stat(files[1], &st) == 0 && st.st_size == 1 &&
+                 stat(files[2], &st) == 0;
+    CHECK(seconds_since(&t0) < 0.5 && stale, "the cache was not stale before the flush (%.3f s)", seconds_since(&t0));
+    uint64_t flushes = notify_count("flushes");
+    CHECK(notify_flush_n(root, 3) == 0 && notify_count("flushes") == flushes + 1,
+          "a batch of three flushes did not flush exactly once (%llu, then %llu)", (unsigned long long)flushes,
+          (unsigned long long)notify_count("flushes"));
+    for (int i = 0; i < 2; i++)
+        CHECK(stat(files[i], &st) == 0 && st.st_size == 7, "%s is stale after a flush", files[i]);
+    CHECK(stat(files[2], &st) != 0 && errno == ENOENT, "a file removed on the Mac is still there after a flush");
+
+    char d1[1024], d2[1024], f1[1024], hd1[1024], hf1[1024];
+    snprintf(d1, sizeof(d1), "%s/r1", dir);
+    snprintf(d2, sizeof(d2), "%s/r2", dir);
+    snprintf(f1, sizeof(f1), "%s/r1/f", dir);
+    snprintf(hd1, sizeof(hd1), "%s/r1", peer);
+    snprintf(hf1, sizeof(hf1), "%s/r1/f", peer);
+    snprintf(host, sizeof(host), "%s/r2/f", peer);
+    snprintf(rel, sizeof(rel), "%s/r2/f", sub);
+    CHECK(mkdir(hd1, 0755) == 0 && put_file(hf1, "1") == 0, "create %s", hf1);
+    int rfd = open(f1, O_RDONLY);
+    CHECK(rfd >= 0 && fstat(rfd, &st) == 0 && st.st_size == 1, "open %s: %s", f1, strerror(errno));
+    CHECK(rename(d1, d2) == 0, "rename %s: %s", d1, strerror(errno));
+    CHECK(append_file(host, "2345") == 0, "append through %s: %s", host, strerror(errno));
+    CHECK(fstat(rfd, &st) == 0 && st.st_size == 1, "the cache was not stale before the record (size %lld)",
+          (long long)st.st_size);
+    CHECK(notify_one(root, rel, host, 0) == 0, "the record for %s was refused", rel);
+    CHECK(fstat(rfd, &st) == 0 && st.st_size == 5,
+          "a record below a directory renamed in the guest did not reach it (size %lld)", (long long)st.st_size);
+    close(rfd);
+
+    snprintf(local, sizeof(local), "%s/k", dir);
+    snprintf(host, sizeof(host), "%s/k", peer);
+    snprintf(rel, sizeof(rel), "%s/k", sub);
+    CHECK(put_file(local, "k") == 0 && stat(local, &st) == 0, "create %s", local);
+    int kq = kqueue(), dkq = kqueue(), watched = open(local, O_EVTONLY), dirfd = open(dir, O_EVTONLY);
+    struct kevent ev[2];
+    EV_SET(&ev[0], watched, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB | NOTE_DELETE, 0, 0);
+    EV_SET(&ev[1], dirfd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_WRITE, 0, 0);
+    CHECK(kq >= 0 && dkq >= 0 && watched >= 0 && dirfd >= 0 && kevent(kq, &ev[0], 1, NULL, 0, NULL) == 0 &&
+              kevent(dkq, &ev[1], 1, NULL, 0, NULL) == 0,
+          "watch %s: %s", local, strerror(errno));
+    uint32_t ff = 0;
+    for (int round = 0; round < 2; round++) {
+        CHECK(append_file(host, "more") == 0 && notify_one(root, rel, host, 0) == 0, "append %d through %s", round, host);
+        int got = kevent_wait(kq, watched, 2, &ff);
+        CHECK(got && (ff & NOTE_WRITE) && (ff & NOTE_EXTEND) && !(ff & NOTE_ATTRIB),
+              "append %d: the watcher of %s got %d events, fflags %#x, want WRITE|EXTEND", round, local, got, ff);
+    }
+    CHECK(stat(local, &st) == 0 && st.st_size == 9, "%s after two appends: size %lld", local, (long long)st.st_size);
+    kevent_wait(kq, watched, 0.3, &ff); /* ubc_setsize posts NOTE_EXTEND when the refresh finds the file grown */
+    CHECK(chmod(host, 0600) == 0 && notify_one(root, rel, host, 0) == 0, "chmod %s", host);
+    CHECK(kevent_wait(kq, watched, 2, &ff) && (ff & NOTE_ATTRIB) && !(ff & (NOTE_WRITE | NOTE_EXTEND)),
+          "chmod: the watcher of %s got fflags %#x, want ATTRIB", local, ff);
+    CHECK(!kevent_wait(dkq, dirfd, 0.3, &ff), "a change of contents or mode woke the directory's watcher");
+    snprintf(host, sizeof(host), "%s/new", peer);
+    snprintf(rel, sizeof(rel), "%s/new", sub);
+    CHECK(put_file(host, "n") == 0 && notify_one(root, rel, host, N_NAME) == 0, "the record for %s was refused", rel);
+    CHECK(kevent_wait(dkq, dirfd, 2, &ff) && (ff & NOTE_WRITE), "the watcher of %s did not see a new name", dir);
+    CHECK(unlink(host) == 0 && notify_one(root, rel, host, N_NAME) == 0, "the record for removed %s was refused", rel);
+    CHECK(kevent_wait(dkq, dirfd, 2, &ff) && (ff & NOTE_WRITE),
+          "the watcher of %s did not see a name it never looked up go away", dir);
+
+    char pl[1024];
+    snprintf(pl, sizeof(pl), "%s/p", dir);
+    snprintf(host, sizeof(host), "%s/p", peer);
+    snprintf(tmp, sizeof(tmp), "%s/p.tmp", peer);
+    snprintf(rel, sizeof(rel), "%s/p", sub);
+    CHECK(put_file(pl, "old") == 0 && stat(pl, &st) == 0 && st.st_size == 3, "create %s", pl);
+    int pfd = open(pl, O_EVTONLY);
+    struct kevent pe;
+    EV_SET(&pe, pfd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_WRITE | NOTE_ATTRIB | NOTE_DELETE, 0, 0);
+    CHECK(pfd >= 0 && kevent(kq, &pe, 1, NULL, 0, NULL) == 0, "watch %s", pl);
+    CHECK(put_file(tmp, "new!") == 0 && rename(tmp, host) == 0, "replace %s", host);
+    CHECK(notify_one(root, rel, host, N_NAME | N_REPLACED) == 0, "the record for %s was refused", rel);
+    CHECK(kevent_wait(kq, pfd, 2, &ff) && (ff & NOTE_DELETE),
+          "the watcher of a file replaced on the Mac got fflags %#x, want DELETE", ff);
+    CHECK(stat(pl, &st) == 0 && st.st_size == 4, "%s after the replace: size %lld", pl, (long long)st.st_size);
+    close(pfd);
+    kevent_wait(dkq, dirfd, 0.3, &ff);
+
+    char gl[1024], gtmp[1024];
+    snprintf(gl, sizeof(gl), "%s/g", dir);
+    snprintf(gtmp, sizeof(gtmp), "%s/g.tmp", dir);
+    snprintf(host, sizeof(host), "%s/g", peer);
+    snprintf(rel, sizeof(rel), "%s/g", sub);
+    CHECK(put_file(gl, "a") == 0 && put_file(gtmp, "bb") == 0, "create %s and %s", gl, gtmp);
+    int gfd = open(gtmp, O_EVTONLY);
+    struct kevent ge;
+    EV_SET(&ge, gfd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_WRITE | NOTE_ATTRIB | NOTE_DELETE, 0, 0);
+    CHECK(gfd >= 0 && kevent(kq, &ge, 1, NULL, 0, NULL) == 0, "watch %s", gtmp);
+    CHECK(rename(gtmp, gl) == 0, "replace %s here", gl);
+    uint64_t gecho = notify_count("echoes");
+    CHECK(notify_one(root, rel, host, N_NAME | N_REPLACED) == 0 && notify_count("echoes") == gecho + 1,
+          "the echo of a replace made here was not recognized");
+    ff = 0;
+    kevent_wait(kq, gfd, 0.5, &ff);
+    CHECK(!(ff & NOTE_DELETE), "a replace made here came back as a deletion of the new file (fflags %#x)", ff);
+    CHECK(stat(gl, &st) == 0 && st.st_size == 2 && append_file(host, "ccc") == 0 && notify_one(root, rel, host, 0) == 0,
+          "append through %s", host);
+    CHECK(stat(gl, &st) == 0 && st.st_size == 5, "a file replaced here left the index: size %lld after an append",
+          (long long)st.st_size);
+    close(gfd);
+    kevent_wait(dkq, dirfd, 0.3, &ff);
+
+    snprintf(host, sizeof(host), "%s/k", peer);
+    snprintf(rel, sizeof(rel), "%s/k", sub);
+    CHECK(chmod(host, 0640) == 0, "chmod %s", host);
+    int ofd = open(local, O_RDONLY);
+    if (ofd >= 0)
+        close(ofd);
+    CHECK(stat(local, &st) == 0 && (st.st_mode & 0777) == 0640, "opening %s did not refresh its mode (%o)", local,
+          st.st_mode & 0777);
+    kevent_wait(kq, watched, 0.3, &ff);
+    uint64_t echoed = notify_count("echoes");
+    CHECK(notify_one(root, rel, host, 0) == 0 && notify_count("echoes") == echoed + 1,
+          "the record for a change the guest had already refreshed was not an echo");
+    CHECK(kevent_wait(kq, watched, 2, &ff), "a watcher missed a change a refresh took in before its record");
+    close(watched);
+    close(dirfd);
+    close(dkq);
+
+    int fds[40];
+    char wf[1024];
+    for (int i = 0; i < 40; i++) {
+        snprintf(wf, sizeof(wf), "%s/w%d", dir, i);
+        CHECK(put_file(wf, "w") == 0, "create %s", wf);
+        fds[i] = open(wf, O_EVTONLY);
+        struct kevent w;
+        EV_SET(&w, fds[i], EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_WRITE | NOTE_ATTRIB, 0, 0);
+        CHECK(fds[i] >= 0 && kevent(kq, &w, 1, NULL, 0, NULL) == 0, "watch %s", wf);
+    }
+    CHECK(notify_flush_n(root, 1) == 0, "the flush was refused");
+    int woken = 0;
+    struct kevent got[64];
+    struct timespec wait = {2, 0};
+    for (int k; woken < 40 && (k = kevent(kq, NULL, 0, got, 64, &wait)) > 0;)
+        woken += k;
+    CHECK(woken >= 40, "a flush woke %d of 40 watchers", woken);
+    for (int i = 0; i < 40; i++)
+        close(fds[i]);
+    close(kq);
+
+    snprintf(rel, sizeof(rel), "%s/missing/below/here", sub);
+    uint64_t records = notify_count("records");
+    n = notify_rec(b, N_PATH, N_UNKNOWN, 0, NULL, rel);
+    CHECK(notify_send(root, b, (uint32_t)n, 0) == 0 && notify_count("records") == records + 1,
+          "a record below a name the guest never looked up failed");
+    return failures ? 1 : 0;
+}
+
+struct notify_umount {
+    const char *dir;
+    atomic_bool stop;
+    atomic_long flushes;
+};
+
+static void *
+notify_umount_flusher(void *arg)
+{
+    struct notify_umount *u = arg;
+    uint8_t b[N_HEADER];
+    struct notify_arg a = {(uint64_t)(uintptr_t)b, (uint32_t)notify_rec(b, N_FLUSH, N_UNKNOWN, 0, NULL, NULL), 0};
+    while (!atomic_load(&u->stop)) {
+        int fd = open(u->dir, O_EVTONLY | O_DIRECTORY);
+        for (int i = 0; fd >= 0 && i < 50; i++) {
+            if (ffsctl(fd, VIRTIOFS_IOC_NOTIFY, &a, 0) == 0)
+                atomic_fetch_add(&u->flushes, 1);
+        }
+        if (fd >= 0)
+            close(fd);
+    }
+    return NULL;
+}
+
+/*
+ * Flushes through a mount's root beside its unmounts, over and over: a flush must never wait for what
+ * an unmount holds while the unmount waits for the flush's ffsctl to let go of the root.
+ */
+static int
+notify_umount(const char *tag, const char *dir, int seconds)
+{
+    struct notify_umount u = {.dir = dir};
+    pthread_t th[2];
+    long mounts = 0;
+    struct timespec t0;
+    mkdir(dir, 0755);
+    for (int i = 0; i < 2; i++)
+        pthread_create(&th[i], NULL, notify_umount_flusher, &u);
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    while (seconds_since(&t0) < seconds) {
+        char *argv[] = {"/sbin/mount", "-t", "virtiofs", (char *)tag, (char *)dir, NULL};
+        pid_t pid;
+        int st = -1;
+        if (posix_spawn(&pid, argv[0], NULL, NULL, argv, environ) != 0 || waitpid(pid, &st, 0) != pid ||
+            !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+            CHECK(0, "mount %s on %s (status %d)", tag, dir, st);
+            break;
+        }
+        usleep(arc4random_uniform(2000));
+        if (unmount(dir, 0) != 0)
+            CHECK(unmount(dir, MNT_FORCE) == 0, "unmount %s: %s", dir, strerror(errno));
+        mounts++;
+    }
+    atomic_store(&u.stop, true);
+    for (int i = 0; i < 2; i++)
+        pthread_join(th[i], NULL);
+    printf("notify-umount: %ld mounts and unmounts beside %ld flushes\n", mounts, atomic_load(&u.flushes));
+    CHECK(mounts > 0 && atomic_load(&u.flushes) > 0, "nothing was flushed beside the unmounts");
+    return failures ? 1 : 0;
+}
+
+struct notify_stress {
+    const char *root, *dir, *peer, *sub;
+    atomic_bool stop;
+    atomic_long rounds[5];
+};
+
+static void *
+notify_stress_host(void *arg)
+{
+    struct notify_stress *s = arg;
+    char a[1024], b[1024];
+    for (long i = 0; !atomic_load(&s->stop); i++) {
+        snprintf(a, sizeof(a), "%s/f%ld", s->peer, i % 16);
+        snprintf(b, sizeof(b), "%s/f%ld", s->peer, (i + 5) % 16);
+        put_file(a, i % 3 ? "x" : "longer contents");
+        rename(a, b);
+        if (i % 7 == 0)
+            unlink(b);
+        atomic_fetch_add(&s->rounds[0], 1);
+    }
+    return NULL;
+}
+
+static void *
+notify_stress_reader(void *arg)
+{
+    struct notify_stress *s = arg;
+    char p[1024], buf[64];
+    struct stat st;
+    for (long i = 0; !atomic_load(&s->stop); i++) {
+        snprintf(p, sizeof(p), "%s/f%ld", s->dir, i % 16);
+        stat(p, &st);
+        get_file(p, buf, sizeof(buf));
+        atomic_fetch_add(&s->rounds[1], 1);
+    }
+    return NULL;
+}
+
+static void *
+notify_stress_notifier(void *arg)
+{
+    struct notify_stress *s = arg;
+    uint8_t b[16 * (N_HEADER + 64)];
+    char rel[64], host[1024];
+    struct stat st;
+    for (long i = 0; !atomic_load(&s->stop); i++) {
+        size_t n = 0;
+        for (int j = 0; j < 16; j++) {
+            snprintf(rel, sizeof(rel), "%s/f%d", s->sub, j);
+            snprintf(host, sizeof(host), "%s/f%d", s->peer, j);
+            int state = lstat(host, &st) == 0 ? N_PRESENT : (j % 2 ? N_ABSENT : N_UNKNOWN);
+            n += notify_rec(b + n, N_PATH, state, (i + j) % 3 ? 0 : N_NAME, &st, rel);
+        }
+        if (i % 50 == 0)
+            n += notify_rec(b + n, N_FLUSH, N_UNKNOWN, 0, NULL, NULL);
+        notify_send(s->root, b, (uint32_t)n, 0);
+        atomic_fetch_add(&s->rounds[2], 1);
+    }
+    return NULL;
+}
+
+static void *
+notify_stress_watcher(void *arg)
+{
+    struct notify_stress *s = arg;
+    char p[1024];
+    struct timespec zero = {0, 1000000};
+    for (long i = 0; !atomic_load(&s->stop); i++) {
+        snprintf(p, sizeof(p), "%s/f%ld", s->dir, i % 16);
+        int kq = kqueue(), fd = open(p, O_EVTONLY);
+        if (kq >= 0 && fd >= 0) {
+            struct kevent ev, got;
+            EV_SET(&ev, fd, EVFILT_VNODE, EV_ADD | EV_CLEAR, NOTE_WRITE | NOTE_DELETE | NOTE_ATTRIB | NOTE_EXTEND, 0, 0);
+            kevent(kq, &ev, 1, &got, 1, &zero);
+        }
+        if (fd >= 0)
+            close(fd);
+        if (kq >= 0)
+            close(kq);
+        atomic_fetch_add(&s->rounds[3], 1);
+    }
+    return NULL;
+}
+
+static void *
+notify_stress_churn(void *arg)
+{
+    struct notify_stress *s = arg;
+    char p[1024];
+    struct stat st;
+    snprintf(p, sizeof(p), "%s/churn", s->dir);
+    mkdir(p, 0755);
+    for (long i = 0; !atomic_load(&s->stop); i++) {
+        snprintf(p, sizeof(p), "%s/churn/c%ld", s->dir, i % 4000);
+        if (i < 4000)
+            put_file(p, "c");
+        else
+            stat(p, &st);
+        atomic_fetch_add(&s->rounds[4], 1);
+    }
+    return NULL;
+}
+
+/*
+ * Renames on the host, lookups and reads, watchers, notifications with flushes and vnodes reclaimed
+ * under a lowered kern.maxvnodes, all at once. Records alone must then bring the guest to the host's
+ * state, before a last flush does.
+ */
+static int
+notify_stress(const char *root, const char *dir, const char *peer, int seconds)
+{
+    struct notify_stress s = {.root = root, .dir = dir, .peer = peer, .sub = dir + strlen(root) + 1};
+    void *(*fn[])(void *) = {notify_stress_host, notify_stress_reader, notify_stress_notifier, notify_stress_watcher,
+                             notify_stress_churn};
+    pthread_t th[5];
+    int maxv = 0, numv = 0;
+    size_t len = sizeof(maxv);
+    sysctlbyname("kern.maxvnodes", &maxv, &len, NULL, 0);
+    len = sizeof(numv);
+    sysctlbyname("kern.num_vnodes", &numv, &len, NULL, 0);
+    int low = numv + 1000;
+    bool lowered = maxv > low && sysctlbyname("kern.maxvnodes", NULL, NULL, &low, sizeof(low)) == 0;
+    mkdir(dir, 0755);
+    for (int i = 0; i < 5; i++)
+        pthread_create(&th[i], NULL, fn[i], &s);
+    sleep((unsigned)seconds);
+    atomic_store(&s.stop, true);
+    for (int i = 0; i < 5; i++)
+        pthread_join(th[i], NULL);
+    if (lowered)
+        sysctlbyname("kern.maxvnodes", NULL, NULL, &maxv, sizeof(maxv));
+    printf("notify-stress: %ld host rounds, %ld reads, %ld batches, %ld watchers, %ld churned files with "
+           "kern.maxvnodes %d instead of %d\n",
+           atomic_load(&s.rounds[0]), atomic_load(&s.rounds[1]), atomic_load(&s.rounds[2]), atomic_load(&s.rounds[3]),
+           atomic_load(&s.rounds[4]), low, maxv);
+    CHECK(lowered, "kern.maxvnodes (%d, %d in use) could not be lowered, so nothing was reclaimed", maxv, numv);
+    for (int i = 0; i < 5; i++)
+        CHECK(atomic_load(&s.rounds[i]) > 0, "thread %d made no progress", i);
+    for (int i = 0; i < 16; i++) {
+        char rel[1024], h[1024], p[1024];
+        struct stat a, z;
+        snprintf(rel, sizeof(rel), "%s/f%d", s.sub, i);
+        snprintf(h, sizeof(h), "%s/f%d", peer, i);
+        snprintf(p, sizeof(p), "%s/f%d", dir, i);
+        CHECK(notify_one(root, rel, h, N_NAME) == 0, "the last record for f%d", i);
+        int la = stat(p, &a), lz = stat(h, &z);
+        CHECK(la == lz && (la != 0 || a.st_size == z.st_size), "f%d differs from the host after its last record", i);
+    }
+    CHECK(notify_flush_n(root, 1) == 0, "the last flush");
+    for (int i = 0; i < 16; i++) {
+        char p[1024], h[1024];
+        struct stat a, z;
+        snprintf(p, sizeof(p), "%s/f%d", dir, i);
+        snprintf(h, sizeof(h), "%s/f%d", peer, i);
+        int la = stat(p, &a), lz = stat(h, &z);
+        CHECK(la == lz && (la != 0 || a.st_size == z.st_size), "f%d differs from the host after a flush", i);
+    }
+    return failures ? 1 : 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -4115,6 +4814,14 @@ main(int argc, char **argv)
         return cow_sync(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (argc == 4 && !strcmp(argv[1], "modtime"))
         return modtime(argv[2], argv[3]);
+    if (argc == 4 && !strcmp(argv[1], "notify-entry"))
+        return notify_entry(argv[2], argv[3]);
+    if (argc == 5 && !strcmp(argv[1], "notify"))
+        return notify_semantics(argv[2], argv[3], argv[4]);
+    if (argc == 6 && !strcmp(argv[1], "notify-stress"))
+        return notify_stress(argv[2], argv[3], argv[4], atoi(argv[5]));
+    if (argc == 5 && !strcmp(argv[1], "notify-umount"))
+        return notify_umount(argv[2], argv[3], atoi(argv[4]));
     if (argc == 5 && !strcmp(argv[1], "raw-read"))
         return raw_read(argv[2], argv[3], (uid_t)atoi(argv[4]));
     if (argc == 3 && !strcmp(argv[1], "nocache"))

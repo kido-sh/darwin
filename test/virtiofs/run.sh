@@ -635,6 +635,14 @@ check "six writers on their own parts of one file, sharing pages, find every byt
 check "the modification time asked for alone follows writes here and on the Mac, and drops stale pages if not mapped" \
   guest /bin/sh -c 'mkdir -p /mnt/noatime && /sbin/mount -t virtiofs -o noatime kido:rw /mnt/noatime &&
   /tmp/t_virtiofs modtime /mnt/noatime/modtime /mnt/peer/modtime; r=$?; /sbin/umount /mnt/noatime || r=1; exit $r'
+check "notifications are for root on the mount's root only, and a malformed batch is refused whole" \
+  guest /tmp/t_virtiofs notify-entry /mnt/rw /mnt/rw/notify-entry
+check "a notification drops a stale name or attributes at once, skips echoes, flushes and wakes kqueue watchers" \
+  guest /tmp/t_virtiofs notify /mnt/rw /mnt/rw/notify /mnt/peer/notify
+check "notifications beside renames on the Mac, lookups, watchers and flushes end with the Mac's state" \
+  guest /tmp/t_virtiofs notify-stress /mnt/rw /mnt/rw/notify-stress /mnt/peer/notify-stress 10
+check "flushes through a mount's root beside its unmounts never hang either" \
+  guest /tmp/t_virtiofs notify-umount kido:rw /mnt/notify-umount 10
 check "unmount the second mount of kido:rw" guest /sbin/umount /mnt/peer
 check "mount kido:full" guest /bin/sh -c 'mkdir -p /mnt/full && /sbin/mount -t virtiofs kido:full /mnt/full'
 check "a write and a push this Mac has no room for fail, and the store they met is pushed once there is room" refused_kept
