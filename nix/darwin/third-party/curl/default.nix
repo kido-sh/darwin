@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 The kido authors
 #
-# macOS's /usr/lib/libcurl.4.dylib under macOS's install name, versions and exports. TLS is the
-# image's LibreSSL, its libssl.48 and libcrypto.46 weak-linked as on macOS, verifying against
-# /etc/ssl/cert.pem. HTTP/2 through libapple_nghttp2, linked as on macOS. No GSS-API or Kerberos,
-# LDAP or HTTP/3.
+# macOS's /usr/lib/libcurl.4.dylib (under macOS's install name, versions and exports) and
+# /usr/bin/curl CLI linked dynamically against it. TLS is the image's LibreSSL, its libssl.48
+# and libcrypto.46 weak-linked as on macOS, verifying against /etc/ssl/cert.pem. HTTP/2 through
+# libapple_nghttp2, linked as on macOS. No GSS-API or Kerberos, LDAP or HTTP/3.
 { stdenv
 , lib
 , callPackage
@@ -56,7 +56,7 @@ stdenv.mkDerivation {
     export DARWIN_SDK_ROOT="${appleSdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
     export PATH="${darwinCrossToolchain}/bin:$PATH"
     export CC="${t}-clang -arch ${arch}" AR=${t}-ar RANLIB=${t}-ranlib STRIP=${t}-strip NM=${t}-nm
-    export CFLAGS="-O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0"
+    export CFLAGS="-O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -ffile-prefix-map=$PWD=."
     # <SystemConfiguration/SCDynamicStoreCopySpecific.h>, which the SDK carries no headers for
     export CPPFLAGS="-I${systemConfiguration}/include"
     export LDFLAGS="${linkFlags} -Wl,-dylinker_install_name,/usr/lib/dyld"
@@ -100,27 +100,69 @@ stdenv.mkDerivation {
   buildPhase = ''
     runHook preBuild
     make -j$NIX_BUILD_CORES -C lib
+    # Export macOS's libcurl ABI plus the four public curl 8.23.0 symbols that
+    # curl's own CLI calls directly.
+    {
+      grep -v '^#' ${./libcurl.exports}
+      printf '%s\n' \
+        _curl_easy_ssls_export \
+        _curl_easy_ssls_import \
+        _curl_multi_get_offt \
+        _curl_multi_notify_enable
+    } | sort -u > want
     $CC -dynamiclib -o libcurl.4.dylib -Wl,-force_load,lib/.libs/libcurl.a \
       -framework CoreFoundation -framework CoreServices \
       -Wl,-weak_library,${libressl}/usr/lib/libcrypto.46.dylib \
       -Wl,-weak_library,${libressl}/usr/lib/libssl.48.dylib \
       -framework SystemConfiguration ${nghttp2}/usr/lib/libapple_nghttp2.dylib -lz \
       ${dylib.idFlags ./libcurl.exports} \
-      -Wl,-exported_symbols_list,${./libcurl.exports} -Wl,-dead_strip ${linkFlags}
-    grep -v '^#' ${./libcurl.exports} | sort > want
+      -Wl,-exported_symbols_list,want -Wl,-dead_strip ${linkFlags}
     $NM -gUj libcurl.4.dylib | sort > have
-    cmp -s want have || { echo "libcurl exports differ from macOS's:" >&2; diff want have >&2; exit 1; }
+    cmp -s want have || { echo "libcurl exports differ from expected:" >&2; diff want have >&2; exit 1; }
+
+    # Build /usr/bin/curl dynamically linked against libcurl.4.dylib. Compile
+    # src/*.c without CURL_STATICLIB and include only the small curlx helpers
+    # upstream src/Makefile.am compiles into shared-linked curl binaries.
+    make -j$NIX_BUILD_CORES -C src tool_hugehelp.c tool_ca_embed.c
+    curl_objs=$(make -s -C src -f Makefile -f - print-curl-objs <<'EOF'
+print-curl-objs:
+	@echo $(curl_OBJECTS)
+EOF
+)
+    curlx_srcs=$(make -s -C src -f Makefile -f - print-curlx-srcs <<'EOF'
+print-curlx-srcs:
+	@echo $(CURLX_CFILES)
+EOF
+)
+    make -j$NIX_BUILD_CORES -C src curl_CPPFLAGS="-I../include -I../lib -I." $curl_objs
+    mkdir -p src/curlx-objs
+    curlx_objs=""
+    for rel in $curlx_srcs; do
+      base=$(basename "$rel" .c)
+      obj="src/curlx-objs/$base.o"
+      $CC -DHAVE_CONFIG_H -Iinclude -Ilib -Isrc $CPPFLAGS $CFLAGS -c "src/$rel" -o "$obj"
+      curlx_objs="$curlx_objs $obj"
+    done
+    src_objs=""
+    for obj in $curl_objs; do
+      src_objs="$src_objs src/$obj"
+    done
+    $CC -o curl $src_objs $curlx_objs ./libcurl.4.dylib -lz \
+      -Wl,-dead_strip -Wl,-dead_strip_dylibs \
+      ${linkFlags} -Wl,-dylinker_install_name,/usr/lib/dyld
+    $STRIP -x curl
     runHook postBuild
   '';
 
   installPhase = ''
     runHook preInstall
-    mkdir -p $out/usr/lib
+    mkdir -p $out/usr/lib $out/usr/bin
     cp libcurl.4.dylib $out/usr/lib/
     # the names the SDK links by
     for l in libcurl libcurl.3; do
       ln -s libcurl.4.dylib $out/usr/lib/$l.dylib
     done
+    install -m 755 curl $out/usr/bin/curl
     runHook postInstall
   '';
 

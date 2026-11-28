@@ -149,7 +149,7 @@ sources the recipes in nix/darwin/third-party pin by hash, and kido for its agen
 | SQLite | 3.54.1 | `blessing` | /usr/lib/libsqlite3.dylib, which Security.framework links |
 | zsh | 5.9.1 | `LicenseRef-zsh` | /bin/zsh. The GPL-2.0 completion functions are removed |
 | ncurses | 6.6 | `X11-distribute-modifications-variant` | /usr/lib/libncurses.5.4.dylib, libpanel.5.4, libmenu.5.4 and libform.5.4; the terminfo database in /usr/share/terminfo, compiled from its terminfo.src; and linked into zsh |
-| curl | 8.23.0 | `curl` | /usr/lib/libcurl.4.dylib |
+| curl | 8.23.0 | `curl` | /usr/lib/libcurl.4.dylib and /usr/bin/curl |
 | nghttp2 | 1.71.0 | `MIT` | /usr/lib/libapple_nghttp2.dylib |
 | Expat | 2.11.0 | `MIT` | /usr/lib/libexpat.1.dylib |
 | libedit | 20251016-3.1 | `BSD-3-Clause`, `BSD-2-Clause` | /usr/lib/libedit.3.dylib |
