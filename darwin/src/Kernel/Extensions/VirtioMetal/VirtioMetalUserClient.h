@@ -30,6 +30,7 @@ public:
     void free() override;
 
     IOReturn clientClose() override;
+    IOReturn clientDied() override;
     IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
                             IOExternalMethodDispatch *dispatch, OSObject *target,
                             void *reference) override;
@@ -50,6 +51,7 @@ private:
     IOLock *fBufLifecycleLock;
     IOLock *fLock;
     uint32_t fClientId;
+    uint32_t fActiveRpcCount;
     bool fClientOpened;
     bool fClosed;
 

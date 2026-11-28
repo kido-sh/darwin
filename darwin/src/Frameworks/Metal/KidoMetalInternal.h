@@ -633,6 +633,7 @@ KMTL_EXPORT
 - (BOOL)mapBufferHandle:(uint64_t)handle outAddr:(mach_vm_address_t *)outAddr outSize:(mach_vm_size_t *)outSize;
 - (void)unmapBufferHandle:(uint64_t)handle;
 - (void)adjustAllocatedSize:(int64_t)delta;
+- (BOOL)supportsBFloat16;
 @end
 
 KMTL_EXPORT

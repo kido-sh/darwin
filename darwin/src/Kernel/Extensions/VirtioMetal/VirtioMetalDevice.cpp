@@ -736,7 +736,9 @@ VirtioMetalDevice::submitRPC(const struct kmtl_req_hdr *req,
                                req->opcode != KMTL_OP_COMMIT_COMMAND_BUFFER &&
                                req->opcode != KMTL_OP_CREATE_LIBRARY_SOURCE &&
                                req->opcode != KMTL_OP_CREATE_COMPUTE_PIPELINE &&
-                               req->opcode != KMTL_OP_CREATE_FUNCTION);
+                               req->opcode != KMTL_OP_CREATE_FUNCTION &&
+                               req->opcode != KMTL_OP_DESTROY_QUEUE &&
+                               req->opcode != KMTL_OP_CLIENT_CLOSE);
 
     AbsoluteTime deadline = 0;
     if (allowDeviceTimeout)

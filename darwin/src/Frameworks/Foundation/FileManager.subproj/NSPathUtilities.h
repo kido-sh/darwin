@@ -65,6 +65,8 @@ FOUNDATION_EXPORT NSArray<NSString *> *NSSearchPathForDirectoriesInDomains(
 
 @interface NSString (NSPathUtilities)
 
++ (NSString *)pathWithComponents:(NSArray<NSString *> *)components;
+
 - (NSString *)lastPathComponent;
 - (NSString *)stringByDeletingLastPathComponent;
 - (NSString *)pathExtension;

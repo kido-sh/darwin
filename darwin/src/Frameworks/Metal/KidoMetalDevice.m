@@ -640,7 +640,8 @@ MTLRemoveDeviceObserver(id observer)
         _info = *info;
         _info.name[sizeof(_info.name) - 1] = '\0';
         _name = [[NSString alloc] initWithUTF8String:_info.name[0] ? _info.name : "VirtioMetal GPU"];
-        _architecture = [[MTLArchitecture alloc] initWithName:@"applegpu_g16p"];
+        NSString *archName = (_info.gpu_family_mask & KMTL_FAM_APPLE1) ? @"applegpu_g16p" : @"kido_vulkan_gpu";
+        _architecture = [[MTLArchitecture alloc] initWithName:archName];
     }
     return self;
 }
@@ -737,6 +738,7 @@ MTLRemoveDeviceObserver(id observer)
 - (uint64_t)registryID { return _info.registry_id; }
 - (MTLArchitecture *)architecture { return _architecture; }
 - (BOOL)hasUnifiedMemory { return (_info.flags & KMTL_FEAT_UNIFIED_MEMORY) != 0; }
+- (BOOL)supportsBFloat16 { return (_info.flags & KMTL_FEAT_BFLOAT16) != 0; }
 - (BOOL)isLowPower { return NO; }
 - (BOOL)isHeadless { return YES; }
 - (BOOL)isRemovable { return NO; }

@@ -126,6 +126,9 @@ VirtioMetalUserClient::closeClient()
     IOLockLock(fLock);
     if (!fClosed) {
         fClosed = true;
+        while (fActiveRpcCount > 0) {
+            IOLockSleep(fLock, &fActiveRpcCount, THREAD_UNINT);
+        }
         oldBufs = fBuffers;
         oldCount = fBufferCount;
         oldCap = fBufferCap;
@@ -175,6 +178,12 @@ VirtioMetalUserClient::clientClose()
     if (!isInactive())
         terminate();
     return kIOReturnSuccess;
+}
+
+IOReturn
+VirtioMetalUserClient::clientDied()
+{
+    return super::clientDied();
 }
 
 void
@@ -465,6 +474,7 @@ VirtioMetalUserClient::handleRPC(IOExternalMethodArguments *args)
         dev = fDevice;
         dev->retain();
         clientId = fClientId;
+        fActiveRpcCount++;
     }
     IOLockUnlock(fLock);
 
@@ -478,31 +488,6 @@ VirtioMetalUserClient::handleRPC(IOExternalMethodArguments *args)
     call.req.version   = KMTL_PROTO_VERSION;
     call.req.client_id = clientId;
 
-    /* For DESTROY_BUFFER, verify handle ownership and tear down mapping before host RPC. */
-    if (call.req.opcode == KMTL_OP_DESTROY_BUFFER) {
-        if (call.req.handle == 0 || call.req.handle > 0xFFFFFFFFULL) {
-            IOLockUnlock(fBufLifecycleLock);
-            dev->release();
-            return kIOReturnBadArgument;
-        }
-        IOMemoryDescriptor *removedDesc = NULL;
-        IOMemoryMap *removedMap = NULL;
-        IOLockLock(fLock);
-        bool found = removeBufferLocked((uint32_t)call.req.handle, &removedDesc, &removedMap);
-        IOLockUnlock(fLock);
-        if (!found) {
-            IOLockUnlock(fBufLifecycleLock);
-            dev->release();
-            return kIOReturnNotFound;
-        }
-        if (removedMap) {
-            removedMap->unmap();
-            removedMap->release();
-        }
-        if (removedDesc)
-            removedDesc->release();
-    }
-
     uint64_t wiredQuota = (uint64_t)call.in_len + (uint64_t)call.out_cap;
     bool reservedWired = false;
     IOMemoryDescriptor *inDesc = NULL;
@@ -512,6 +497,29 @@ VirtioMetalUserClient::handleRPC(IOExternalMethodArguments *args)
     bool dmaActive = false;
     IOReturn ret = kIOReturnSuccess;
     struct kmtl_resp_hdr resp = {};
+
+    /* For DESTROY_BUFFER, verify handle ownership and tear down mapping before host RPC. */
+    if (call.req.opcode == KMTL_OP_DESTROY_BUFFER) {
+        if (call.req.handle == 0 || call.req.handle > 0xFFFFFFFFULL) {
+            ret = kIOReturnBadArgument;
+            goto cleanup;
+        }
+        IOMemoryDescriptor *removedDesc = NULL;
+        IOMemoryMap *removedMap = NULL;
+        IOLockLock(fLock);
+        bool found = removeBufferLocked((uint32_t)call.req.handle, &removedDesc, &removedMap);
+        IOLockUnlock(fLock);
+        if (!found) {
+            ret = kIOReturnNotFound;
+            goto cleanup;
+        }
+        if (removedMap) {
+            removedMap->unmap();
+            removedMap->release();
+        }
+        if (removedDesc)
+            removedDesc->release();
+    }
 
     if (wiredQuota > 0) {
         if (!dev->tryReserveWiredBytes(wiredQuota)) {
@@ -603,6 +611,12 @@ cleanup:
     }
     if (isBufLifecycle)
         IOLockUnlock(fBufLifecycleLock);
+    IOLockLock(fLock);
+    if (fActiveRpcCount > 0)
+        fActiveRpcCount--;
+    if (fActiveRpcCount == 0 && fClosed)
+        IOLockWakeup(fLock, &fActiveRpcCount, /*oneThread=*/false);
+    IOLockUnlock(fLock);
     dev->release();
     return ret;
 }

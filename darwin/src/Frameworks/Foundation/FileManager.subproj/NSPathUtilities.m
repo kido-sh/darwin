@@ -8,6 +8,7 @@
 
 #import <Foundation/NSPathUtilities.h>
 #import <Foundation/NSArray.h>
+#import <Foundation/NSException.h>
 #include <CoreFoundation/CFString.h>
 #include <CoreFoundation/CFURL.h>
 #include <pwd.h>
@@ -137,6 +138,61 @@ NSArray<NSString *> *NSSearchPathForDirectoriesInDomains(
  * slashes, "/" itself, extension-less names) match CoreFoundation's. */
 
 @implementation NSString (NSPathUtilities)
+
++ (NSString *)pathWithComponents:(NSArray<NSString *> *)components {
+    if (components == nil) {
+        [NSException raise:NSInvalidArgumentException
+                    format:@"*** +[NSString pathWithComponents:]: nil argument"];
+    }
+
+    NSUInteger count = [components count];
+    if (count == 0) {
+        return @"";
+    }
+
+    NSMutableString *result = [NSMutableString string];
+    BOOL isAbsolute = NO;
+    BOOL sawNonEmpty = NO;
+    BOOL hasSegment = NO;
+
+    for (NSUInteger i = 0; i < count; i++) {
+        NSString *comp = [components objectAtIndex:i];
+        NSUInteger len = [comp length];
+        if (len == 0) {
+            continue;
+        }
+        if (!sawNonEmpty) {
+            sawNonEmpty = YES;
+            if ([comp characterAtIndex:0] == '/') {
+                isAbsolute = YES;
+            }
+        }
+
+        NSUInteger pos = 0;
+        while (pos < len) {
+            while (pos < len && [comp characterAtIndex:pos] == '/') {
+                pos++;
+            }
+            if (pos >= len) {
+                break;
+            }
+            NSUInteger segStart = pos;
+            while (pos < len && [comp characterAtIndex:pos] != '/') {
+                pos++;
+            }
+            if (hasSegment || isAbsolute) {
+                [result appendString:@"/"];
+            }
+            [result appendString:[comp substringWithRange:NSMakeRange(segStart, pos - segStart)]];
+            hasSegment = YES;
+        }
+    }
+
+    if (!hasSegment) {
+        return isAbsolute ? @"/" : @"";
+    }
+    return [NSString stringWithString:result];
+}
 
 - (NSString *)lastPathComponent {
     NSArray<NSString *> *components = [self pathComponents];
