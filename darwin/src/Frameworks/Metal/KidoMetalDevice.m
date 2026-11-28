@@ -66,6 +66,9 @@ KidoGetDefaultDeviceSingleton(void)
         if (!service)
             return;
 
+        uint64_t regID = 0;
+        IORegistryEntryGetRegistryEntryID(service, &regID);
+
         io_connect_t conn = MACH_PORT_NULL;
         kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &conn);
         IOObjectRelease(service);
@@ -94,6 +97,8 @@ KidoGetDefaultDeviceSingleton(void)
             IOServiceClose(conn);
             return;
         }
+        if (regID != 0)
+            info.registry_id = regID;
 
         sDevice = [[KidoMTLDevice alloc] initWithConnect:conn info:&info];
         if (!sDevice)

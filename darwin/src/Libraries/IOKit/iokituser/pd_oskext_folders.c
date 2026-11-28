@@ -52,3 +52,12 @@ OSKextGetSystemExtensionsFolderURLs(void)
 	pthread_once(&__sOnce, __initSystemExtensionsFolderURLs);
 	return __sSystemExtensionsFolderURLs;
 }
+
+CFDictionaryRef
+KextManagerCopyLoadedKextInfo(CFArrayRef kextIdentifiers, CFArrayRef infoKeys)
+{
+	(void)kextIdentifiers;
+	(void)infoKeys;
+	return CFDictionaryCreate(kCFAllocatorDefault, NULL, NULL, 0,
+	    &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+}

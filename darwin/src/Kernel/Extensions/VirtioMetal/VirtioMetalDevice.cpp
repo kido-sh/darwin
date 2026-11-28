@@ -7,8 +7,9 @@
 #include <kern/clock.h>
 #include <libkern/OSByteOrder.h>
 
-#define super IOService
-OSDefineMetaClassAndStructors(VirtioMetalDevice, IOService)
+#define super IOAccelerator
+OSDefineMetaClassAndStructors(IOAccelerator, IOService)
+OSDefineMetaClassAndStructors(VirtioMetalDevice, IOAccelerator)
 
 enum {
     kCmdQueueIndex    = 0,
@@ -142,14 +143,90 @@ VirtioMetalDevice::start(IOService *provider)
     if (fInterruptSource)
         fInterruptSource->enable();
 
+    publishAcceleratorProperties();
+    registerService();
+    return true;
+}
+
+void
+VirtioMetalDevice::publishAcceleratorProperties()
+{
+    char modelBuf[sizeof(((struct kmtl_device_info *)0)->name)];
+    strlcpy(modelBuf, "VirtioMetal GPU", sizeof(modelBuf));
+    uint32_t vendorId = 0;
+    uint64_t workingSet = fConfig.recommended_max_working_set_size ?
+        fConfig.recommended_max_working_set_size : fShmLength;
+
+    IOBufferMemoryDescriptor *infoMem = IOBufferMemoryDescriptor::inTaskWithOptions(
+        kernel_task, kIODirectionIn, sizeof(struct kmtl_device_info), PAGE_SIZE);
+    if (infoMem) {
+        if (infoMem->prepare(kIODirectionIn) == kIOReturnSuccess) {
+            struct kmtl_req_hdr req;
+            struct kmtl_resp_hdr resp;
+            bzero(&req, sizeof(req));
+            bzero(&resp, sizeof(resp));
+            req.magic   = KMTL_MAGIC;
+            req.version = KMTL_PROTO_VERSION;
+            req.opcode  = KMTL_OP_GET_DEVICE_INFO;
+
+            bool dmaActive = false;
+            IOReturn kr = submitRPC(&req, NULL, 0, &resp, infoMem,
+                                    (uint32_t)sizeof(struct kmtl_device_info), &dmaActive);
+            if (kr == kIOReturnSuccess && resp.status == KMTL_OK &&
+                resp.extra_len >= sizeof(struct kmtl_device_info)) {
+                struct kmtl_device_info devInfo;
+                memcpy(&devInfo, infoMem->getBytesNoCopy(), sizeof(devInfo));
+                devInfo.name[sizeof(devInfo.name) - 1] = '\0';
+                if (devInfo.name[0] != '\0')
+                    strlcpy(modelBuf, devInfo.name, sizeof(modelBuf));
+                if (devInfo.recommended_max_working_set_size > 0)
+                    workingSet = devInfo.recommended_max_working_set_size;
+                if (strncmp(modelBuf, "Apple ", 6) == 0) {
+                    vendorId = 0x106bu;
+                } else {
+                    uint64_t hi = devInfo.registry_id >> 32;
+                    if (hi > 0x00ffu && hi <= 0xffffu)
+                        vendorId = (uint32_t)hi;
+                }
+            }
+            if (!dmaActive) {
+                infoMem->complete(kIODirectionIn);
+                infoMem->release();
+            }
+        } else {
+            infoMem->release();
+        }
+    }
+
     setName("VirtioMetal");
     setProperty("IOUserClientClass", "VirtioMetalUserClient");
-    registerService();
+    setProperty("IOMatchCategory", "IOAccelerator");
+    setProperty("CFBundleIdentifier", "sh.kido.driver.virtiometal");
+    setProperty("model", modelBuf);
+    setProperty("IOName", modelBuf);
+    setProperty("MetalPluginName", "KidoMetal");
+    if (vendorId != 0)
+        setProperty("vendor-id", &vendorId, sizeof(vendorId));
 
-    IOLog("VirtioMetal: ready (shm phys=0x%llx len=%llu MiB, %u slots, %u descs%s%s)\n",
-          fShmPhys, fShmLength >> 20, fSlotCount, fCmdQueue.queueSize,
+    OSDictionary *perf = OSDictionary::withCapacity(2);
+    if (perf) {
+        OSNumber *allocMem = OSNumber::withNumber(workingSet, 64);
+        OSNumber *inUseMem = OSNumber::withNumber((uint64_t)0, 64);
+        if (allocMem) {
+            perf->setObject("Alloc system memory", allocMem);
+            allocMem->release();
+        }
+        if (inUseMem) {
+            perf->setObject("In use system memory", inUseMem);
+            inUseMem->release();
+        }
+        setProperty("PerformanceStatistics", perf);
+        perf->release();
+    }
+
+    IOLog("VirtioMetal: ready (%s, shm phys=0x%llx len=%llu MiB, %u slots, %u descs%s%s)\n",
+          modelBuf, fShmPhys, fShmLength >> 20, fSlotCount, fCmdQueue.queueSize,
           fIndirect ? ", indirect" : "", fUseInterrupts ? ", irq" : ", poll");
-    return true;
 }
 
 void

@@ -30,6 +30,8 @@
             <string>sh.kido.driver.virtiometal</string>
             <key>IOClass</key>
             <string>VirtioMetalDevice</string>
+            <key>IOMatchCategory</key>
+            <string>IOAccelerator</string>
             <key>IOPCIPrimaryMatch</key>
             <string>0x10901af4</string>
             <key>IOProbeScore</key>

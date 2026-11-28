@@ -314,6 +314,7 @@ _IOServiceOpenAsFileDescriptor
 _IOServiceRequestProbe
 _IOServiceWaitQuiet
 _IOSetNotificationPort
+_KextManagerCopyLoadedKextInfo
 _OBJC_CLASS_$_HIDDevice
 _OBJC_CLASS_$_HIDElement
 _OBJC_IVAR_$_HIDDevice._device

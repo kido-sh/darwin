@@ -17,7 +17,11 @@
 
 struct VirtioMetalSlot;
 
-class VirtioMetalDevice : public IOService {
+class IOAccelerator : public IOService {
+    OSDeclareDefaultStructors(IOAccelerator)
+};
+
+class VirtioMetalDevice : public IOAccelerator {
     OSDeclareDefaultStructors(VirtioMetalDevice)
 
 public:
@@ -45,6 +49,7 @@ private:
     bool setupQueue();
     bool setupSlots();
     bool setupInterrupt();
+    void publishAcceleratorProperties();
     void interruptOccurred(IOInterruptEventSource *source, int count);
     void drainLocked();
     void failLocked(bool broken);
