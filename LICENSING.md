@@ -88,6 +88,7 @@ the release a directory came from and the other licenses its files carry.
 | `darwin/src/Libraries/mDNSResponder/**` | `Apache-2.0` | mDNSResponder-1310.120.71. Also `BSD-3-Clause` and `OpenSSL` (mDNSCore/DNSDigest.c) |
 | `darwin/src/Libraries/{architecture,AvailabilityVersions,eap8021x,ppp}/**` | `APSL-2.0` | architecture-279, AvailabilityVersions-157.2, eap8021x-304.100.1 and ppp-884 headers. Also `Apache-2.0`, `BSD-4-Clause-UC`, `CMU-Mach` |
 | `darwin/src/Libraries/{CoreServices,CrashReporterClient,SymptomReporter,libDER,libdarwin,libsandbox,libsystem_trace}/**` | `BSD-2-Clause` | PureDarwin. Also `MPL-2.0`, `MPL-2.0 OR BSD-2-Clause`, `MIT` (Zoe Knox's libsystem_trace, whose headers also say `BSD-2-Clause`) and `APSL-2.0` (two Apple headers in libdarwin) |
+| `darwin/src/Libraries/xcselect/**` | `Apache-2.0` | kido's clean-room libxcselect library |
 | `darwin/src/Libraries/{clang_bootstrap,libcxx,libcxxabi,libunwind,llvm-libc}/**` | `Apache-2.0 WITH LLVM-exception` | LLVM 21.1.8. Also `Unicode-3.0` (libcxx's Unicode data), `MIT`, `LicenseRef-Public-Domain` |
 | `darwin/src/Frameworks/CoreFoundation/**` | `Apache-2.0 WITH Swift-exception` | swift-corelibs-foundation 5.0.3. PureDarwin's files are `BSD-2-Clause`, `MPL-2.0` or `MPL-2.0 OR BSD-2-Clause` |
 | `darwin/src/Frameworks/Foundation/**` | `MPL-2.0` | PureDarwin, under the directory's own LICENSE. Also `MPL-2.0 OR BSD-2-Clause`, `MIT` |

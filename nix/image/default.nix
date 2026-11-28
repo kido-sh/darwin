@@ -28,6 +28,7 @@ let
     splitBaseSystemArm64VirtMinimalRelease
     systemConfigurationArm64Build
     toyboxArm64Build
+    xcselectArm64eBuild
     zshArm64Build
     ;
   agent = pkgs.callPackage ./agent.nix {
@@ -93,6 +94,7 @@ let
       zshArm64Build iconvArm64eBuild toyboxArm64Build
       securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build metalArm64Build
       libzDylibArm64Build libbz2DylibArm64eBuild liblzmaDylibArm64eBuild libutilArm64eBuild
+      xcselectArm64eBuild
       ncursesDylibArm64Build libeditArm64Build curlArm64Build
       nghttp2Arm64eBuild expatArm64eBuild sqliteDylibArm64eBuild
       certificatesBundleBuild containerLaunchdSettings

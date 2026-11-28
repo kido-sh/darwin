@@ -200,6 +200,9 @@ let
   metalSource = sourceWith "kido-metal-source" [
     "src/Frameworks/Metal"
   ];
+  xcselectSource = sourceWith "kido-xcselect-source" [
+    "src/Libraries/xcselect"
+  ];
 
 in {
   inherit
@@ -217,6 +220,7 @@ in {
     symptomReporterSource
     systemConfigurationSource
     userlandSource
+    xcselectSource
     xnuHeadersSource
     ;
 }

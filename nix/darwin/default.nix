@@ -34,6 +34,7 @@ let
     symptomReporterSource
     systemConfigurationSource
     userlandSource
+    xcselectSource
     xnuHeadersSource
     ;
   sourceWithExtraFilter = name: prefixes: extraFilter:
@@ -243,6 +244,10 @@ let
     corefoundation = coreFoundationArm64Build;
     foundation = foundationArm64Build;
     iokit = iokitArm64Build;
+  };
+  xcselectArm64eBuild = mkArm64Build ./apple/xcselect.nix {
+    src = xcselectSource;
+    arch = "arm64e";
   };
   securityArm64Build = mkArm64Build ./apple/security.nix {
     pname = "kido-security-arm64";
@@ -562,6 +567,7 @@ in
     splitBaseSystemArm64VirtMinimalRelease
     systemConfigurationArm64Build
     toyboxArm64Build
+    xcselectArm64eBuild
     zshArm64Build
     ;
 }
