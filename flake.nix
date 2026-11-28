@@ -48,11 +48,13 @@
         kl-libffi = kl.arm64.libffi;
         kl-libxml2 = kl.arm64.libxml2;
         kl-python3 = kl.arm64.python3;
+        kl-swift-runtime = kl.arm64.swiftRuntime;
         kl-standard = kl.arm64.standard;
         kl-all = kl.arm64.all;
         kl-arm64e-libffi = kl.arm64e.libffi;
         kl-arm64e-libxml2 = kl.arm64e.libxml2;
         kl-arm64e-python3 = kl.arm64e.python3;
+        kl-arm64e-swift-runtime = kl.arm64e.swiftRuntime;
         kl-arm64e-standard = kl.arm64e.standard;
         kl-arm64e-all = kl.arm64e.all;
       };

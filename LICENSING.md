@@ -184,6 +184,7 @@ and is enforced against a strictly permissive SPDX allowlist at build time.
 | libffi | 3.5.2 | `MIT` | /usr/lib/libffi.dylib |
 | libxml2 | 2.15.3 | `MIT` | /usr/lib/libxml2.2.dylib, /usr/lib/libxml2.dylib |
 | python3 | 3.13.14 | `PSF-2.0` (bundled modules: `MIT` expat, `BSD-2-Clause` mpdecimal, `Apache-2.0` HACL*) | /usr/bin/python3, /usr/bin/python3.13, /usr/lib/python3.13 |
+| swift-runtime | 5.10.1 | `Apache-2.0 WITH Swift-exception`, `Apache-2.0 WITH LLVM-exception` | /usr/lib/swift/libswiftCore.dylib, libswiftSwiftOnoneSupport.dylib, libswift_Concurrency.dylib, libswiftDarwin.dylib, libswift_RegexParser.dylib, libswift_StringProcessing.dylib, libswiftRegexBuilder.dylib, libswiftObservation.dylib, libswiftDistributed.dylib |
 | standard | 1.0.0 | `Apache-2.0` | /usr/share/kl/packages/standard.json (meta-package depending on libffi, libxml2, python3) |
 
 ## Removed, not relicensed

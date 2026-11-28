@@ -549,6 +549,7 @@ in
     coreServicesArm64Build
     curlArm64Build
     expatArm64eBuild
+    foundationArm64Build
     iconvArm64eBuild
     kernelArm64VirtBuild
     kextsArm64Build

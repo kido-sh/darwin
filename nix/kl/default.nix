@@ -13,6 +13,7 @@ let
     darwinCrossToolchain
     ;
   lib = pkgs.lib;
+  swiftSources = pkgs.callPackage (pkgs.path + "/pkgs/development/compilers/swift/sources.nix") { };
 
   mkSet = arch:
     let
@@ -42,17 +43,31 @@ let
         klLibffi = libffi;
         inherit (pkgs) python3;
       };
+      swiftRuntime = pkgs.callPackage ./swift-runtime.nix {
+        inherit darwinCrossToolchain nativeLd appleSdk arch;
+        inherit (pkgs) llvmPackages_21 swiftPackages;
+        swiftSrc = swiftSources.swift;
+        swiftStringProcessingSrc = swiftSources.swift-experimental-string-processing;
+        swiftVersion = swiftSources.version;
+        libSystem = darwin.libSystemArm64Build;
+        libobjc = darwin.libobjcArm64Build;
+        libcxxDylib = darwin.libcxxDylibArm64Build;
+        libcxxabiDylib = darwin.libcxxabiDylibArm64Build;
+        foundation = darwin.foundationArm64Build;
+        libz = darwin.libzDylibArm64Build;
+        zlibDev = pkgs.zlib.dev;
+      };
       standard = pkgs.callPackage ./standard.nix {
         inherit darwinCrossToolchain arch libffi libxml2 python3;
       };
-      packagesList = [ libffi libxml2 python3 standard ];
+      packagesList = [ libffi libxml2 python3 swiftRuntime standard ];
       catalogJson = builtins.toJSON {
         inherit arch;
         packages = map (p: p.kl // { dir = "packages/${p.kl.name}"; }) packagesList;
       };
       all = pkgs.runCommand "kido-kl-all-${arch}" {
         passthru = {
-          inherit arch libffi libxml2 python3 standard;
+          inherit arch libffi libxml2 python3 swiftRuntime standard;
         };
       } ''
         mkdir -p "$out/packages"
@@ -66,7 +81,7 @@ EOF
       '';
     in
     {
-      inherit libffi libxml2 python3 standard all;
+      inherit libffi libxml2 python3 swiftRuntime standard all;
     };
 in
 {
