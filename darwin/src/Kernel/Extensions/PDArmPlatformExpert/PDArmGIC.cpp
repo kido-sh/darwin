@@ -162,11 +162,48 @@ sun50i_cpu_setup(void)
 }
 
 #if !defined(__arm__) || defined(__arm64__)
-// /arm-io/gic from the loader names a gic-400 the kernel drives, reg holds the distributor
-// and cpu interface relative to the arm-io window. older sun50i loaders only set device_type
+// QEMU virt and kido-vmm carry "linux,dummy-virt" or the loader's "ACPI" root.
+// Bare-metal sun50i/SG2002 boards do not.
+static bool
+root_is_virt(void)
+{
+	IORegistryEntry *root = IORegistryEntry::fromPath("/", gIODTPlane);
+	bool virt = false;
+
+	if (root != NULL) {
+		OSData *compat = OSDynamicCast(OSData, root->getProperty("compatible"));
+		if (compat != NULL && compat->getLength() > 0) {
+			const char *p = (const char *)compat->getBytesNoCopy();
+			unsigned int len = compat->getLength();
+			if (len >= 5 && memcmp(p, "ACPI", 5) == 0) {
+				virt = true;
+			} else {
+				unsigned int off = 0;
+				while (off < len) {
+					unsigned int n = (unsigned int)strnlen(p + off, len - off);
+					if (n == 16 && memcmp(p + off, "linux,dummy-virt", 16) == 0) {
+						virt = true;
+						break;
+					}
+					off += n + 1;
+				}
+			}
+		}
+		root->release();
+	}
+	return virt;
+}
+
+// /arm-io/gic from the loader names a gic-400 the kernel drives on bare-metal sun50i/SG2002,
+// reg holds the distributor and cpu interface relative to the arm-io window.
+// Virtual machines (linux,dummy-virt / ACPI) never use kernel-owned sun50i GIC startup.
 static bool
 kernel_owned_gic(uint64_t *gicd, uint64_t *gicc)
 {
+	if (root_is_virt()) {
+		return false;
+	}
+
 	IORegistryEntry *armio = IORegistryEntry::fromPath("/arm-io", gIODTPlane);
 	IORegistryEntry *gic = IORegistryEntry::fromPath("/arm-io/gic", gIODTPlane);
 	bool found = false;
@@ -186,9 +223,13 @@ kernel_owned_gic(uint64_t *gicd, uint64_t *gicc)
 		    ranges != NULL && ranges->getLength() >= 2 * sizeof(uint64_t)) {
 			const uint64_t *r = (const uint64_t *)reg->getBytesNoCopy();
 			uint64_t base = ((const uint64_t *)ranges->getBytesNoCopy())[1];
-			*gicd = base + r[0];
-			*gicc = base + r[2];
-			found = true;
+			uint64_t d = base + r[0];
+			uint64_t c = base + r[2];
+			if (d != GIC_GICD_BASE_PHYS || c != GIC2_GICC_BASE_PHYS) {
+				*gicd = d;
+				*gicc = c;
+				found = true;
+			}
 		}
 	}
 	if (!found && armio != NULL) {
@@ -197,6 +238,42 @@ kernel_owned_gic(uint64_t *gicd, uint64_t *gicc)
 		    strncmp((const char *)type->getBytesNoCopy(), "sun50i-io", 9) == 0) {
 			*gicd = SUN50I_GICD_PHYS;
 			*gicc = SUN50I_GICC_PHYS;
+			found = true;
+		}
+	}
+	OSSafeReleaseNULL(gic);
+	OSSafeReleaseNULL(armio);
+	return found;
+}
+
+// /arm-io/gic from the loader when a virt host provides GICv2 (e.g. Raspberry Pi 5 KVM)
+static bool
+gic_v2_locate(uint64_t *gicd, uint64_t *gicc)
+{
+	IORegistryEntry *armio = IORegistryEntry::fromPath("/arm-io", gIODTPlane);
+	IORegistryEntry *gic = IORegistryEntry::fromPath("/arm-io/gic", gIODTPlane);
+	bool found = false;
+
+	if (gic != NULL && armio != NULL) {
+		OSData *compat = OSDynamicCast(OSData, gic->getProperty("compatible"));
+		OSData *reg = OSDynamicCast(OSData, gic->getProperty("reg"));
+		OSData *ranges = OSDynamicCast(OSData, armio->getProperty("ranges"));
+		OSData *ppi = OSDynamicCast(OSData, gic->getProperty("timer-ppi"));
+		if (ppi != NULL && ppi->getLength() == sizeof(uint32_t) &&
+		    *(const uint32_t *)ppi->getBytesNoCopy() >= 16 && *(const uint32_t *)ppi->getBytesNoCopy() < 32) {
+			gGicTimerPpi = *(const uint32_t *)ppi->getBytesNoCopy();
+		}
+		if (compat != NULL &&
+		    ((compat->getLength() >= 11 && strncmp((const char *)compat->getBytesNoCopy(), "arm,gic-400", 11) == 0) ||
+		     (compat->getLength() >= 18 && strncmp((const char *)compat->getBytesNoCopy(), "arm,cortex-a15-gic", 18) == 0) ||
+		     (compat->getLength() >= 10 && strncmp((const char *)compat->getBytesNoCopy(), "arm,gic-v2", 10) == 0))) {
+			if (reg != NULL && reg->getLength() >= 4 * sizeof(uint64_t) &&
+			    ranges != NULL && ranges->getLength() >= 2 * sizeof(uint64_t)) {
+				const uint64_t *r = (const uint64_t *)reg->getBytesNoCopy();
+				uint64_t base = ((const uint64_t *)ranges->getBytesNoCopy())[1];
+				*gicd = base + r[0];
+				*gicc = base + r[2];
+			}
 			found = true;
 		}
 	}
@@ -322,11 +399,13 @@ PDArmGIC_init(void)
 	}
 
 	// HVF emulates a GICv3 but reports ID_AA64PFR0_EL1.GIC = 0: the tree's gic-v3 wins
-	if (!gic_v3_locate() && gic_is_v2()) {
-		gGicd = map_phys(GIC_GICD_BASE_PHYS, GIC_GICD_SIZE, &gGicdMap);
-		gGicc = map_phys(GIC2_GICC_BASE_PHYS, GIC2_GICC_SIZE, &gGiccMap);
+	uint64_t v2_gicd = GIC_GICD_BASE_PHYS, v2_gicc = GIC2_GICC_BASE_PHYS;
+	if (!gic_v3_locate() && (gic_v2_locate(&v2_gicd, &v2_gicc) || gic_is_v2())) {
+		gGicd = map_phys(v2_gicd, GIC_GICD_SIZE, &gGicdMap);
+		gGicc = map_phys(v2_gicc, GIC2_GICC_SIZE, &gGiccMap);
 		if (gGicd == NULL || gGicc == NULL) {
-			PD_LOG("PDArmGIC: failed to map GICv2 (gicd=%p gicc=%p)\n", gGicd, gGicc);
+			PD_LOG("PDArmGIC: failed to map GICv2 at 0x%llx/0x%llx (gicd=%p gicc=%p)\n",
+			    (unsigned long long)v2_gicd, (unsigned long long)v2_gicc, gGicd, gGicc);
 			gGicd = NULL;
 			return false;
 		}
@@ -334,7 +413,8 @@ PDArmGIC_init(void)
 		d_write(GICD_CTLR, 0);
 		gic2_cpu_setup();
 		d_write(GICD_CTLR, GICD_CTLR_ENGRP0 | GICD_CTLR_ENGRP1);
-		PD_LOG("PDArmGIC: GICv2 configured (timer PPI %u, IPI SGI %u as Group0/FIQ, masked)\n",
+		PD_LOG("PDArmGIC: GICv2 configured (gicd 0x%llx gicc 0x%llx, timer PPI %u, IPI SGI %u as Group0/FIQ, masked)\n",
+		    (unsigned long long)v2_gicd, (unsigned long long)v2_gicc,
 		    (unsigned)GIC_TIMER_PPI, (unsigned)GIC_IPI_SGI);
 		return true;
 	}
