@@ -95,28 +95,36 @@ let
       (headersIn ../../darwin/src/Libraries/libsandbox)
     ];
   };
-  userlandSource = stripOsfmkImpl (sourceWith "kido-userland-source" [
-    # pkill uses os_assert from libc's private os/assumes.h, which includes _simple.h
-    "src/Libraries/libSystem/libc/os/assumes.h"
-    "src/Libraries/libSystem/libplatform/private/_simple.h"
-    # nohup detaches from the console session through _vprocmgr_detach_from_console;
-    # vproc_priv.h is private and not in the SDK.
-    "src/Libraries/XPC/libxpc/include"
-    "src/Kernel/xnu/osfmk"
-    # ping(8) from network_cmds needs <netinet/ip_var.h>,
-    # <netinet/in_systm.h>, <netinet/ip_icmp.h> and the SO_TC_* socket
-    # options in <sys/socket.h>'s PRIVATE block.
-    "src/Kernel/xnu/bsd"
-    "src/Libraries/IOKit"
-    "src/Libraries/libSystem/libmalloc/compat-include"
-    "src/Libraries/libSystem/libsystem_kernel/mach"
-    "src/Libraries/CommonCrypto/include"
-    # mdnsd is built from src/Userspace/mdnsd but its sources are
-    # vendored alongside the libdns_sd client.
-    "src/Libraries/mDNSResponder"
-    "src/Userspace"
-    "tools/mig"
-  ]);
+  # sw_vers is built standalone via swVersArm64Build (nix/darwin/apple/sw_vers.nix),
+  # so exclude src/Userspace/sw_vers from userlandSource to avoid rebuilding all
+  # userland utilities when sw_vers.c changes.
+  userlandSource = pkgs.lib.cleanSourceWith {
+    src = stripOsfmkImpl (sourceWith "kido-userland-source" [
+      # pkill uses os_assert from libc's private os/assumes.h, which includes _simple.h
+      "src/Libraries/libSystem/libc/os/assumes.h"
+      "src/Libraries/libSystem/libplatform/private/_simple.h"
+      # nohup detaches from the console session through _vprocmgr_detach_from_console;
+      # vproc_priv.h is private and not in the SDK.
+      "src/Libraries/XPC/libxpc/include"
+      "src/Kernel/xnu/osfmk"
+      # ping(8) from network_cmds needs <netinet/ip_var.h>,
+      # <netinet/in_systm.h>, <netinet/ip_icmp.h> and the SO_TC_* socket
+      # options in <sys/socket.h>'s PRIVATE block.
+      "src/Kernel/xnu/bsd"
+      "src/Libraries/IOKit"
+      "src/Libraries/libSystem/libmalloc/compat-include"
+      "src/Libraries/libSystem/libsystem_kernel/mach"
+      "src/Libraries/CommonCrypto/include"
+      # mdnsd is built from src/Userspace/mdnsd but its sources are
+      # vendored alongside the libdns_sd client.
+      "src/Libraries/mDNSResponder"
+      "src/Userspace"
+      "tools/mig"
+    ]);
+    filter = path: _type:
+      let rel = pkgs.lib.removePrefix "${toString ../../darwin}/" (toString path);
+      in rel != "src/Userspace/sw_vers" && !(pkgs.lib.hasPrefix "src/Userspace/sw_vers/" rel);
+  };
   coreFoundationSource = sourceWith "kido-corefoundation-source" [
     "src/Frameworks/CoreFoundation"
     "src/Libraries/libSystem/libc/pd-compat-include"
@@ -203,6 +211,9 @@ let
   xcselectSource = sourceWith "kido-xcselect-source" [
     "src/Libraries/xcselect"
   ];
+  swVersSource = sourceWith "kido-sw-vers-source" [
+    "src/Userspace/sw_vers"
+  ];
 
 in {
   inherit
@@ -217,6 +228,7 @@ in {
     metalSource
     objcSource
     securitySource
+    swVersSource
     symptomReporterSource
     systemConfigurationSource
     userlandSource

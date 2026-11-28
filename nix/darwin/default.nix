@@ -31,6 +31,7 @@ let
     metalSource
     objcSource
     securitySource
+    swVersSource
     symptomReporterSource
     systemConfigurationSource
     userlandSource
@@ -249,6 +250,10 @@ let
     src = xcselectSource;
     arch = "arm64e";
   };
+  swVersArm64Build = mkArm64Build ./apple/sw_vers.nix {
+    src = swVersSource;
+    arch = "arm64";
+  };
   securityArm64Build = mkArm64Build ./apple/security.nix {
     pname = "kido-security-arm64";
     inherit mkPureDarwinBuild;
@@ -414,7 +419,7 @@ let
   userlandArm64Build = mkPureDarwinBuild {
     pname = "kido-userland";
     src = userlandSource;
-    buildTargets = [ "sw_vers" "doubleagentd" "ps" "killall" "pkill" "mkfile" "sync" "sysctl" "vm_stat" "hostinfo" "dmesg" "purge" "reboot" "halt" "poweroff" "shutdown" "netsetup" "ping" "mount" "umount" "ext4tool" "ext4_util" "mdnsd" "kido-dmesg-save" "sh" "gpt" ]
+    buildTargets = [ "doubleagentd" "ps" "killall" "pkill" "mkfile" "sync" "sysctl" "vm_stat" "hostinfo" "dmesg" "purge" "reboot" "halt" "poweroff" "shutdown" "netsetup" "ping" "mount" "umount" "ext4tool" "ext4_util" "mdnsd" "kido-dmesg-save" "sh" "gpt" ]
       # shell_cmds (+ tsort/uuencode/uudecode)
       ++ [ "basename" "chown" "dirname" "echo" "false" "getopt" "hostname" "jot" "kill" "logname" "mktemp" "nice" "nohup" "passwd" "printenv" "pwd" "renice" "seq" "shlock" "sleep" "tee" "test_cmd" "true" "tsort" "uname" "yes" "uuencode" "uudecode" ]
       # text_cmds
@@ -565,6 +570,7 @@ in
     securityArm64Build
     sqliteDylibArm64eBuild
     splitBaseSystemArm64VirtMinimalRelease
+    swVersArm64Build
     systemConfigurationArm64Build
     toyboxArm64Build
     xcselectArm64eBuild

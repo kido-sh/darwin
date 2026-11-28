@@ -26,6 +26,7 @@ let
     securityArm64Build
     sqliteDylibArm64eBuild
     splitBaseSystemArm64VirtMinimalRelease
+    swVersArm64Build
     systemConfigurationArm64Build
     toyboxArm64Build
     xcselectArm64eBuild
@@ -36,18 +37,31 @@ let
     inherit (toolchain) darwinCrossToolchain appleSdk;
     libSystem = libSystemArm64Build;
   };
-  notices = pkgs.callPackage ./notices.nix {
-    inherit kido revision nixpkgsRev;
+  # the commit time, RFC 3339 in UTC
+  created = with pkgs.lib; let d = lastModifiedDate; in
+    "${substring 0 4 d}-${substring 4 2 d}-${substring 6 2 d}T${substring 8 2 d}:${substring 10 2 d}:${substring 12 2 d}Z";
+  pinned = {
+    curl = curlArm64Build;
+    expat = expatArm64eBuild;
+    libiconv = iconvArm64eBuild;
+    libutil = libutilArm64eBuild;
+    nghttp2 = nghttp2Arm64eBuild;
+    sqlite = sqliteDylibArm64eBuild;
+  };
+  sbomSet = pkgs.callPackage ./sbom.nix {
+    inherit kido revision nixpkgsRev created pinned;
     agent = agent.agent;
     libressl = libresslArm64eBuild;
-    pinned = {
-      curl = curlArm64Build;
-      expat = expatArm64eBuild;
-      libiconv = iconvArm64eBuild;
-      libutil = libutilArm64eBuild;
-      nghttp2 = nghttp2Arm64eBuild;
-      sqlite = sqliteDylibArm64eBuild;
-    };
+    xcselect = xcselectArm64eBuild;
+    swVers = swVersArm64Build;
+    gnuEfiVersion = loaderPkgs.gnu-efi.version;
+    llvmVersion = pkgs.llvmPackages_21.llvm.version;
+  };
+  notices = pkgs.callPackage ./notices.nix {
+    inherit kido revision nixpkgsRev pinned;
+    agent = agent.agent;
+    libressl = libresslArm64eBuild;
+    inherit (sbomSet) versionsJson;
   };
   # every image has this root filesystem uuid: uuid5 of https://github.com/kido-sh/darwin#root
   rootUUID = "260a2575-f263-5945-9d65-ddf2d4e215b2";
@@ -106,7 +120,7 @@ EOF
       zshArm64Build iconvArm64eBuild toyboxArm64Build
       securityArm64Build systemConfigurationNoConfigdArm64 coreServicesArm64Build metalArm64Build
       libzDylibArm64Build libbz2DylibArm64eBuild liblzmaDylibArm64eBuild libutilArm64eBuild
-      xcselectArm64eBuild
+      xcselectArm64eBuild swVersArm64Build
       ncursesDylibArm64Build libeditArm64Build curlArm64Build
       nghttp2Arm64eBuild expatArm64eBuild sqliteDylibArm64eBuild
       certificatesBundleBuild containerLaunchdSettings klConfig
@@ -131,9 +145,6 @@ EOF
     espVolumeId = "ac6a907e";
     hashSeed = "27d20f07-54f7-5b53-a57d-35cb5beb21f3";
   };
-  # the commit time, RFC 3339 in UTC
-  created = with pkgs.lib; let d = lastModifiedDate; in
-    "${substring 0 4 d}-${substring 4 2 d}-${substring 6 2 d}T${substring 8 2 d}:${substring 10 2 d}:${substring 12 2 d}Z";
   image = pkgs.callPackage ./bake.nix {
     kc = kcArm64ReleaseBuild;
     inherit loader disk rootUUID created;
@@ -142,7 +153,8 @@ EOF
 
 in
 {
-  inherit loader rootfs disk image oci;
+  inherit loader rootfs disk image oci notices;
   inherit (agent) agent;
+  inherit (sbomSet) sbom versionsJson;
   kc = kcArm64ReleaseBuild;
 }

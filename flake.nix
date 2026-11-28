@@ -26,16 +26,19 @@
         virtiofs-fuzz = basePkgs.callPackage ./nix/checks/virtiofs-fuzz.nix { };
         virtiofs-unit = basePkgs.callPackage ./nix/checks/virtiofs-unit.nix { };
         virtiofs-analyze = darwin.virtiofsAnalyzeBuild;
+        sbom = image.sbom;
       };
 
       packages.${system} = {
         default = image.image;
-        inherit (image) image oci disk rootfs kc loader agent;
+        inherit (image) image oci disk rootfs kc loader agent sbom;
         kernel = darwin.kernelArm64VirtBuild;
         kexts = darwin.kextsArm64Build;
         metal = darwin.metalArm64Build;
         arm64e-tests = darwin.arm64eTestsBuild;
         curl = darwin.curlArm64Build;
+        libressl = darwin.libresslArm64eBuild;
+        sw_vers = darwin.swVersArm64Build;
         expat = darwin.expatArm64eBuild;
         libiconv = darwin.iconvArm64eBuild;
         libutil = darwin.libutilArm64eBuild;

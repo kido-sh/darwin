@@ -63,7 +63,7 @@ stdenv.mkDerivation rec {
     export DARWIN_SDK_ROOT="${appleSdk}/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
     export PATH="${darwinCrossToolchain}/bin:$PATH"
     export CC="${t}-clang -arch ${arch}" AR=${t}-ar RANLIB=${t}-ranlib STRIP=${t}-strip NM=${t}-nm
-    export CFLAGS="-O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0"
+    export CFLAGS="-O2 -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -ffile-prefix-map=$PWD=."
     export LDFLAGS="${linkFlags} -Wl,-dylinker_install_name,/usr/lib/dyld"
     export ac_cv_func_explicit_bzero=no ac_cv_func_freezero=no ac_cv_func_reallocarray=no \
       ac_cv_func_recallocarray=no ac_cv_func_timingsafe_memcmp=no
@@ -87,17 +87,17 @@ stdenv.mkDerivation rec {
 
     $CC -dynamiclib -o libcrypto.46.dylib -Wl,-force_load,crypto/.libs/libcrypto.a \
       -install_name /usr/lib/libcrypto.46.dylib -compatibility_version 47 -current_version 47.2 \
-      -Wl,-exported_symbols_list,${./libcrypto.exports} \
+      -Wl,-exported_symbols_list,${./libcrypto.exports} -Wl,-x \
       -Wl,-alias,_SHA256_Init,_SHA256_Init_legacy -Wl,-alias,_SHA256_Transform,_SHA256_Transform_legacy \
       ${linkFlags}
     $CC -dynamiclib -o libssl.48.dylib -Wl,-force_load,ssl/.libs/libssl.a libcrypto.46.dylib \
       -install_name /usr/lib/libssl.48.dylib -compatibility_version 49 -current_version 49.2 \
-      -Wl,-exported_symbols_list,${./libssl.exports} ${linkFlags}
+      -Wl,-exported_symbols_list,${./libssl.exports} -Wl,-x ${linkFlags}
     mkdir tls-objects
     (cd tls-objects && $AR x ../tls/.libs/libtls.a $($AR t ../tls/.libs/libtls.a | grep '^libtls_la-'))
     $CC -dynamiclib -o libtls.20.dylib tls-objects/*.o libssl.48.dylib libcrypto.46.dylib \
       -install_name /usr/lib/libtls.20.dylib -compatibility_version 21 -current_version 21.3 \
-      -Wl,-exported_symbols_list,${./libtls.exports} ${linkFlags}
+      -Wl,-exported_symbols_list,${./libtls.exports} -Wl,-x ${linkFlags}
 
     for l in libcrypto.46:${./libcrypto.exports} libssl.48:${./libssl.exports} libtls.20:${./libtls.exports}; do
       grep -v '^#' ''${l#*:} | sort > want
@@ -105,10 +105,15 @@ stdenv.mkDerivation rec {
       cmp -s want have || { echo "''${l%%:*} exports differ from macOS's:" >&2; diff want have >&2; exit 1; }
     done
 
+    # Automake emits $(LINK) with $(AM_LDFLAGS) for apps/openssl and apps/ocspcheck
+    # (ignoring per-target *_LDFLAGS), so pass dead-strip flags via AM_LDFLAGS.
     make -j$NIX_BUILD_CORES -C apps/openssl openssl \
+      AM_LDFLAGS="-Wl,-dead_strip -Wl,-dead_strip_dylibs" \
       openssl_LDADD="$PWD/libssl.48.dylib $PWD/libcrypto.46.dylib"
     make -j$NIX_BUILD_CORES -C apps/ocspcheck ocspcheck \
-      ocspcheck_LDADD="$PWD/libtls.20.dylib $PWD/libssl.48.dylib $PWD/libcrypto.46.dylib"
+      AM_LDFLAGS="-Wl,-dead_strip -Wl,-dead_strip_dylibs" \
+      ocspcheck_LDADD="$PWD/libtls.20.dylib $PWD/libcrypto.46.dylib"
+    $STRIP -x apps/openssl/openssl apps/ocspcheck/ocspcheck
     runHook postBuild
   '';
 
@@ -123,6 +128,20 @@ stdenv.mkDerivation rec {
     cp openssl.cnf x509v3.cnf $out/etc/ssl/
     cp include/openssl/*.h $dev/include/openssl/
     cp include/tls.h $dev/include/
+
+    # Verify CLI dynamic linkage closures: zero static duplication and zero unused dylibs.
+    openssl_deps=$(${t}-otool -L "$out/usr/bin/openssl" | tail -n +2 | awk '{ print $1 }' | LC_ALL=C sort | tr '\n' ' ')
+    if [ "$openssl_deps" != "/usr/lib/libSystem.B.dylib /usr/lib/libcrypto.46.dylib /usr/lib/libssl.48.dylib " ]; then
+      echo "ERROR: unexpected openssl dependencies: $openssl_deps" >&2
+      ${t}-otool -L "$out/usr/bin/openssl" >&2
+      exit 1
+    fi
+    ocsp_deps=$(${t}-otool -L "$out/usr/bin/ocspcheck" | tail -n +2 | awk '{ print $1 }' | LC_ALL=C sort | tr '\n' ' ')
+    if [ "$ocsp_deps" != "/usr/lib/libSystem.B.dylib /usr/lib/libcrypto.46.dylib /usr/lib/libtls.20.dylib " ]; then
+      echo "ERROR: unexpected ocspcheck dependencies: $ocsp_deps" >&2
+      ${t}-otool -L "$out/usr/bin/ocspcheck" >&2
+      exit 1
+    fi
     runHook postInstall
   '';
 

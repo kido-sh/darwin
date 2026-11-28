@@ -1,6 +1,6 @@
 {
   "version": "115.120.2",
   "hash": "sha256-WzJ8/PShvhWHab1OoYvQetPI+S0FltvSJVOjEwkelQ8=",
-  "license": "BSD-2-Clause AND BSD-3-Clause AND BSD-2-Clause-FreeBSD AND APSL-2.0",
+  "license": "BSD-2-Clause AND BSD-3-Clause AND BSD-4-Clause AND BSD-2-Clause-FreeBSD AND APSL-2.0 AND Unicode-3.0",
   "licenseFile": "libiconv.txt"
 }

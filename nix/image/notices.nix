@@ -20,6 +20,7 @@
 , kido
 , nixpkgsRev
 , revision
+, versionsJson
 }:
 
 let
@@ -109,6 +110,7 @@ runCommand "kido-notices" { nativeBuildInputs = [ unzip ]; } ''
   https://github.com/kido-sh/kido at revision ${kido.rev or "unknown"}.
   EOF
   install -Dm644 ${notice} $out/usr/share/doc/kido/NOTICE
+  install -Dm644 ${versionsJson} $out/usr/share/doc/kido/versions.json
   install -Dm644 -t $d/SPDX ${spdxTexts}/*.txt
 
   ${lib.concatStrings (lib.mapAttrsToList copyTree fromTree)}
