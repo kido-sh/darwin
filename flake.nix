@@ -13,6 +13,7 @@
       basePkgs = import nixpkgs { inherit system; };
       toolchain = import ./nix/toolchain { inherit basePkgs; };
       darwin = import ./nix/darwin { inherit toolchain; };
+      kl = import ./nix/kl { inherit toolchain darwin; };
       image = import ./nix/image {
         inherit toolchain darwin kido;
         revision = self.rev or self.dirtyRev or "unknown";
@@ -41,6 +42,16 @@
         xcselect = darwin.xcselectArm64eBuild;
         nghttp2 = darwin.nghttp2Arm64eBuild;
         sqlite = darwin.sqliteDylibArm64eBuild;
+        kl-libffi = kl.arm64.libffi;
+        kl-libxml2 = kl.arm64.libxml2;
+        kl-python3 = kl.arm64.python3;
+        kl-standard = kl.arm64.standard;
+        kl-all = kl.arm64.all;
+        kl-arm64e-libffi = kl.arm64e.libffi;
+        kl-arm64e-libxml2 = kl.arm64e.libxml2;
+        kl-arm64e-python3 = kl.arm64e.python3;
+        kl-arm64e-standard = kl.arm64e.standard;
+        kl-arm64e-all = kl.arm64e.all;
       };
     };
 }

@@ -77,6 +77,18 @@ let
     mkdir -p $out/private/var/db
     touch $out/private/var/db/.launchd_no_per_user $out/private/var/db/.launchd_keep_tmp
   '';
+  # Default kl repository configuration. os_version and os_build are left unset so
+  # kl reads ProductVersion and ProductBuildVersion from SystemVersion.plist as a
+  # single source of truth, and arch is detected from hw.optional.arm.FEAT_PAuth.
+  klConfig = pkgs.runCommand "kido-kl-config-0.1" { } ''
+    mkdir -p $out/etc
+    cat > $out/etc/kl.conf <<'EOF'
+repo = https://kl.kido.sh
+kl_version = v1
+channel = latest
+EOF
+    chmod 644 $out/etc/kl.conf
+  '';
   # no console login: a container is driven through its own agent, and without a console UART
   # (Virtualization.framework) the login's zsh spins in the console path and blocks shutdown
   containerBaseSystemArm64 = pkgs.runCommand "kido-basesystem-arm64-virt-container-0.1" { } ''
@@ -97,7 +109,7 @@ let
       xcselectArm64eBuild
       ncursesDylibArm64Build libeditArm64Build curlArm64Build
       nghttp2Arm64eBuild expatArm64eBuild sqliteDylibArm64eBuild
-      certificatesBundleBuild containerLaunchdSettings
+      certificatesBundleBuild containerLaunchdSettings klConfig
       agent.root
       libresslArm64eBuild
     ];

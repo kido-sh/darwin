@@ -40,6 +40,7 @@ the release a directory came from and the other licenses its files carry.
 | `LICENSING.md`, `NOTICE`, `README.md`, `docs/**`, `scripts/**`, `test/**`, `flake.nix`, `flake.lock`, `.gitignore`, `.github/**` | `Apache-2.0` | kido |
 | `LICENSES/**` | | The license texts themselves |
 | `nix/**` | `BSD-2-Clause` | PureDarwin's Nix code as reorganized by kido. kido's new files carry an `Apache-2.0` SPDX line |
+| `nix/kl/**` | `Apache-2.0` | kido's kl system library recipes, base-image allowlist, and four-gate verifier |
 | `nix/darwin/third-party/{curl,expat,libbz2-dylib,libedit,libiconv,liblzma-dylib,libutil,ncurses-dylib,nghttp2,sqlite}/**` | `Apache-2.0` | kido's recipes for macOS's libbz2, libcurl, libedit, libexpat, libiconv, liblzma, libapple_nghttp2, libsqlite3, libutil and ncurses, their source pins, their export lists, taken from the macOS SDK's .tbd files, the ncurses ABI glue and the libraries' tests |
 | `nix/darwin/third-party/curl/*.patch` | `curl` | kido's change to curl 8.23.0's lib/vtls/openssl.c, under curl's license |
 | `nix/darwin/third-party/sqlite/*.patch` | `blessing` | kido's changes to SQLite 3.54.1's src/main.c and ext/fts3/fts3_tokenizer.c, under SQLite's blessing |
@@ -118,7 +119,7 @@ Source means this repository; binaries means a built image or any file from one.
 | `GPL-2.0-or-later WITH Bison-exception-2.2` | Keep the notices | None: the exception lets the Bison-generated parsers ship under their surrounding license |
 | `GPL-2.0 WITH Linux-syscall-note` | Keep the notices | None: fuse.h is used under its BSD-2-Clause option |
 | `BSD-4-Clause`, `BSD-4-Clause-UC`, `OpenSSL`, `SSLeay-standalone` | Keep the notices | Reproduce the notices, and print the acknowledgements in NOTICE wherever the software is advertised. The University of California withdrew its advertising clause in 1999 |
-| `BSD-2-Clause`, `BSD-2-Clause-FreeBSD`, `BSD-2-Clause-Patent`, `BSD-3-Clause`, `0BSD`, `MIT`, `ISC`, `HPND`, `CMU-Mach`, `dtoa`, `NCSA`, `Zlib`, `Brian-Gladman-3-Clause`, `Unicode-3.0`, `X11-distribute-modifications-variant`, `curl`, `LicenseRef-zsh`, `LicenseRef-ICU`, `LicenseRef-gnu-efi-efilib` | Keep the notices | Reproduce the copyright notices and license texts in the documentation (LICENSES/ and NOTICE) |
+| `BSD-2-Clause`, `BSD-2-Clause-FreeBSD`, `BSD-2-Clause-Patent`, `BSD-3-Clause`, `0BSD`, `MIT`, `ISC`, `HPND`, `CMU-Mach`, `dtoa`, `NCSA`, `Zlib`, `PSF-2.0`, `Brian-Gladman-3-Clause`, `Unicode-3.0`, `X11-distribute-modifications-variant`, `curl`, `LicenseRef-zsh`, `LicenseRef-ICU`, `LicenseRef-gnu-efi-efilib` | Keep the notices | Reproduce the copyright notices and license texts in the documentation (LICENSES/ and NOTICE) |
 | `LGPL-3.0-or-later`, `GPL-3.0-or-later` | Nothing: no source here is under them | gnu-efi's inc/subst/elf.h, LGPL-2.1-or-later, reaches the EFI loader under section 3 of LGPL 3.0: ship both texts with it |
 | `blessing`, `LicenseRef-Public-Domain` | Nothing | Nothing |
 
@@ -170,6 +171,19 @@ sources the recipes in nix/darwin/third-party pin by hash, and kido for its agen
 xnu-loader (`BSD-3-Clause`) is the boot loader beside the disk and, as BOOTAA64.EFI, on the ESP.
 The image carries NOTICE and these texts in /usr/share/doc/kido (licenses/SPDX), beside each
 component's own license file.
+
+## Optional kl system packages
+
+Built on demand from upstream sources pinned in nixpkgs (`nix/kl/`), never bundled in the base
+image. Every kl package ships its own upstream license file under `/usr/share/doc/kl/<name>/LICENSE`
+and is enforced against a strictly permissive SPDX allowlist at build time.
+
+| Package | Version | License | Where |
+|---|---|---|---|
+| libffi | 3.5.2 | `MIT` | /usr/lib/libffi.dylib |
+| libxml2 | 2.15.3 | `MIT` | /usr/lib/libxml2.2.dylib, /usr/lib/libxml2.dylib |
+| python3 | 3.13.14 | `PSF-2.0` (bundled modules: `MIT` expat, `BSD-2-Clause` mpdecimal, `Apache-2.0` HACL*) | /usr/bin/python3, /usr/bin/python3.13, /usr/lib/python3.13 |
+| standard | 1.0.0 | `Apache-2.0` | /usr/share/kl/packages/standard.json (meta-package depending on libffi, libxml2, python3) |
 
 ## Removed, not relicensed
 
