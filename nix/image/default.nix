@@ -37,6 +37,11 @@ let
     inherit (toolchain) darwinCrossToolchain appleSdk;
     libSystem = libSystemArm64Build;
   };
+  klBin = pkgs.callPackage ./kl.nix {
+    inherit kido;
+    inherit (toolchain) darwinCrossToolchain appleSdk;
+    libSystem = libSystemArm64Build;
+  };
   # the commit time, RFC 3339 in UTC
   created = with pkgs.lib; let d = lastModifiedDate; in
     "${substring 0 4 d}-${substring 4 2 d}-${substring 6 2 d}T${substring 8 2 d}:${substring 10 2 d}:${substring 12 2 d}Z";
@@ -51,6 +56,7 @@ let
   sbomSet = pkgs.callPackage ./sbom.nix {
     inherit kido revision nixpkgsRev created pinned;
     agent = agent.agent;
+    kl = klBin.kl;
     libressl = libresslArm64eBuild;
     xcselect = xcselectArm64eBuild;
     swVers = swVersArm64Build;
@@ -60,6 +66,7 @@ let
   notices = pkgs.callPackage ./notices.nix {
     inherit kido revision nixpkgsRev pinned;
     agent = agent.agent;
+    kl = klBin.kl;
     libressl = libresslArm64eBuild;
     inherit (sbomSet) versionsJson;
   };
@@ -124,7 +131,7 @@ EOF
       ncursesDylibArm64Build libeditArm64Build curlArm64Build
       nghttp2Arm64eBuild expatArm64eBuild sqliteDylibArm64eBuild
       certificatesBundleBuild containerLaunchdSettings klConfig
-      agent.root
+      agent.root klBin.root
       libresslArm64eBuild
     ];
     inherit notices;
@@ -155,6 +162,7 @@ in
 {
   inherit loader rootfs disk image oci notices;
   inherit (agent) agent;
+  inherit (klBin) kl;
   inherit (sbomSet) sbom versionsJson;
   kc = kcArm64ReleaseBuild;
 }

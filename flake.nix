@@ -31,7 +31,7 @@
 
       packages.${system} = {
         default = image.image;
-        inherit (image) image oci disk rootfs kc loader agent sbom;
+        inherit (image) image oci disk rootfs kc loader agent kl sbom;
         kernel = darwin.kernelArm64VirtBuild;
         kexts = darwin.kextsArm64Build;
         metal = darwin.metalArm64Build;

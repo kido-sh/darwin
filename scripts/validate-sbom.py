@@ -422,7 +422,7 @@ def main() -> int:
         f"({len(versions_data['components'])} components), "
         f"sbom.spdx.json={sbom_path.stat().st_size}B "
         f"({len(sbom_data['packages'])} total packages: 1 image + {top_count} base components + "
-        f"{cargo_count} kido-agent Cargo crates, "
+        f"{cargo_count} Rust Cargo crates, "
         f"{len(sbom_data.get('hasExtractedLicensingInfos', []))} extracted LicenseRefs, "
         f"{len(sbom_data['relationships'])} relationships)"
     )

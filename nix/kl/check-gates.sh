@@ -61,7 +61,7 @@ case "$ARCH" in
 esac
 
 # Validate package name strictly against kl's check_name grammar (no traversal).
-if ! printf '%s' "$PKG_NAME" | LC_ALL=C grep -Eq '^[A-Za-z0-9_+][A-Za-z0-9._+-]{0,63}$'; then
+if ! printf '%s' "$PKG_NAME" | LC_ALL=C grep -Eq '^[A-Za-z0-9_+]([A-Za-z0-9._+@-]{0,62}[A-Za-z0-9._+-])?$'; then
   echo "check-gates: invalid --pkg-name '$PKG_NAME'" >&2
   exit 2
 fi

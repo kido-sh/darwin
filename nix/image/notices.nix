@@ -3,6 +3,7 @@
 { runCommand
 , lib
 , unzip
+, python3
 , rustPlatform
 , zsh
 , ncurses
@@ -17,6 +18,7 @@
 , libressl
 , pinned
 , agent
+, kl
 , kido
 , nixpkgsRev
 , revision
@@ -100,13 +102,13 @@ let
   notice = builtins.path { path = tree + "/NOTICE"; name = "notice"; };
   spdxTexts = builtins.path { path = tree + "/LICENSES"; name = "licenses"; };
 in
-runCommand "kido-notices" { nativeBuildInputs = [ unzip ]; } ''
+runCommand "kido-notices" { nativeBuildInputs = [ unzip python3 ]; } ''
   d=$out/usr/share/doc/kido/licenses
   mkdir -p $d
 
   cat > $out/usr/share/doc/kido/SOURCE <<'EOF'
   KidoDarwin is built from https://github.com/kido-sh/darwin at revision ${revision}.
-  Its third-party packages come from nixpkgs ${nixpkgsRev}, and kido-agent from
+  Its third-party packages come from nixpkgs ${nixpkgsRev}, and kido-agent and kl from
   https://github.com/kido-sh/kido at revision ${kido.rev or "unknown"}.
   EOF
   install -Dm644 ${notice} $out/usr/share/doc/kido/NOTICE
@@ -161,5 +163,47 @@ runCommand "kido-notices" { nativeBuildInputs = [ unzip ]; } ''
     echo "ERROR: no vendored Cargo crates found under ${agent.cargoDeps}" >&2
     exit 1
   fi
+
+  # kl: kido's own license and every external Cargo crate resolved for /usr/bin/kl
+  install -Dm644 ${kido}/LICENSE "$d/kl/LICENSE"
+  python3 - "${kl}/share/kl-crates.json" "${kl.cargoDeps}" "${spdxTexts}" "$d/kl/crates" <<'PY'
+  import json, shutil, sys, tomllib
+  from pathlib import Path
+
+  crates = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+  vendor = Path(sys.argv[2])
+  spdx_dir = Path(sys.argv[3])
+  out_dir = Path(sys.argv[4])
+
+  if not crates:
+      raise SystemExit("ERROR: kl-crates.json contains no external crates")
+
+  vendor_map = {}
+  for grp in sorted(p for p in vendor.iterdir() if p.is_dir() and p.name.startswith("source-")):
+      for cdir in sorted(p for p in grp.iterdir() if p.is_dir()):
+          vendor_map[cdir.name] = cdir
+
+  prefixes = ("LICENSE", "COPYING", "COPYRIGHT", "UNLICENSE")
+  for entry in crates:
+      cname = entry["dir"]
+      cdir = vendor_map.get(cname)
+      if cdir is None:
+          raise SystemExit(f"ERROR: vendored crate {cname} not found under {vendor}")
+      dst = out_dir / cname
+      dst.mkdir(parents=True, exist_ok=True)
+      found = 0
+      for f in sorted(cdir.iterdir()):
+          if f.is_file() and f.name.startswith(prefixes):
+              shutil.copyfile(f, dst / f.name)
+              found += 1
+      if found == 0:
+          meta = tomllib.loads((cdir / "Cargo.toml").read_text(encoding="utf-8")).get("package", {})
+          lic = (meta.get("license") or "").strip()
+          spdx_txt = spdx_dir / f"{lic}.txt"
+          if lic and spdx_txt.is_file():
+              shutil.copyfile(spdx_txt, dst / "LICENSE")
+          else:
+              raise SystemExit(f"ERROR: no license file or SPDX text for kl crate {cname} (license={lic!r})")
+  PY
   find $out -type f -exec chmod 644 {} +
 ''

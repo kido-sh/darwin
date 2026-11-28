@@ -137,7 +137,7 @@ PY
 )
 
 # Enforce timestamp version monotonicity and preserve unchanged architectures
-# when updating a single arch in a repo hydrated from R2 without CURRENT files.
+# when updating a single arch in a repo hydrated from a remote store without CURRENT files.
 python3 - "$REPO" "$TARGET_META_PREFIX" "$ARCH" "$VERSION" <<'PY'
 import hashlib, json, os, re, sys
 
@@ -222,7 +222,7 @@ if not selected:
 
 for pkg in selected:
     rel_dir = pkg["dir"]
-    if not re.fullmatch(r"packages/[A-Za-z0-9_+][A-Za-z0-9._+-]{0,63}", rel_dir):
+    if not re.fullmatch(r"packages/[A-Za-z0-9_+]([A-Za-z0-9._+@-]{0,62}[A-Za-z0-9._+-])?", rel_dir):
         sys.exit(f"kl-build-repo: unsafe package dir in manifest: {rel_dir!r}")
     pkg_dir = os.path.realpath(os.path.join(catalog_real, rel_dir))
     if not os.path.isdir(pkg_dir):

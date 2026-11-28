@@ -28,6 +28,7 @@
 , swVers
 , pinned
 , agent
+, kl
 , kido
 , nixpkgsRev
 , revision
@@ -657,13 +658,22 @@ let
       where = "/usr/libexec/kido-agent";
     }
     {
+      name = "kl";
+      version = kl.version;
+      spdx = "Apache-2.0";
+      purpose = "APPLICATION";
+      downloadLocation = "https://github.com/kido-sh/kido";
+      supplier = "Organization: The kido authors";
+      where = "/usr/bin/kl";
+    }
+    {
       name = "rust-std";
       version = rustc.version;
       spdx = "MIT AND Apache-2.0 AND (Apache-2.0 WITH LLVM-exception)";
       purpose = "LIBRARY";
       downloadLocation = "https://github.com/rust-lang/rust/releases/tag/${rustc.version}";
       supplier = "Organization: The Rust Project Developers";
-      where = "Statically linked into /usr/libexec/kido-agent";
+      where = "Statically linked into /usr/libexec/kido-agent, /usr/bin/kl";
     }
   ];
 
@@ -709,7 +719,7 @@ PY
     manifestJson = manifestData;
   } ''
     mkdir -p "$out"
-    python3 - "$manifestJsonPath" "${agent.cargoDeps}" "${spdxTexts}" "$out/sbom.spdx.json" <<'PY'
+    python3 - "$manifestJsonPath" "${agent.cargoDeps}" "${kl.cargoDeps}" "${kl}/share/kl-crates.json" "${spdxTexts}" "$out/sbom.spdx.json" <<'PY'
 import hashlib
 import json
 import re
@@ -719,9 +729,11 @@ import urllib.parse
 from pathlib import Path
 
 manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-cargo_vendor = Path(sys.argv[2])
-licenses_dir = Path(sys.argv[3])
-out_path = Path(sys.argv[4])
+agent_vendor = Path(sys.argv[2])
+kl_vendor = Path(sys.argv[3])
+kl_crates_path = Path(sys.argv[4])
+licenses_dir = Path(sys.argv[5])
+out_path = Path(sys.argv[6])
 
 img = manifest["image"]
 comps = manifest["components"]
@@ -797,28 +809,46 @@ for c in comps:
         }
     )
 
-# Collect vendored Cargo crates from all source-* subdirectories under cargoDeps.
-crate_dirs = []
-for src_group in sorted(p for p in cargo_vendor.iterdir() if p.is_dir() and p.name.startswith("source-")):
-    for cdir in sorted(p for p in src_group.iterdir() if p.is_dir()):
-        if (cdir / "Cargo.toml").is_file():
-            crate_dirs.append(cdir)
-if not crate_dirs:
-    raise SystemExit(f"ERROR: no vendored Cargo crates found under {cargo_vendor}")
+# Collect vendored Cargo crates for kido-agent and kl, deduplicating shared crates by (name, version).
+def index_vendor_dir(vdir: Path) -> dict[str, Path]:
+    found: dict[str, Path] = {}
+    for src_group in sorted(p for p in vdir.iterdir() if p.is_dir() and p.name.startswith("source-")):
+        for cdir in sorted(p for p in src_group.iterdir() if p.is_dir()):
+            if (cdir / "Cargo.toml").is_file():
+                found[cdir.name] = cdir
+    return found
 
+
+agent_vendor_map = index_vendor_dir(agent_vendor)
+if not agent_vendor_map:
+    raise SystemExit(f"ERROR: no vendored Cargo crates found under {agent_vendor}")
+
+kl_vendor_map = index_vendor_dir(kl_vendor)
+kl_crates_list = json.loads(kl_crates_path.read_text(encoding="utf-8"))
+if not kl_crates_list:
+    raise SystemExit(f"ERROR: no crates listed in {kl_crates_path}")
+
+cargo_key_to_sid: dict[tuple[str, str], str] = {}
 seen_cargo_ids: set[str] = set()
-non_darwin_targets = ("wasi", "windows-", "windows_", "winapi", "redox_")
+seen_rel_tuples: set[tuple[str, str, str]] = set()
+non_darwin_targets = ("wasi", "windows-", "windows_", "winapi", "redox_", "r-efi")
 
-for cdir in crate_dirs:
+
+def ensure_cargo_pkg(cdir: Path) -> tuple[str, str, bool]:
     parsed = tomllib.loads((cdir / "Cargo.toml").read_text(encoding="utf-8"))
     meta = parsed.get("package", {})
     cname = meta["name"]
     cver = meta["version"]
+    is_proc_macro = bool(parsed.get("lib", {}).get("proc-macro", False))
+    key = (cname, cver)
+    if key in cargo_key_to_sid:
+        return cargo_key_to_sid[key], cname, is_proc_macro
+
     raw_lic = meta.get("license")
     if not raw_lic:
         raise SystemExit(f"ERROR: Cargo crate {cname}-{cver} has no SPDX license field")
     clic = normalize_cargo_license(raw_lic)
-    referenced_license_refs |= extract_license_refs(clic)
+    referenced_license_refs.update(extract_license_refs(clic))
 
     base_sid = f"SPDXRef-cargo-{sanitize_spdx_id(cname)}-{sanitize_spdx_id(cver)}"
     sid = base_sid
@@ -826,12 +856,10 @@ for cdir in crate_dirs:
         short = hashlib.sha256(f"{cname}@{cver}".encode()).hexdigest()[:8]
         sid = f"{base_sid}-{short}"
     seen_cargo_ids.add(sid)
+    cargo_key_to_sid[key] = sid
 
     purl_name = urllib.parse.quote(cname, safe="")
     purl_ver = urllib.parse.quote(cver, safe="")
-    is_proc_macro = bool(parsed.get("lib", {}).get("proc-macro", False))
-    is_non_darwin = cname == "wasi" or cname.startswith(non_darwin_targets)
-
     packages.append(
         {
             "SPDXID": sid,
@@ -853,31 +881,38 @@ for cdir in crate_dirs:
             ],
         }
     )
+    return sid, cname, is_proc_macro
 
+
+def add_cargo_rel(parent_sid: str, sid: str, cname: str, is_proc_macro: bool) -> None:
+    is_non_darwin = cname == "wasi" or cname.startswith(non_darwin_targets)
     if is_proc_macro:
-        relationships.append(
-            {
-                "spdxElementId": sid,
-                "relationshipType": "BUILD_DEPENDENCY_OF",
-                "relatedSpdxElement": "SPDXRef-pkg-kido-agent",
-            }
-        )
+        rel = (sid, "BUILD_DEPENDENCY_OF", parent_sid)
     elif is_non_darwin:
-        relationships.append(
-            {
-                "spdxElementId": sid,
-                "relationshipType": "OPTIONAL_DEPENDENCY_OF",
-                "relatedSpdxElement": "SPDXRef-pkg-kido-agent",
-            }
-        )
+        rel = (sid, "OPTIONAL_DEPENDENCY_OF", parent_sid)
     else:
+        rel = (parent_sid, "CONTAINS", sid)
+    if rel not in seen_rel_tuples:
+        seen_rel_tuples.add(rel)
         relationships.append(
             {
-                "spdxElementId": "SPDXRef-pkg-kido-agent",
-                "relationshipType": "CONTAINS",
-                "relatedSpdxElement": sid,
+                "spdxElementId": rel[0],
+                "relationshipType": rel[1],
+                "relatedSpdxElement": rel[2],
             }
         )
+
+
+for cdir in [agent_vendor_map[k] for k in sorted(agent_vendor_map)]:
+    sid, cname, is_proc_macro = ensure_cargo_pkg(cdir)
+    add_cargo_rel("SPDXRef-pkg-kido-agent", sid, cname, is_proc_macro)
+
+for entry in kl_crates_list:
+    cdir = kl_vendor_map.get(entry["dir"])
+    if cdir is None:
+        raise SystemExit(f"ERROR: kl crate {entry['dir']} missing from {kl_vendor}")
+    sid, cname, is_proc_macro = ensure_cargo_pkg(cdir)
+    add_cargo_rel("SPDXRef-pkg-kl", sid, cname, bool(entry.get("is_proc_macro", is_proc_macro)))
 
 extracted_infos = []
 for ref in sorted(referenced_license_refs):
