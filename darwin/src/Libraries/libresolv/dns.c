@@ -44,6 +44,10 @@
 #include "dns_private.h"
 #include "res_private.h"
 
+#ifdef __APPLE__
+#include <arpa/inet.h>
+#endif
+
 #define INET_NTOP_AF_INET_OFFSET 4
 #define INET_NTOP_AF_INET6_OFFSET 8
 
@@ -73,7 +77,7 @@ static pthread_mutex_t dns_control_lock = PTHREAD_MUTEX_INITIALIZER;
 extern uint32_t notify_monitor_file(int token, const char *name, int flags);
 
 extern void res_client_close(res_state res);
-extern res_state res_state_new();
+extern res_state res_state_new(void);
 extern int res_nquery_soa_min(res_state statp, const char *name, int class, int type, u_char *answer, int anslen, struct sockaddr *from, int *fromlen, int *min);
 extern int res_nsearch_2(res_state statp, const char *name, int class, int type, u_char *answer, int anslen, struct sockaddr *from, uint32_t *fromlen);
 extern int __res_nsearch_list_2(res_state statp, const char *name,	int class, int type,  u_char *answer, int anslen, struct sockaddr *from, uint32_t *fromlen, int nsearch, char **search);
@@ -86,7 +90,7 @@ extern int res_build_sortlist(res_state res, struct in_addr addr, struct in_addr
 static void
 _pdns_set_name(pdns_handle_t *pdns, const char *name)
 {
-	int n;
+	size_t n;
 
 	if (pdns == NULL) return;
 	if (name == NULL) return;
@@ -661,7 +665,7 @@ _pdns_file_open(const char *name)
 		else 
 		{
 			y = res_next_word(&p);
-			_pdns_build(pdns, x, y);
+			if (y != NULL) _pdns_build(pdns, x, y);
 
 			if ((!strcmp(x, "domain")) && (pdns->name == NULL)) _pdns_set_name(pdns, y);
 		}
@@ -728,6 +732,23 @@ _pdns_check_search_list(pdns_handle_t *pdns)
 	}
 }
 
+/* Returns -1 if it's not configured, 0 for no change, 1 for change. */
+__attribute__((__visibility__("hidden"))) int
+_dns_check_sys_config_notify(int sys_config_token)
+{
+	int n, status;
+
+	if (sys_config_token == -1)
+		return (-1);
+
+	n = 1;
+	status = notify_check(sys_config_token, &n);
+	if (status != NOTIFY_STATUS_OK)
+		return (-1);
+
+	return ((n == 1) ? 1 : 0);
+}
+
 __attribute__((__visibility__("hidden"))) void
 _check_cache(sdns_handle_t *sdns)
 {
@@ -745,13 +766,8 @@ _check_cache(sdns_handle_t *sdns)
 
 	if (refresh == 0)
 	{
-		if (sdns->notify_sys_config_token == -1) refresh = 1;
-		else
-		{
-			n = 1;
-			status = notify_check(sdns->notify_sys_config_token, &n);
-			if ((status != NOTIFY_STATUS_OK) || (n == 1)) refresh = 1;
-		}
+		if (_dns_check_sys_config_notify(sdns->notify_sys_config_token) != 0)
+			refresh = 1;
 	}
 
 	if (refresh == 0)
@@ -940,7 +956,8 @@ static uint32_t
 _pdns_get_handles_for_name(sdns_handle_t *sdns, const char *name, pdns_handle_t ***pdns)
 {
 	char *p, *vname;
-	int i, j, k, count;
+	int j, k, count;
+	size_t i;
 
 	if (sdns == NULL) return 0;
 	if (pdns == NULL) return 0;
@@ -1018,6 +1035,29 @@ _pdns_search_list_domain(pdns_handle_t *pdns, uint32_t i)
 	return strdup(s);
 }
 
+__attribute__((__visibility__("hidden"))) void
+_dns_open_sys_config_notify(int *sys_config_token)
+{
+	int status, token = *sys_config_token;
+
+	if (token != -1)
+		return;
+
+	status = notify_register_check(dns_configuration_notify_key(), &token);
+	if (status != NOTIFY_STATUS_OK)
+		token = -1;
+
+	*sys_config_token = token;
+}
+
+__attribute__((__visibility__("hidden"))) void
+_dns_close_sys_config_notify(int *sys_config_token)
+{
+
+	if (*sys_config_token != -1) notify_cancel(*sys_config_token);
+	*sys_config_token = -1;
+}
+
 static void
 _dns_open_notify(sdns_handle_t *sdns)
 {
@@ -1032,11 +1072,7 @@ _dns_open_notify(sdns_handle_t *sdns)
 		else status = notify_check(sdns->notify_delay_token, &n);
 	}
 
-	if (sdns->notify_sys_config_token == -1)
-	{
-		status = notify_register_check(dns_configuration_notify_key(), &(sdns->notify_sys_config_token));
-		if (status != NOTIFY_STATUS_OK) sdns->notify_sys_config_token = -1;
-	}
+	_dns_open_sys_config_notify(&sdns->notify_sys_config_token);
 
 	if (sdns->notify_dir_token == -1)
 	{
@@ -1065,8 +1101,7 @@ _dns_close_notify(sdns_handle_t *sdns)
 	if (sdns->notify_delay_token != -1) notify_cancel(sdns->notify_delay_token);
 	sdns->notify_delay_token = -1;
 
-	if (sdns->notify_sys_config_token != -1) notify_cancel(sdns->notify_sys_config_token);
-	sdns->notify_sys_config_token = -1;
+	_dns_close_sys_config_notify(&sdns->notify_sys_config_token);
 
 	if (sdns->notify_dir_token != -1) notify_cancel(sdns->notify_dir_token);
 	sdns->notify_dir_token = -1;
@@ -1170,7 +1205,14 @@ dns_open(const char *name)
 		return NULL;
 	}
 
-	dns_set_debug((dns_handle_t)dns, dns_control_debug);
+	/* For the plain resolver, if the original config (e.g. a file on disk)
+	 * had debug enabled, keep it enabled even if our control configuration has
+	 * it off.
+	 * That way one can easily add a line in e.g. /etc/resolv.conf to turn it on.
+	 */
+	int config_had_debug = ((dns->pdns->res->options & RES_DEBUG) != 0);
+	dns_set_debug((dns_handle_t)dns, config_had_debug || dns_control_debug);
+
 	return (dns_handle_t)dns;
 }
 
@@ -1365,7 +1407,7 @@ _pdns_delay(sdns_handle_t *sdns)
 		 * Subsequent threads sleep for the remaining duration.
 		 * We add one to round up the interval since our granularity is coarse.
 		 */
-		snooze = 1 + (sdns->dns_delay - tick);
+		snooze = 1 + (int)(sdns->dns_delay - tick);
 		if (snooze < 0) snooze = 0;
 	}
 
@@ -1443,7 +1485,7 @@ _pdns_search(sdns_handle_t *sdns, pdns_handle_t *pdns, const char *name, uint32_
 		if (pdns->search_count > 0) append = 0;
 	}
 
-	if ((append == 1) && (pdns->res->defdname != NULL) && (pdns->res->defdname[0] != '\0')) append = 0;
+	if ((append == 1) && (pdns->res->defdname[0] != '\0')) append = 0;
 
 	status = -1;
 	if (append == 0)

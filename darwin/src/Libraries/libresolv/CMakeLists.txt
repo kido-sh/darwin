@@ -2,25 +2,33 @@ add_darwin_static_library(libresolv_static)
 target_sources(libresolv_static PRIVATE
     base64.c
     dns.c
+    dns_async.c
     dns_util.c
+    dst_api.c
+    hmac_link.c
+    mtctxres.c
     ns_date.c
     ns_name.c
     ns_netint.c
     ns_parse.c
     ns_print.c
     ns_samedomain.c
+    ns_sign.c
     ns_ttl.c
+    ns_verify.c
     res_comp.c
     res_data.c
     res_debug.c
+    res_findzonecut.c
     res_init.c
     res_mkquery.c
+    res_mkupdate.c
     res_query.c
     res_send.c
-    # dst_s_dns_key_id() etc, called by ns_print.c for DNSSEC KEY records.
-    # Was a hand-written approximation in pd_net_compat.c; this is BIND's real
-    # footprint calculation (RSA special case + checksum fallback).
-    dst_support.c
+    res_sendsigned.c
+    res_state.c
+    res_update.c
+    support.c
     pd_res_compat.c
     pd_res_state.c
 )
@@ -35,18 +43,19 @@ target_compile_definitions(libresolv_static PRIVATE
 # headers pulled in transitively (os/lock_private.h etc.) reference
 # __API_AVAILABLE(...bridgeos(x)...), which neither the SDK nor PD define.
 target_compile_options(libresolv_static PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-fno-common>
     $<$<COMPILE_LANGUAGE:C>:-include${CMAKE_CURRENT_SOURCE_DIR}/../libSystem/libplatform/pd_bridgeos_compat.h>)
 
-# netdb.h/math.h/arpa/nameser.h (copied in from the real Apple SDK - not
-# vendored libresolv sources, just standard headers libresolv's .c files
-# expect to find at those standard paths) live in libc's private include/
-# tree, which headers.sh does NOT install into libc_public_headers' generated
-# tree (that tree is libc-internal-only, e.g. os/assumes.h). Reach it
-# directly rather than duplicating the headers here too.
+# netdb.h/math.h/arpa/nameser_compat.h live in libc's private include/ tree,
+# which headers.sh does NOT install into libc_public_headers' generated tree.
+# Reach it directly rather than duplicating the headers here too.
 target_include_directories(libresolv_static PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../mDNSResponder/mDNSShared  # real dns_sd.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/include          # ifaddrs.h, notify.h stub
+    ${CMAKE_CURRENT_SOURCE_DIR}/../XPC/notify                # real notify.h, notify_private.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../XPC/libinfo               # si_module.h, netdb_async.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/../CommonCrypto/include      # CommonCrypto/CommonDigest.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include                      # ifaddrs.h, dnsinfo.h, md5.h, mach-o/dyld_priv.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../libSystem/libc/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../libSystem/libc/darwin      # libc_private.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../libSystem/libc/locale       # xlocale_private.h

@@ -206,7 +206,7 @@ one.
 | objc4 | objc4-818.2 | 110 of 147 (74.8%) | objc4-951.7 |
 | Security | Security-59754.120.12 | 615 of 709 (86.7%) | |
 | CommonCrypto | CommonCrypto-60178.120.3 | 127 of 151 (84.1%) | CommonCrypto-600035 |
-| libresolv | libresolv-68.120.2 | 31 of 39 (79.5%) | libresolv-96, libresolv-79 |
+| libresolv | libresolv-96 | 49 of 58 (84.5%) | libresolv-79, libresolv-68.120.2 |
 | syslog | syslog-385 | 26 of 40 (65.0%) | syslog-406 |
 | configd | configd-1109.120.1 | 277 of 299 (92.6%) | configd-1405.120.5 |
 | bootp | bootp-413.100.4 | 159 of 166 (95.8%) | |

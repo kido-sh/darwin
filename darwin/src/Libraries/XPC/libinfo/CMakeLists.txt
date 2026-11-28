@@ -45,6 +45,7 @@ target_include_directories(XPC_libinfo_static PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/membership.subproj
     ${CMAKE_CURRENT_SOURCE_DIR}/compat
     ${CMAKE_CURRENT_SOURCE_DIR}/../../mDNSResponder/mDNSShared
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../libresolv
     ${CMAKE_CURRENT_SOURCE_DIR}/../../libresolv/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../libSystem/libc
     ${CMAKE_CURRENT_SOURCE_DIR}/../../libSystem/libc/include

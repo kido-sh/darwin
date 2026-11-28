@@ -339,10 +339,10 @@ let
     }
     {
       name = "libresolv";
-      version = "68.120.2";
-      spdx = "APSL-2.0 AND ISC AND BSD-3-Clause";
+      version = "96";
+      spdx = "APSL-2.0 AND ISC AND BSD-2-Clause-FreeBSD AND BSD-3-Clause";
       purpose = "LIBRARY";
-      downloadLocation = "https://github.com/apple-oss-distributions/libresolv/tree/libresolv-68.120.2";
+      downloadLocation = "https://github.com/apple-oss-distributions/libresolv/tree/libresolv-96";
       supplier = "Organization: Apple Inc.";
       where = "/usr/lib/libSystem.B.dylib";
     }

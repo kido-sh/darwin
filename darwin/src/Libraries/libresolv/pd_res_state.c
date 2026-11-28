@@ -15,5 +15,6 @@
  * An explicit initializer forces a real BSS definition instead.
  */
 #include <resolv.h>
+#undef _res
 
 struct __res_state _res = {0};

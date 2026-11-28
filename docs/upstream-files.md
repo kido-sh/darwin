@@ -548,11 +548,14 @@ Generated from the tree at the commit that added it. For every file whose upstre
 | darwin/src/Libraries/objc4/macosx.internal/System/Library/Frameworks/System.framework/Versions/B/PrivateHeaders/pthread/tsd_private.h | private/pthread/tsd_private.h (copy, 90% alike) | PureDarwin (last 2026-07-24) | +29/-33 | notice |
 | darwin/src/Libraries/objc4/macosx.internal/System/Library/Frameworks/System.framework/Versions/B/PrivateHeaders/pthread/workqueue_private.h | private/pthread/workqueue_private.h (copy, 99% alike) | PureDarwin (last 2026-07-24) | +3/-0 | notice |
 
-## libresolv-68.120.2 (https://github.com/apple-oss-distributions/libresolv)
+## libresolv-96 (https://github.com/apple-oss-distributions/libresolv)
 
 | File | Release file | Changed by | +/- | Notice |
 |---|---|---|---|---|
-| darwin/src/Libraries/libresolv/dns_util.c | dns_util.c | PureDarwin (last 2026-07-16) | +13/-57 | notice |
+| darwin/src/Libraries/libresolv/dst_api.c | dst_api.c | PureDarwin (last 2026-11-28) | +29/-5 | permissive needs no change notice |
+| darwin/src/Libraries/libresolv/mtctxres.c | mtctxres.c | PureDarwin (last 2026-11-28) | +3/-6 | permissive needs no change notice |
+| darwin/src/Libraries/libresolv/res_init.c | res_init.c | PureDarwin (last 2026-11-28) | +1/-0 | permissive needs no change notice |
+| darwin/src/Libraries/libresolv/res_state.c | res_state.c | PureDarwin (last 2026-11-28) | +11/-8 | permissive needs no change notice |
 | darwin/src/Userspace/shell_cmds/uudecode/base64.c | base64.c (copy, 97% alike) | PureDarwin (last 2026-07-18) | +6/-15 | permissive needs no change notice |
 | darwin/src/Userspace/shell_cmds/uuencode/base64.c | base64.c (copy, 97% alike) | PureDarwin (last 2026-07-18) | +6/-15 | permissive needs no change notice |
 

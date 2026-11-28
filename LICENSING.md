@@ -81,7 +81,7 @@ the release a directory came from and the other licenses its files carry.
 | `darwin/src/Libraries/Security/corecrypto/**` | `Apache-2.0` | kido's corecrypto glue for Security |
 | `darwin/src/Libraries/Security/{certificates,compat,include,tools}/**`, `darwin/src/Libraries/Security/Security.exports` | `BSD-2-Clause` | PureDarwin. Also `MPL-2.0`, `MPL-2.0 OR BSD-2-Clause`, and `APSL-2.0` (copies of three xnu headers). kido's compat/kido_certificate_legacy.c is `Apache-2.0` |
 | `darwin/src/Libraries/CommonCrypto/**` | `APSL-2.0` | CommonCrypto-60178.120.3. PureDarwin's rewrites are `MPL-2.0 OR BSD-2-Clause` |
-| `darwin/src/Libraries/libresolv/**` | `APSL-2.0` | libresolv-68.120.2. Also `ISC`, `BSD-2-Clause`, `BSD-3-Clause`, `BSD-4-Clause-UC` |
+| `darwin/src/Libraries/libresolv/**` | `APSL-2.0` | libresolv-96. Also `ISC`, `BSD-2-Clause`, `BSD-2-Clause-FreeBSD`, `BSD-3-Clause`, `BSD-4-Clause-UC` |
 | `darwin/src/Libraries/syslog/**` | `APSL-2.0` | syslog-385. Also `BSD-3-Clause`, `BSD-4-Clause-UC` |
 | `darwin/src/Libraries/{SystemConfiguration,libSystemConfiguration}/**` | `APSL-2.0` | configd-1109.120.1 |
 | `darwin/src/Libraries/bootp/**` | `APSL-2.0` | bootp-413.100.4. Also `BSD-4-Clause-UC` |
